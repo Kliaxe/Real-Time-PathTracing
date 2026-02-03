@@ -1,0 +1,78 @@
+# ----------------------------------------------------------------------------------------------------------------------
+# Real-Time PathTracing - Git Ignore
+# - Keep source + resources tracked
+# - Ignore generated build artifacts (CMake / MSVC / Ninja)
+# ----------------------------------------------------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Generated folders
+#
+
+Build/
+Install/
+Intermediate/
+Binaries/
+
+# Optional IDE build roots (Visual Studio CMakeSettings.json uses ./out/)
+out/
+
+# CMake install output (if you use CMAKE_INSTALL_PREFIX in-tree)
+_install/
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Visual Studio / Rider / VSCode / Cursor caches
+#
+
+.vs/
+.idea/
+.vscode/
+
+# Cursor user data (optional, keep if you prefer)
+.cursor/
+
+# ----------------------------------------------------------------------------------------------------------------------
+# CMake / Build system outputs
+#
+
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+*.ninja
+.ninja_deps
+.ninja_log
+
+# CMake presets user file (machine-specific)
+CMakeUserPresets.json
+
+# MSBuild / Visual Studio generated files (if any ever land in-tree)
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.VC.db
+*.VC.VC.opendb
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Compiler/linker outputs (mostly covered by Intermediate/ + Binaries/, but kept for safety)
+#
+
+*.obj
+*.o
+*.pch
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Logs / runtime configs (the app can emit these next to the exe)
+#
+
+log_*.txt
+*.ini
+
