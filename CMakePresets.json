@@ -1,0 +1,86 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 23,
+    "patch": 0
+  },
+
+  "configurePresets": [
+    {
+      "name": "base-x64",
+      "displayName": "Base (x64)",
+      "description": "Common settings for all x64 presets.",
+      "hidden": true,
+
+      "generator": "Ninja",
+
+      "binaryDir": "${sourceDir}/Build/${presetName}",
+
+      "cacheVariables": {
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/Install/${presetName}"
+      }
+    },
+
+    {
+      "name": "x64-Debug",
+      "displayName": "x64 Debug",
+      "description": "Ninja single-config Debug build.",
+      "inherits": "base-x64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "x64-Release",
+      "displayName": "x64 Release",
+      "description": "Ninja single-config Release build.",
+      "inherits": "base-x64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "x64-RelWithDebInfo",
+      "displayName": "x64 RelWithDebInfo",
+      "description": "Ninja single-config RelWithDebInfo build.",
+      "inherits": "base-x64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "x64-MinSizeRel",
+      "displayName": "x64 MinSizeRel",
+      "description": "Ninja single-config MinSizeRel build.",
+      "inherits": "base-x64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel"
+      }
+    }
+  ],
+
+  "buildPresets": [
+    {
+      "name": "x64-Debug",
+      "displayName": "Build x64 Debug",
+      "configurePreset": "x64-Debug"
+    },
+    {
+      "name": "x64-Release",
+      "displayName": "Build x64 Release",
+      "configurePreset": "x64-Release"
+    },
+    {
+      "name": "x64-RelWithDebInfo",
+      "displayName": "Build x64 RelWithDebInfo",
+      "configurePreset": "x64-RelWithDebInfo"
+    },
+    {
+      "name": "x64-MinSizeRel",
+      "displayName": "Build x64 MinSizeRel",
+      "configurePreset": "x64-MinSizeRel"
+    }
+  ]
+}
+
