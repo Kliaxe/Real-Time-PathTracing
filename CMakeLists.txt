@@ -17,6 +17,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ----------------------------------------------------------------------------------------------------------------------
+# nvpro_core2 download cache
+# - nvpro_core2 defaults to creating "_downloaded_resources" in the source root.
+# - Keep the repo clean by putting it under the active build tree instead.
+#
+
+if(NOT DEFINED NVPRO_CORE2_DOWNLOAD_DIR)
+    set(NVPRO_CORE2_DOWNLOAD_DIR
+        "${CMAKE_BINARY_DIR}/_downloaded_resources"
+        CACHE PATH "nvpro_core2 download/cache directory"
+    )
+endif()
+
+# ----------------------------------------------------------------------------------------------------------------------
 # Output folders
 # - Build tree goes under ./Build
 # - Runtime outputs go under ./Binaries/<Config>

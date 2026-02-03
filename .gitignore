@@ -19,6 +19,9 @@ out/
 # CMake install output (if you use CMAKE_INSTALL_PREFIX in-tree)
 _install/
 
+# nvpro_core2 download cache (avoid "mystery" folders in repo root)
+_downloaded_resources/
+
 # ----------------------------------------------------------------------------------------------------------------------
 # Visual Studio / Rider / VSCode / Cursor caches
 #
