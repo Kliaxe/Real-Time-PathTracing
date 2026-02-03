@@ -28,10 +28,6 @@ _downloaded_resources/
 
 .vs/
 .idea/
-.vscode/
-
-# Cursor user data (optional, keep if you prefer)
-.cursor/
 
 # ----------------------------------------------------------------------------------------------------------------------
 # CMake / Build system outputs

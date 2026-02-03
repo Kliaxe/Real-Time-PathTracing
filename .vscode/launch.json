@@ -1,0 +1,57 @@
+{
+  // Debugging / running
+  // - Uses CMake Tools to resolve the active "launch target" executable path.
+  // - Keep the CMake Tools status bar set to:
+  //   - Configure preset: x64-Debug (or whatever you prefer)
+  //   - Launch target: RealTimePathTracing
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // Standard interactive run.
+      "name": "RealTimePathTracing (CMake Tools)",
+      "type": "cppvsdbg",
+      "request": "launch",
+
+      // Resolved by CMake Tools (requires a successful configure).
+      "program": "${command:cmake.launchTargetPath}",
+
+      "args": [],
+      "stopAtEntry": false,
+
+      // Prefer running next to the exe (matches how nvpro_core2 samples expect to run).
+      "cwd": "${command:cmake.launchTargetDirectory}",
+
+      // Ensure the exe directory is in PATH (DLL resolution / shader tools, etc.).
+      "environment": [
+        {
+          "name": "PATH",
+          "value": "${env:PATH};${command:cmake.launchTargetDirectory}"
+        }
+      ],
+
+      "console": "integratedTerminal"
+    },
+    {
+      // Headless run (writes image next to the exe).
+      "name": "RealTimePathTracing (Headless)",
+      "type": "cppvsdbg",
+      "request": "launch",
+
+      "program": "${command:cmake.launchTargetPath}",
+
+      "args": ["--headless"],
+      "stopAtEntry": false,
+      "cwd": "${command:cmake.launchTargetDirectory}",
+
+      "environment": [
+        {
+          "name": "PATH",
+          "value": "${env:PATH};${command:cmake.launchTargetDirectory}"
+        }
+      ],
+
+      "console": "integratedTerminal"
+    }
+  ]
+}
+

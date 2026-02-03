@@ -18,6 +18,7 @@
       "binaryDir": "${sourceDir}/Build/${presetName}",
 
       "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "CMAKE_INSTALL_PREFIX": "${sourceDir}/Install/${presetName}"
       }
     },

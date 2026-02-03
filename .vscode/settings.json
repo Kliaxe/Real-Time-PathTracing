@@ -1,0 +1,22 @@
+{
+  // Use CMake Tools for IntelliSense include paths/defines.
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+
+  // Always use your CMakePresets.json (keeps VS Code + build consistent).
+  "cmake.useCMakePresets": "always",
+
+  // Force VS Code to use Visual Studio's CMake (avoid Strawberry/MinGW CMake).
+  // NOTE: This path exists on your machine (VS 18 Community).
+  "cmake.cmakePath": "${env:ProgramFiles}\\Microsoft Visual Studio\\18\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe",
+
+  // Build when launching (cmake.launchTargetPath / cmake.launchTargetDirectory triggers a build).
+  "cmake.buildBeforeRun": true,
+
+  // Prefer the VS developer environment (ensures cl/link/lib are correct).
+  "cmake.useVsDeveloperEnvironment": "always",
+
+  // Reasonable defaults; you can change these from the CMake Tools status bar.
+  "cmake.configurePreset": "x64-Debug",
+  "cmake.buildPreset": "x64-Debug"
+}
+
