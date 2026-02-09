@@ -1,4 +1,7 @@
-#include "SceneBuilder.h"
+#include "SceneUploader.h"
+
+// Role:
+// Performs glTF parsing, texture/material packing, and import upload for runtime scenes.
 
 #include <algorithm>
 #include <span>
@@ -94,8 +97,6 @@ const tinygltf::Value::Object* FindMaterialExtensionObject(const tinygltf::Mater
   return &extIt->second.Get<tinygltf::Value::Object>();
 }
 
-// Parse canonical CPU-side material attributes from glTF core material fields
-// and selected KHR material extensions.
 MaterialAttributes ParseMaterialAttributes(const tinygltf::Material& src)
 {
   MaterialAttributes dst{};
@@ -130,8 +131,6 @@ MaterialAttributes ParseMaterialAttributes(const tinygltf::Material& src)
   if(const tinygltf::Value::Object* ext = FindMaterialExtensionObject(src, "KHR_materials_specular"))
   {
     dst.specular = ReadObjectNumber(*ext, "specularFactor", dst.specular);
-
-    // Approximate tint from average RGB if color factor is present.
     const glm::vec3 specColor = ReadObjectVec3(*ext, "specularColorFactor", glm::vec3(1.0f));
     dst.specularTint          = (specColor.x + specColor.y + specColor.z) / 3.0f;
   }
@@ -142,14 +141,11 @@ MaterialAttributes ParseMaterialAttributes(const tinygltf::Material& src)
   if(const tinygltf::Value::Object* ext = FindMaterialExtensionObject(src, "KHR_materials_sheen"))
   {
     dst.sheenRoughness = ReadObjectNumber(*ext, "sheenRoughnessFactor", dst.sheenRoughness);
-
-    // Approximate tint from average RGB if color factor is present.
     const glm::vec3 sheenColor = ReadObjectVec3(*ext, "sheenColorFactor", glm::vec3(0.0f));
     dst.sheenTint              = (sheenColor.x + sheenColor.y + sheenColor.z) / 3.0f;
   }
   if(const tinygltf::Value::Object* ext = FindMaterialExtensionObject(src, "KHR_materials_volume"))
   {
-    // Not a perfect Disney mapping, but a useful placeholder for future usage.
     dst.subsurface = ReadObjectNumber(*ext, "thicknessFactor", dst.subsurface);
   }
 
@@ -164,7 +160,6 @@ MaterialAttributes ParseMaterialAttributes(const tinygltf::Material& src)
   dst.clearcoat          = Clamp01(dst.clearcoat);
   dst.clearcoatRoughness = Clamp01(dst.clearcoatRoughness);
   dst.transmission       = Clamp01(dst.transmission);
-
   return dst;
 }
 
@@ -183,8 +178,8 @@ shaderio::GltfMetallicRoughness ToGpuMaterial(const MaterialAttributes& material
 
 }  // namespace
 
-SceneBuilder::SceneBuilder(nvapp::Application* app, nvvk::ResourceAllocator* allocator, nvvk::StagingUploader* stagingUploader,
-                           nvvk::SamplerPool* samplerPool)
+SceneUploader::SceneUploader(nvapp::Application* app, nvvk::ResourceAllocator* allocator, nvvk::StagingUploader* stagingUploader,
+                             nvvk::SamplerPool* samplerPool)
     : m_App(app)
     , m_Allocator(allocator)
     , m_StagingUploader(stagingUploader)
@@ -192,7 +187,7 @@ SceneBuilder::SceneBuilder(nvapp::Application* app, nvvk::ResourceAllocator* all
 {
 }
 
-int SceneBuilder::BuildScene(VkCommandBuffer cmd, const BuildInput& input, BuildState& state) const
+int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadState& state) const
 {
   auto appendRgbaTexture = [&](const std::span<const unsigned char> rgbaPixels, uint32_t width, uint32_t height) -> int {
     if(width == 0 || height == 0 || rgbaPixels.empty())
@@ -268,7 +263,6 @@ int SceneBuilder::BuildScene(VkCommandBuffer cmd, const BuildInput& input, Build
   auto loadBaseColorTextureIndices = [&](const tinygltf::Model& model, const std::filesystem::path& modelPath) -> std::vector<int> {
     std::vector<int> textureMap(model.textures.size(), -1);
     std::vector<int> sourceMap(model.images.size(), -1);
-
     for(size_t i = 0; i < model.textures.size(); ++i)
     {
       const tinygltf::Texture& texture = model.textures[i];
@@ -276,16 +270,13 @@ int SceneBuilder::BuildScene(VkCommandBuffer cmd, const BuildInput& input, Build
       {
         continue;
       }
-
       const int sourceIndex = texture.source;
       if(sourceMap[sourceIndex] < 0)
       {
         sourceMap[sourceIndex] = loadBaseColorImageTexture(model.images[sourceIndex], modelPath);
       }
-
       textureMap[i] = sourceMap[sourceIndex];
     }
-
     return textureMap;
   };
 
@@ -315,39 +306,29 @@ int SceneBuilder::BuildScene(VkCommandBuffer cmd, const BuildInput& input, Build
 
       int alphaMode = shaderio::GltfAlphaMode::eOpaque;
       if(src.alphaMode == "MASK")
-      {
         alphaMode = shaderio::GltfAlphaMode::eMask;
-      }
       else if(src.alphaMode == "BLEND")
-      {
         alphaMode = shaderio::GltfAlphaMode::eBlend;
-      }
 
       state.sceneResource.materials.push_back(
           ToGpuMaterial(parsedMaterial, baseColorTextureIndex, static_cast<float>(src.alphaCutoff), alphaMode));
     }
-
     return {.offset = materialOffset, .count = static_cast<uint32_t>(state.materialAttributes.size() - attributesOffset)};
   };
 
   auto applyMaterialOverrides = [&](const MaterialRange& range, const std::vector<SceneMaterialOverride>& overrides) {
     if(range.count == 0 || overrides.empty())
-    {
       return;
-    }
 
     for(const SceneMaterialOverride& overrideDef : overrides)
     {
       uint32_t begin = range.offset;
       uint32_t end   = range.offset + range.count;
-
       if(overrideDef.materialSlot >= 0)
       {
         const uint32_t slot = static_cast<uint32_t>(overrideDef.materialSlot);
         if(slot >= range.count)
-        {
           continue;
-        }
         begin = range.offset + slot;
         end   = begin + 1;
       }
@@ -374,9 +355,6 @@ int SceneBuilder::BuildScene(VkCommandBuffer cmd, const BuildInput& input, Build
   }
 
   const std::vector<std::filesystem::path> contentDirs = nvsamples::GetContentDirs();
-
-  // Compose the final runtime scene from all scene model entries.
-  // Each entry may contribute multiple meshes/instances and optional material presets.
   for(const SceneModelEntry& modelEntry : input.sceneDefinition.models)
   {
     const std::filesystem::path modelPath = nvutils::findFile(modelEntry.assetPath, contentDirs);
@@ -391,9 +369,6 @@ int SceneBuilder::BuildScene(VkCommandBuffer cmd, const BuildInput& input, Build
                               materialRange.offset);
 
     uint32_t importedInstanceCount = static_cast<uint32_t>(state.sceneResource.instances.size()) - instanceStart;
-
-    // If the source model has no explicit instances, instantiate each imported
-    // mesh once to keep behavior robust across minimal glTF assets.
     if(importedInstanceCount == 0)
     {
       const uint32_t meshCount = static_cast<uint32_t>(state.sceneResource.meshes.size()) - meshStartIndex;
@@ -402,16 +377,13 @@ int SceneBuilder::BuildScene(VkCommandBuffer cmd, const BuildInput& input, Build
         const uint32_t meshIndex = meshStartIndex + meshLocal;
         uint32_t       materialIndex = materialRange.offset;
         if(meshIndex < state.sceneResource.meshMaterialIndices.size())
-        {
           materialIndex = state.sceneResource.meshMaterialIndices[meshIndex];
-        }
         state.sceneResource.instances.push_back(
             {.transform = glm::mat4(1.0f), .materialIndex = materialIndex, .meshIndex = meshIndex});
       }
       importedInstanceCount = static_cast<uint32_t>(state.sceneResource.instances.size()) - instanceStart;
     }
 
-    // Apply scene-authored entry transform after import to preserve glTF local transforms.
     for(uint32_t i = 0; i < importedInstanceCount; ++i)
     {
       shaderio::GltfInstance& instance = state.sceneResource.instances[instanceStart + i];
