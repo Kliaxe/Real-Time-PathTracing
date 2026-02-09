@@ -46,6 +46,16 @@ struct VSout
   float2 worldTexCoord : TEXCOORD0;
 };
 
+float2 dirToLatLongUv(float3 dir)
+{
+  const float kInvPi = 0.31830988618;
+  const float kInvTwoPi = 0.15915494309;
+  float3 n = normalize(dir);
+  float  u = 0.5 - atan2(n.z, n.x) * kInvTwoPi;
+  float  v = 0.5 - asin(clamp(n.y, -1.0, 1.0)) * kInvPi;
+  return float2(u, v);
+}
+
 // Output of the fragment shader.
 struct PSout
 {
@@ -71,6 +81,19 @@ VSout vertexMain(VSin input, uint vertexIndex : SV_VertexID)
 
   GltfSceneInfo* sceneInfo = pushConst.sceneInfoAddress;
 
+  if(instanceIndex < 0)
+  {
+    const float2 kFullscreenPos[3] = {float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0)};
+    float2 ndc = kFullscreenPos[vertexIndex];
+
+    VSout output;
+    output.sv_position   = float4(ndc, 0.0, 1.0);
+    output.worldPos      = float3(0.0);
+    output.worldNormal   = float3(0.0, 1.0, 0.0);
+    output.worldTexCoord = float2(0.0);
+    return output;
+  }
+
   GltfInstance instance = sceneInfo.instances[instanceIndex];
   GltfMesh     meshIo   = sceneInfo.meshes[instance.meshIndex];
 
@@ -95,6 +118,27 @@ VSout vertexMain(VSin input, uint vertexIndex : SV_VertexID)
 PSout fragmentMain(VSout stage)
 {
   GltfSceneInfo         sceneInfo = pushConst.sceneInfoAddress[0];
+  if(pushConst.instanceIndex < 0)
+  {
+    float3 color = sceneInfo.backgroundColor;
+    if(sceneInfo.useHdrEnv != 0 && sceneInfo.environmentTextureIndex >= 0)
+    {
+      float2 viewport = max(sceneInfo.viewportSize, float2(1.0, 1.0));
+      float2 uv       = stage.sv_position.xy / viewport;
+      float2 ndc      = float2(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0);
+      float4 worldPosH = mul(float4(ndc, 1.0, 1.0), sceneInfo.projInvMatrix);
+      float  w          = (abs(worldPosH.w) > 1e-6) ? worldPosH.w : 1.0;
+      float3 worldPos   = worldPosH.xyz / w;
+      float3 worldDir   = normalize(worldPos - sceneInfo.cameraPosition);
+      float2 envUv      = dirToLatLongUv(worldDir);
+      color = textures[sceneInfo.environmentTextureIndex].Sample(envUv).xyz;
+    }
+
+    PSout output;
+    output.color = float4(color, 1.0);
+    return output;
+  }
+
   GltfInstance          instance  = sceneInfo.instances[pushConst.instanceIndex];
   GltfMetallicRoughness material  = sceneInfo.materials[instance.materialIndex];
 
@@ -131,11 +175,17 @@ PSout fragmentMain(VSout stage)
   float3 L = normalize(light.direction);
 
   // Base color from factor and optional texture.
-  float3 albedo = material.baseColorFactor.xyz;
+  float4 baseColor = material.baseColorFactor;
   if(material.baseColorTextureIndex > -1)
   {
-    albedo *= textures[material.baseColorTextureIndex].Sample(stage.worldTexCoord).xyz;
+    baseColor *= textures[material.baseColorTextureIndex].Sample(stage.worldTexCoord);
   }
+
+  if(material.alphaMode == GltfAlphaMode::eMask && baseColor.w < material.alphaCutoff)
+  {
+    discard;
+  }
+  float3 albedo = baseColor.xyz;
 
   // Metallic/roughness with optional UI override.
   float metallic  = material.metallicFactor;
@@ -153,18 +203,7 @@ PSout fragmentMain(VSout stage)
   float3 color = pbrMetallicRoughness(albedo, metallic, roughness, N, V, L);
   color *= light.color * light.intensity;
 
-  // Ambient term.
-  float3 ambient = sceneInfo.backgroundColor;
-  if(sceneInfo.useSky == 1)
-  {
-    float3 skyUpDir    = float3(0, 1, 0);
-    float3 groundColor = sceneInfo.skySimpleParam.groundColor;
-    float3 skyColor    = sceneInfo.skySimpleParam.skyColor;
-    ambient            = lerp(groundColor, skyColor, dot(N, skyUpDir) * 0.5 + 0.5);
-  }
-  color += ambient * albedo * 0.025;
-
   PSout output;
-  output.color = float4(clamp(color, float3(0.0), float3(1.0)), 1.0);
+  output.color = float4(max(color, float3(0.0)), 1.0);
   return output;
 }

@@ -65,13 +65,24 @@ struct TriangleMesh
 };
 
 // Minimal material model for the foundation sample.
+enum GltfAlphaMode
+{
+  eOpaque = 0,
+  eMask   = 1,
+  eBlend  = 2
+};
+
 struct GltfMetallicRoughness
 {
   float4 baseColorFactor;             // Base color factor (RGBA)
   float  metallicFactor;              // 0 = dielectric, 1 = metallic
   float  roughnessFactor;             // 0 = smooth, 1 = rough
   int    baseColorTextureIndex = -1;  // Base color texture index (optional)
+  float  alphaCutoff           = 0.5f;      // Alpha cutoff (used when alphaMode == eMask)
+  int    alphaMode             = GltfAlphaMode::eOpaque;  // Opaque / Mask / Blend
+  int    _pad0                 = 0;
 };
+CHECK_STRUCT_ALIGNMENT(GltfMetallicRoughness)
 
 // GltfMesh: points into one uploaded GLTF binary buffer.
 struct GltfMesh
@@ -120,8 +131,14 @@ struct GltfSceneInfo
   float4x4               viewInvMatrix;      // Inverse view matrix
   float3                 cameraPosition;     // Camera position
   int                    useSky;             // Sky toggle
+  int                    useHdrEnv;          // HDRI background toggle
+  int                    environmentTextureIndex;  // Texture index for selected HDRI
+  int                    _pad1;
   float3                 backgroundColor;    // Background color if no sky
   int                    numLights;          // Punctual light count (up to 2)
+  float2                 viewportSize;       // Viewport size in pixels
+  int                    _pad2;
+  int                    _pad3;
   GltfInstance*          instances;          // GPU address of instances
   GltfMesh*              meshes;             // GPU address of meshes
   GltfMetallicRoughness* materials;          // GPU address of materials

@@ -51,13 +51,16 @@ struct GltfSceneResource
 
   // meshToBufferIndex[meshIndex] = bufferIndex into bGltfDatas
   std::vector<uint32_t> meshToBufferIndex;
+  // meshMaterialIndices[meshIndex] = material index used by that mesh primitive
+  std::vector<uint32_t> meshMaterialIndices;
 };
 
 // Loads a GLTF/GLB file from disk.
 tinygltf::Model LoadGltfResources(const std::filesystem::path& filename);
 
 // Imports GLTF geometry into GPU-friendly buffers.
-void ImportGltfData(GltfSceneResource& sceneResource, const tinygltf::Model& model, nvvk::StagingUploader& stagingUploader, bool importInstance = false);
+void ImportGltfData(GltfSceneResource& sceneResource, const tinygltf::Model& model, nvvk::StagingUploader& stagingUploader,
+                    bool importInstance = false, uint32_t materialOffset = 0, uint32_t fallbackMaterialIndex = 0);
 
 // Creates GPU buffers for meshes/instances/materials/sceneInfo.
 void CreateGltfSceneInfoBuffer(GltfSceneResource& sceneResource, nvvk::StagingUploader& stagingUploader);

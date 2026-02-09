@@ -42,6 +42,10 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <imgui/backends/imgui_impl_vulkan.h>
 #include <imgui/imgui.h>
+#include <algorithm>
+#include <memory>
+#include <span>
+#include <string>
 
 #include "Shaders/ShaderIo.h"
 
@@ -77,6 +81,8 @@
 #include "Common/GltfUtils.hpp"
 #include "Common/PathUtils.hpp"
 #include "Common/Utils.hpp"
+#include "Scene/SceneAssetCatalog.h"
+#include "Scene/SceneBuilder.h"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Foundation app element
@@ -143,7 +149,10 @@ public:
     };
     m_GBuffers.init(gBufferInit);
 
-    CreateScene();
+    m_SceneAssetCatalog = std::make_unique<nvsamples::SceneAssetCatalog>();
+    DiscoverAssets();
+    m_SceneBuilder = std::make_unique<nvsamples::SceneBuilder>(m_App, &m_Allocator, &m_StagingUploader, &m_SamplerPool);
+    CreateScene(true);
     CreateGraphicsDescriptorSetLayout();
     CreateGraphicsPipelineLayout();
     CompileAndCreateGraphicsShaders();
@@ -165,18 +174,8 @@ public:
     vkDestroyShaderEXT(device, m_VertexShader, nullptr);
     vkDestroyShaderEXT(device, m_FragmentShader, nullptr);
 
-    m_Allocator.destroyBuffer(m_SceneResource.bSceneInfo);
-    m_Allocator.destroyBuffer(m_SceneResource.bMeshes);
-    m_Allocator.destroyBuffer(m_SceneResource.bMaterials);
-    m_Allocator.destroyBuffer(m_SceneResource.bInstances);
-    for(auto& gltfData : m_SceneResource.bGltfDatas)
-    {
-      m_Allocator.destroyBuffer(gltfData);
-    }
-    for(auto& texture : m_Textures)
-    {
-      m_Allocator.destroyImage(texture);
-    }
+    DestroySceneResources();
+    DestroyTextures();
 
     m_GBuffers.deinit();
     m_StagingUploader.deinit();
@@ -205,15 +204,81 @@ public:
         nvgui::CameraWidget(m_CameraManip);
       }
 
+      if(ImGui::CollapsingHeader("Assets"))
+      {
+        if(!m_SceneDefinitions.empty())
+        {
+          if(ImGui::BeginCombo("Scene", m_SceneDefinitions[m_SelectedSceneIndex].label.c_str()))
+          {
+            for(size_t i = 0; i < m_SceneDefinitions.size(); ++i)
+            {
+              const bool selected = (m_SelectedSceneIndex == i);
+              if(ImGui::Selectable(m_SceneDefinitions[i].label.c_str(), selected))
+              {
+                m_SelectedSceneIndex   = i;
+                m_SceneReloadRequested = true;
+              }
+              if(selected)
+              {
+                ImGui::SetItemDefaultFocus();
+              }
+            }
+            ImGui::EndCombo();
+          }
+        }
+        else
+        {
+          ImGui::TextUnformatted("No scenes available");
+        }
+
+        if(!m_HdriAssets.empty())
+        {
+          if(ImGui::BeginCombo("HDRI", m_HdriAssets[m_SelectedHdriIndex].label.c_str()))
+          {
+            for(size_t i = 0; i < m_HdriAssets.size(); ++i)
+            {
+              const bool selected = (m_SelectedHdriIndex == i);
+              if(ImGui::Selectable(m_HdriAssets[i].label.c_str(), selected))
+              {
+                m_SelectedHdriIndex = i;
+                m_HdriReloadRequested = true;
+              }
+              if(selected)
+              {
+                ImGui::SetItemDefaultFocus();
+              }
+            }
+            ImGui::EndCombo();
+          }
+        }
+      }
+
       if(ImGui::CollapsingHeader("Environment"))
       {
+        bool useHdri = (m_SceneResource.sceneInfo.useHdrEnv != 0);
+        if(ImGui::Checkbox("Use HDRI", &useHdri))
+        {
+          m_SceneResource.sceneInfo.useHdrEnv = useHdri ? 1 : 0;
+        }
+
         bool useSky = (m_SceneResource.sceneInfo.useSky != 0);
         if(ImGui::Checkbox("Use Sky", &useSky))
         {
           m_SceneResource.sceneInfo.useSky = useSky ? 1 : 0;
         }
 
-        if(m_SceneResource.sceneInfo.useSky != 0)
+        if(m_SceneResource.sceneInfo.useHdrEnv != 0)
+        {
+          if(m_HdriAssets.empty())
+          {
+            ImGui::TextUnformatted("No HDRIs found in Content/HDRI");
+          }
+          else
+          {
+            ImGui::Text("Active HDRI: %s", m_HdriAssets[m_SelectedHdriIndex].label.c_str());
+          }
+        }
+        else if(m_SceneResource.sceneInfo.useSky != 0)
         {
           nvgui::skySimpleParametersUI(m_SceneResource.sceneInfo.skySimpleParam);
         }
@@ -276,6 +341,17 @@ public:
   {
     NVVK_DBG_SCOPE(cmd);
 
+    if(m_SceneReloadRequested || m_HdriReloadRequested)
+    {
+      RebuildSceneFromSelection();
+      m_SceneReloadRequested = false;
+      m_HdriReloadRequested  = false;
+    }
+    if(m_SceneResource.bSceneInfo.buffer == VK_NULL_HANDLE)
+    {
+      return;
+    }
+
     UpdateSceneBuffer(cmd);
     RasterScene(cmd);
     PostProcess(cmd);
@@ -310,6 +386,54 @@ public:
   }
 
 private:
+  void DiscoverAssets()
+  {
+    const nvsamples::SceneAssetCatalogData catalogData = m_SceneAssetCatalog->Discover();
+    m_ModelAssets                                 = catalogData.modelAssets;
+    m_HdriAssets                                  = catalogData.hdriAssets;
+    m_SceneDefinitions                            = catalogData.sceneDefinitions;
+    m_SelectedSceneIndex                          = catalogData.selectedSceneIndex;
+    m_SelectedHdriIndex                           = catalogData.selectedHdriIndex;
+
+    // Emit one clear startup warning per missing asset reference.
+    for(const std::string& warning : catalogData.warnings)
+    {
+      LOGW("%s\n", warning.c_str());
+    }
+  }
+
+  void DestroySceneResources()
+  {
+    m_Allocator.destroyBuffer(m_SceneResource.bSceneInfo);
+    m_Allocator.destroyBuffer(m_SceneResource.bMeshes);
+    m_Allocator.destroyBuffer(m_SceneResource.bMaterials);
+    m_Allocator.destroyBuffer(m_SceneResource.bInstances);
+    for(auto& gltfData : m_SceneResource.bGltfDatas)
+    {
+      m_Allocator.destroyBuffer(gltfData);
+    }
+    m_SceneResource = {};
+    m_MaterialAttributes.clear();
+  }
+
+  void DestroyTextures()
+  {
+    for(auto& texture : m_Textures)
+    {
+      m_Allocator.destroyImage(texture);
+    }
+    m_Textures.clear();
+  }
+
+  void RebuildSceneFromSelection()
+  {
+    vkQueueWaitIdle(m_App->getQueue(0).queue);
+    DestroySceneResources();
+    DestroyTextures();
+    CreateScene(false);
+    UpdateTextures();
+  }
+
   void PostProcess(VkCommandBuffer cmd)
   {
     NVVK_DBG_SCOPE(cmd);
@@ -321,46 +445,42 @@ private:
     nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT);
   }
 
-  void CreateScene()
+  void CreateScene(bool resetCamera)
   {
     SCOPED_TIMER(__FUNCTION__);
 
-    VkCommandBuffer cmd = m_App->createTempCmdBuffer();
-
-    // Load GLTF models.
-    tinygltf::Model teapotModel =
-        nvsamples::LoadGltfResources(nvutils::findFile("Models/Teapot.gltf", nvsamples::GetContentDirs()));
-    tinygltf::Model planeModel =
-        nvsamples::LoadGltfResources(nvutils::findFile("Models/Plane.gltf", nvsamples::GetContentDirs()));
-
-    // Load one texture.
+    if(m_SceneDefinitions.empty())
     {
-      const std::filesystem::path imageFilename = nvutils::findFile("Textures/TiledFloor.png", nvsamples::GetContentDirs());
-      nvvk::Image texture = nvsamples::LoadAndCreateImage(cmd, m_StagingUploader, m_App->getDevice(), imageFilename);
-      NVVK_DBG_NAME(texture.image);
-      m_SamplerPool.acquireSampler(texture.descriptor.sampler);
-      m_Textures.emplace_back(texture);
+      LOGE("No scenes available\n");
+      return;
+    }
+    if(m_SelectedSceneIndex >= m_SceneDefinitions.size())
+    {
+      m_SelectedSceneIndex = 0;
     }
 
-    // Upload GLTF resources.
-    nvsamples::ImportGltfData(m_SceneResource, teapotModel, m_StagingUploader);
-    nvsamples::ImportGltfData(m_SceneResource, planeModel, m_StagingUploader);
+    VkCommandBuffer cmd = m_App->createTempCmdBuffer();
+    const nvsamples::SceneDefinition& selectedScene = m_SceneDefinitions[m_SelectedSceneIndex];
+    std::optional<std::filesystem::path> selectedHdriRelativePath;
+    if(!m_HdriAssets.empty())
+    {
+      if(m_SelectedHdriIndex >= m_HdriAssets.size())
+      {
+        m_SelectedHdriIndex = 0;
+      }
+      selectedHdriRelativePath = m_HdriAssets[m_SelectedHdriIndex].relativePath;
+    }
 
-    // Materials.
-    m_SceneResource.materials = {
-        {.baseColorFactor = glm::vec4(0.8f, 1.0f, 0.6f, 1.0f), .metallicFactor = 0.5f, .roughnessFactor = 0.5f},
-        {.baseColorFactor = glm::vec4(1.0f), .metallicFactor = 0.1f, .roughnessFactor = 0.8f, .baseColorTextureIndex = 0},
+    nvsamples::SceneBuilder::BuildInput input{
+        .sceneDefinition          = selectedScene,
+        .selectedHdriRelativePath = selectedHdriRelativePath,
     };
-
-    // Instances.
-    m_SceneResource.instances = {
-        {.transform     = glm::translate(glm::mat4(1.0f), glm::vec3(0, 0, 0)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.5f)),
-         .materialIndex = 0,
-         .meshIndex     = 0},
-        {.transform     = glm::scale(glm::translate(glm::mat4(1.0f), glm::vec3(0, -0.9f, 0)), glm::vec3(2.f)),
-         .materialIndex = 1,
-         .meshIndex     = 1},
+    nvsamples::SceneBuilder::BuildState state{
+        .sceneResource      = m_SceneResource,
+        .textures           = m_Textures,
+        .materialAttributes = m_MaterialAttributes,
     };
+    const int environmentTextureIndex = m_SceneBuilder->BuildScene(cmd, input, state);
 
     nvsamples::CreateGltfSceneInfoBuffer(m_SceneResource, m_StagingUploader);
     m_StagingUploader.cmdUploadAppended(cmd);
@@ -368,6 +488,8 @@ private:
     // Scene info (GPU addresses).
     shaderio::GltfSceneInfo& sceneInfo = m_SceneResource.sceneInfo;
     sceneInfo.useSky                   = 0;
+    sceneInfo.useHdrEnv                = (environmentTextureIndex >= 0) ? 1 : 0;
+    sceneInfo.environmentTextureIndex  = environmentTextureIndex;
     sceneInfo.instances                = (shaderio::GltfInstance*)m_SceneResource.bInstances.address;
     sceneInfo.meshes                   = (shaderio::GltfMesh*)m_SceneResource.bMeshes.address;
     sceneInfo.materials                = (shaderio::GltfMetallicRoughness*)m_SceneResource.bMaterials.address;
@@ -375,6 +497,8 @@ private:
     // Environment defaults.
     sceneInfo.backgroundColor             = {0.85f, 0.85f, 0.85f};
     sceneInfo.numLights                   = 1;
+    sceneInfo.viewportSize                = glm::vec2(static_cast<float>(m_App->getViewportSize().width),
+                                                      static_cast<float>(m_App->getViewportSize().height));
     sceneInfo.punctualLights[0].color     = glm::vec3(1.0f);
     sceneInfo.punctualLights[0].intensity = 4.0f;
     sceneInfo.punctualLights[0].position  = glm::vec3(1.0f, 1.0f, 1.0f);
@@ -384,9 +508,11 @@ private:
 
     m_App->submitAndWaitTempCmdBuffer(cmd);
 
-    // Default camera.
-    m_CameraManip->setClipPlanes({0.01F, 100.0F});
-    m_CameraManip->setLookat({0.0F, 0.5F, 5.0}, {0.F, 0.F, 0.F}, {0.0F, 1.0F, 0.0F});
+    if(resetCamera)
+    {
+      m_CameraManip->setClipPlanes({0.01F, 100.0F});
+      m_CameraManip->setLookat({0.0F, 0.5F, 5.0}, {0.F, 0.F, 0.F}, {0.0F, 1.0F, 0.0F});
+    }
   }
 
   void CreateGraphicsDescriptorSetLayout()
@@ -394,7 +520,7 @@ private:
     nvvk::DescriptorBindings bindings;
     bindings.addBinding({.binding         = shaderio::BindingPoints::eTextures,
                          .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                         .descriptorCount = 10,
+                         .descriptorCount = kMaxTextureDescriptors,
                          .stageFlags      = VK_SHADER_STAGE_ALL},
                         VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
                             | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
@@ -434,8 +560,19 @@ private:
       return;
     }
 
+    const uint32_t textureCount = std::min(static_cast<uint32_t>(m_Textures.size()), kMaxTextureDescriptors);
+    if(textureCount == 0)
+    {
+      return;
+    }
+    if(textureCount < m_Textures.size())
+    {
+      LOGW("Texture count (%zu) exceeds descriptor capacity (%u). Extra textures will be ignored.\n", m_Textures.size(),
+           kMaxTextureDescriptors);
+    }
+
     nvvk::WriteSetContainer write;
-    VkWriteDescriptorSet    allTextures = m_DescPack.makeWrite(shaderio::BindingPoints::eTextures, 0, 0, uint32_t(m_Textures.size()));
+    VkWriteDescriptorSet    allTextures = m_DescPack.makeWrite(shaderio::BindingPoints::eTextures, 0, 0, textureCount);
     nvvk::Image*            allImages   = m_Textures.data();
     write.append(allTextures, allImages);
     vkUpdateDescriptorSets(m_App->getDevice(), write.size(), write.data(), 0, nullptr);
@@ -513,7 +650,11 @@ private:
     const glm::mat4& projMatrix = m_CameraManip->getPerspectiveMatrix();
 
     m_SceneResource.sceneInfo.viewProjMatrix  = projMatrix * viewMatrix;
+    m_SceneResource.sceneInfo.projInvMatrix   = glm::inverse(m_SceneResource.sceneInfo.viewProjMatrix);
+    m_SceneResource.sceneInfo.viewInvMatrix   = glm::inverse(viewMatrix);
     m_SceneResource.sceneInfo.cameraPosition = m_CameraManip->getEye();
+    m_SceneResource.sceneInfo.viewportSize   = glm::vec2(static_cast<float>(m_App->getViewportSize().width),
+                                                         static_cast<float>(m_App->getViewportSize().height));
     m_SceneResource.sceneInfo.instances       = (shaderio::GltfInstance*)m_SceneResource.bInstances.address;
     m_SceneResource.sceneInfo.meshes          = (shaderio::GltfMesh*)m_SceneResource.bMeshes.address;
     m_SceneResource.sceneInfo.materials       = (shaderio::GltfMetallicRoughness*)m_SceneResource.bMaterials.address;
@@ -540,8 +681,11 @@ private:
         .pValues    = &pushValues,
     };
 
+    const bool useHdriBackground = (m_SceneResource.sceneInfo.useHdrEnv != 0) && (m_SceneResource.sceneInfo.environmentTextureIndex >= 0);
+    const bool useProceduralSky  = (m_SceneResource.sceneInfo.useSky != 0) && !useHdriBackground;
+
     // Sky background (compute into HDR render target).
-    if(m_SceneResource.sceneInfo.useSky != 0)
+    if(useProceduralSky)
     {
       const glm::mat4& viewMatrix = m_CameraManip->getViewMatrix();
       const glm::mat4& projMatrix = m_CameraManip->getPerspectiveMatrix();
@@ -550,7 +694,7 @@ private:
     }
 
     VkRenderingAttachmentInfo colorAttachment = DEFAULT_VkRenderingAttachmentInfo;
-    colorAttachment.loadOp = (m_SceneResource.sceneInfo.useSky != 0) ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+    colorAttachment.loadOp = useProceduralSky ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
     colorAttachment.imageView  = m_GBuffers.getColorImageView(eImgRendered);
     colorAttachment.clearValue = {.color = {m_SceneResource.sceneInfo.backgroundColor.x, m_SceneResource.sceneInfo.backgroundColor.y,
                                             m_SceneResource.sceneInfo.backgroundColor.z, 1.0f}};
@@ -594,6 +738,17 @@ private:
     // No bound vertex buffers: the shader fetches from storage buffers.
     vkCmdSetVertexInputEXT(cmd, 0, nullptr, 0, nullptr);
 
+    if(useHdriBackground)
+    {
+      vkCmdSetDepthTestEnable(cmd, VK_FALSE);
+      vkCmdSetDepthWriteEnable(cmd, VK_FALSE);
+      pushValues.instanceIndex = -1;
+      vkCmdPushConstants2(cmd, &pushInfo);
+      vkCmdDraw(cmd, 3, 1, 0, 0);
+      vkCmdSetDepthWriteEnable(cmd, VK_TRUE);
+      vkCmdSetDepthTestEnable(cmd, VK_TRUE);
+    }
+
     for(size_t i = 0; i < m_SceneResource.instances.size(); ++i)
     {
       const uint32_t                  meshIndex = m_SceneResource.instances[i].meshIndex;
@@ -621,6 +776,7 @@ private:
 
 private:
   nvapp::Application* m_App = nullptr;  // Owning application
+  static constexpr uint32_t kMaxTextureDescriptors = 4096;
 
   nvvk::ResourceAllocator m_Allocator;      // Vulkan allocator
   nvvk::StagingUploader   m_StagingUploader; // Upload helper
@@ -639,12 +795,22 @@ private:
 
   nvsamples::GltfSceneResource m_SceneResource;   // Scene resources
   std::vector<nvvk::Image>     m_Textures;        // Texture images
+  std::vector<nvsamples::MaterialAttributes> m_MaterialAttributes;  // Canonical CPU-side material data
+  std::vector<nvsamples::AssetEntry> m_ModelAssets;
+  std::vector<nvsamples::AssetEntry> m_HdriAssets;
+  std::vector<nvsamples::SceneDefinition> m_SceneDefinitions;
+  size_t                       m_SelectedSceneIndex = 0;
+  size_t                       m_SelectedHdriIndex  = 0;
+  bool                         m_SceneReloadRequested = false;
+  bool                         m_HdriReloadRequested  = false;
 
   nvshaders::SkySimple     m_SkySimple;       // Sky compute
   nvshaders::Tonemapper    m_Tonemapper;      // Tonemapper compute
   shaderio::TonemapperData m_TonemapperData;  // Tonemapper parameters
 
   glm::vec2 m_MetallicRoughnessOverride = {-0.01f, -0.01f};  // UI overrides
+  std::unique_ptr<nvsamples::SceneAssetCatalog> m_SceneAssetCatalog;  // Asset discovery helper
+  std::unique_ptr<nvsamples::SceneBuilder> m_SceneBuilder;   // Scene construction helper
 };
 
 // ---------------------------------------------------------------------------------------------------------------------

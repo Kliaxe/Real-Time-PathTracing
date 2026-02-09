@@ -88,6 +88,7 @@ void PrimitiveMeshToResource(GltfSceneResource& sceneResource, nvvk::StagingUplo
 
   // Maintain mapping for draw-time lookups.
   sceneResource.meshToBufferIndex.push_back(bufferIndex);
+  sceneResource.meshMaterialIndices.push_back(0);
 }
 
 tinygltf::Model LoadGltfResources(const std::filesystem::path& filename)
@@ -127,11 +128,10 @@ tinygltf::Model LoadGltfResources(const std::filesystem::path& filename)
   return model;
 }
 
-void ImportGltfData(GltfSceneResource& sceneResource, const tinygltf::Model& model, nvvk::StagingUploader& stagingUploader, bool importInstance)
+void ImportGltfData(GltfSceneResource& sceneResource, const tinygltf::Model& model, nvvk::StagingUploader& stagingUploader,
+                    bool importInstance, uint32_t materialOffset, uint32_t fallbackMaterialIndex)
 {
   SCOPED_TIMER(__FUNCTION__);
-
-  const uint32_t meshOffset = static_cast<uint32_t>(sceneResource.meshes.size());
 
   // Lambda: component byte size.
   auto GetElementByteSize = [](int type) -> uint32_t {
@@ -187,39 +187,69 @@ void ImportGltfData(GltfSceneResource& sceneResource, const tinygltf::Model& mod
     sceneResource.bGltfDatas.push_back(bGltfData);
   }
 
-  // Extract meshes (one triangle primitive per mesh).
+  // Map source mesh index -> one or more imported scene mesh indices (one per supported primitive).
+  std::vector<std::vector<uint32_t>> meshToSceneMeshIndices(model.meshes.size());
+
+  // Extract meshes (supports multiple triangle primitives per mesh).
   for(size_t meshIdx = 0; meshIdx < model.meshes.size(); ++meshIdx)
   {
-    shaderio::GltfMesh mesh{};
+    const tinygltf::Mesh& tinyMesh = model.meshes[meshIdx];
+    for(const tinygltf::Primitive& primitive : tinyMesh.primitives)
+    {
+      if(primitive.mode != TINYGLTF_MODE_TRIANGLES)
+      {
+        continue;
+      }
+      if(primitive.indices < 0)
+      {
+        continue;
+      }
 
-    const tinygltf::Mesh&      tinyMesh  = model.meshes[meshIdx];
-    const tinygltf::Primitive& primitive = tinyMesh.primitives.front();
-    assert((tinyMesh.primitives.size() == 1 && primitive.mode == TINYGLTF_MODE_TRIANGLES) && "Must have one triangle primitive");
+      const tinygltf::Accessor& accessor = model.accessors[primitive.indices];
+      if(accessor.bufferView < 0)
+      {
+        continue;
+      }
 
-    // Indices.
-    const tinygltf::Accessor&   accessor   = model.accessors[primitive.indices];
-    const tinygltf::BufferView& bufferView = model.bufferViews[accessor.bufferView];
-    assert((accessor.count % 3 == 0) && "Triangle indices should be a multiple of 3");
+      if(accessor.componentType != TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT
+         && accessor.componentType != TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT)
+      {
+        continue;
+      }
 
-    mesh.triMesh.indices = {
-        .offset     = static_cast<uint32_t>(bufferView.byteOffset + accessor.byteOffset),
-        .count      = static_cast<uint32_t>(accessor.count),
-        .byteStride = static_cast<uint32_t>(bufferView.byteStride ? bufferView.byteStride : GetElementByteSize(accessor.componentType)),
-    };
-    mesh.indexType = accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+      shaderio::GltfMesh         mesh{};
+      const tinygltf::BufferView bufferView = model.bufferViews[accessor.bufferView];
+      assert((accessor.count % 3 == 0) && "Triangle indices should be a multiple of 3");
 
-    // Raw buffer base address.
-    mesh.gltfBuffer = reinterpret_cast<uint8_t*>(bGltfData.address);
+      mesh.triMesh.indices = {
+          .offset     = static_cast<uint32_t>(bufferView.byteOffset + accessor.byteOffset),
+          .count      = static_cast<uint32_t>(accessor.count),
+          .byteStride = static_cast<uint32_t>(bufferView.byteStride ? bufferView.byteStride : GetElementByteSize(accessor.componentType)),
+      };
+      mesh.indexType = accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
 
-    // Attributes.
-    ExtractAttribute("POSITION", mesh.triMesh.positions, primitive);
-    ExtractAttribute("NORMAL", mesh.triMesh.normals, primitive);
-    ExtractAttribute("COLOR_0", mesh.triMesh.colorVert, primitive);
-    ExtractAttribute("TEXCOORD_0", mesh.triMesh.texCoords, primitive);
-    ExtractAttribute("TANGENT", mesh.triMesh.tangents, primitive);
+      // Raw buffer base address.
+      mesh.gltfBuffer = reinterpret_cast<uint8_t*>(bGltfData.address);
 
-    sceneResource.meshes.emplace_back(mesh);
-    sceneResource.meshToBufferIndex.push_back(bufferIndex);
+      // Attributes.
+      ExtractAttribute("POSITION", mesh.triMesh.positions, primitive);
+      ExtractAttribute("NORMAL", mesh.triMesh.normals, primitive);
+      ExtractAttribute("COLOR_0", mesh.triMesh.colorVert, primitive);
+      ExtractAttribute("TEXCOORD_0", mesh.triMesh.texCoords, primitive);
+      ExtractAttribute("TANGENT", mesh.triMesh.tangents, primitive);
+
+      const uint32_t sceneMeshIndex = static_cast<uint32_t>(sceneResource.meshes.size());
+      uint32_t       materialIndex  = fallbackMaterialIndex;
+      if(primitive.material >= 0 && primitive.material < static_cast<int>(model.materials.size()))
+      {
+        materialIndex = materialOffset + static_cast<uint32_t>(primitive.material);
+      }
+
+      sceneResource.meshes.emplace_back(mesh);
+      sceneResource.meshToBufferIndex.push_back(bufferIndex);
+      sceneResource.meshMaterialIndices.push_back(materialIndex);
+      meshToSceneMeshIndices[meshIdx].push_back(sceneMeshIndex);
+    }
   }
 
   if(!importInstance)
@@ -258,14 +288,24 @@ void ImportGltfData(GltfSceneResource& sceneResource, const tinygltf::Model& mod
 
         if(node.mesh != -1)
         {
-          const tinygltf::Mesh&      tinyMesh  = model.meshes[node.mesh];
-          const tinygltf::Primitive& primitive = tinyMesh.primitives.front();
-          assert((tinyMesh.primitives.size() == 1 && primitive.mode == TINYGLTF_MODE_TRIANGLES) && "Must have one triangle primitive");
-
-          shaderio::GltfInstance instance{};
-          instance.meshIndex = static_cast<uint32_t>(node.mesh) + meshOffset;
-          instance.transform = nodeTransform;
-          sceneResource.instances.push_back(instance);
+          if(node.mesh >= 0 && node.mesh < static_cast<int>(meshToSceneMeshIndices.size()))
+          {
+            for(const uint32_t sceneMeshIndex : meshToSceneMeshIndices[node.mesh])
+            {
+              shaderio::GltfInstance instance{};
+              instance.meshIndex = sceneMeshIndex;
+              instance.transform = nodeTransform;
+              if(sceneMeshIndex < sceneResource.meshMaterialIndices.size())
+              {
+                instance.materialIndex = sceneResource.meshMaterialIndices[sceneMeshIndex];
+              }
+              else
+              {
+                instance.materialIndex = fallbackMaterialIndex;
+              }
+              sceneResource.instances.push_back(instance);
+            }
+          }
         }
 
         for(int childIdx : node.children)
