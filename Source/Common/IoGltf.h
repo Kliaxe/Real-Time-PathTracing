@@ -127,7 +127,7 @@ CHECK_STRUCT_ALIGNMENT(GltfInstance)
 struct GltfSceneInfo
 {
   float4x4               viewProjMatrix;     // View-projection matrix
-  float4x4               projInvMatrix;      // Inverse projection matrix
+  float4x4               projInvMatrix;      // Historical name: stores the inverse view-projection matrix for shared camera-ray reconstruction
   float4x4               viewInvMatrix;      // Inverse view matrix
   float3                 cameraPosition;     // Camera position
   int                    useSky;             // Sky toggle
@@ -150,4 +150,5 @@ CHECK_STRUCT_ALIGNMENT(GltfSceneInfo)
 NAMESPACE_SHADERIO_END()
 
 #endif  // IO_GLTF_H
+
 

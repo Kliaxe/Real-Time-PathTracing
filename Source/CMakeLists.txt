@@ -30,5 +30,7 @@ target_sources(RealTimePathTracing PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/Scene/SceneRenderer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/Scene/SceneRenderer.h"
     "${CMAKE_CURRENT_LIST_DIR}/Scene/SceneTypes.h"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/PathTracer.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/PathTracer.h"
 )
 

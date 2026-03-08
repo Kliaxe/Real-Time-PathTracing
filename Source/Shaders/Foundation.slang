@@ -21,6 +21,7 @@
 
 // Shared BSDF helpers (lives under Source/ShaderIncludes and is copied to runtime for hot reload).
 #include "ShaderIncludes/Pbr.h.slang"
+#include "ShaderIncludes/Camera.h.slang"
 
 // Per-app IO (push constants, bindings, scene structures).
 #include "ShaderIo.h"
@@ -123,13 +124,9 @@ PSout fragmentMain(VSout stage)
     float3 color = sceneInfo.backgroundColor;
     if(sceneInfo.useHdrEnv != 0 && sceneInfo.environmentTextureIndex >= 0)
     {
-      float2 viewport = max(sceneInfo.viewportSize, float2(1.0, 1.0));
-      float2 uv       = stage.sv_position.xy / viewport;
-      float2 ndc      = float2(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0);
-      float4 worldPosH = mul(float4(ndc, 1.0, 1.0), sceneInfo.projInvMatrix);
-      float  w          = (abs(worldPosH.w) > 1e-6) ? worldPosH.w : 1.0;
-      float3 worldPos   = worldPosH.xyz / w;
-      float3 worldDir   = normalize(worldPos - sceneInfo.cameraPosition);
+      // Use the same camera reconstruction helper as the path tracer so the
+      // raster background and ray traced camera rays stay perfectly aligned.
+      float3 worldDir = ReconstructWorldDirectionFromPixel(stage.sv_position.xy, sceneInfo);
       float2 envUv      = dirToLatLongUv(worldDir);
       color = textures[sceneInfo.environmentTextureIndex].Sample(envUv).xyz;
     }
@@ -207,3 +204,5 @@ PSout fragmentMain(VSout stage)
   output.color = float4(max(color, float3(0.0)), 1.0);
   return output;
 }
+
+

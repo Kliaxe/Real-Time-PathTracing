@@ -53,12 +53,23 @@ int main(int argc, char** argv)
   VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
   };
+  VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+  };
+  VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
+  };
   nvvk::ContextInitInfo vkSetup = {
       .instanceExtensions = {VK_EXT_DEBUG_UTILS_EXTENSION_NAME},
       .deviceExtensions =
           {
               {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME},
               {VK_EXT_SHADER_OBJECT_EXTENSION_NAME, &shaderObjectFeatures},
+              // Request the core ray tracing pieces up front so the device is
+              // born with the capabilities our future path tracing module needs.
+              {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, &accelerationStructureFeatures},
+              {VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, &rayTracingPipelineFeatures},
+              {VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME},
           },
   };
 
@@ -67,10 +78,11 @@ int main(int argc, char** argv)
     nvvk::addSurfaceExtensions(vkSetup.instanceExtensions, &vkSetup.deviceExtensions);
   }
 
-  // Standard validation preset for development builds.
-  nvvk::ValidationSettings validationSettings;
-  validationSettings.setPreset(nvvk::ValidationSettings::LayerPresets::eStandard);
-  vkSetup.instanceCreateInfoExt = validationSettings.buildPNextChain();
+  // Let the installed validation layer use its own defaults.
+  // The nvpro validation-settings helper currently advertises several GPU-AV
+  // keys that newer validation layer builds no longer recognize, which creates
+  // noisy startup warnings without improving signal for this sample.
+  vkSetup.instanceCreateInfoExt = nullptr;
 
 #if defined(USE_NSIGHT_AFTERMATH)
   auto& aftermath = AftermathCrashTracker::getInstance();
@@ -116,3 +128,6 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
+
+

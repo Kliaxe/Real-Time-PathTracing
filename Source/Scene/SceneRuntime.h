@@ -63,8 +63,14 @@ public:
   const nvsamples::GltfSceneResource& GetSceneResource() const;
   shaderio::GltfSceneInfo&            GetSceneInfo();
   const shaderio::GltfSceneInfo&      GetSceneInfo() const;
+  const std::vector<nvvk::AccelerationStructure>& GetBottomLevelAccelerationStructures() const;
+  const nvvk::AccelerationStructure& GetTopLevelAccelerationStructure() const;
 
 private:
+  void BuildBottomLevelAccelerationStructures();
+  void BuildTopLevelAccelerationStructure();
+  void DestroyTopLevelAccelerationStructure();
+  void DestroyBottomLevelAccelerationStructures();
   void DestroySceneResources();
   void DestroyTextures();
 
@@ -74,9 +80,13 @@ private:
 
   SceneUploader m_SceneUploader;
 
-  nvsamples::GltfSceneResource           m_SceneResource;
-  std::vector<nvvk::Image>               m_Textures;
+  nvsamples::GltfSceneResource               m_SceneResource;
+  std::vector<nvvk::Image>                   m_Textures;
   std::vector<nvsamples::MaterialAttributes> m_MaterialAttributes;
+  std::vector<nvvk::AccelerationStructure>   m_BottomLevelAS;
+  std::vector<VkAccelerationStructureInstanceKHR> m_TlasInstances;
+  nvvk::Buffer                                    m_TlasInstancesBuffer;
+  nvvk::AccelerationStructure                     m_TopLevelAS;
 };
 
 }  // namespace nvsamples

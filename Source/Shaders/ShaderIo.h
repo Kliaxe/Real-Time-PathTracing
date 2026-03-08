@@ -24,10 +24,14 @@
 
 NAMESPACE_SHADERIO_BEGIN()
 
-// Binding points for descriptor sets.
+// Binding points shared by raster and ray tracing shaders.
+// Raster currently uses only eTextures, while the path tracer also binds the
+// TLAS and the storage image it writes into.
 enum BindingPoints
 {
-  eTextures = 0,  // Combined image sampler array
+  eTextures    = 0,  // Combined image sampler array
+  eTlas        = 1,  // Top-level acceleration structure
+  eOutputImage = 2,  // Storage image for ray tracing output
 };
 
 // Push constants used by the raster foundation pass.
@@ -37,6 +41,17 @@ struct TutoPushConstant
   int            instanceIndex;              // Instance index for the current draw call
   GltfSceneInfo* sceneInfoAddress;           // Address of the scene information buffer
   float2         metallicRoughnessOverride;  // Metallic and roughness override values
+};
+
+// Push constants used by the path tracing pass.
+// This is intentionally small: it just points the shaders at the shared scene
+// info buffer and provides a tiny bit of per-frame control data.
+struct PathTracePushConstant
+{
+  GltfSceneInfo* sceneInfoAddress;  // Address of the shared scene information buffer
+  uint           frameNumber;       // Frame index used to vary random seeds
+  uint           maxBounces;        // Number of bounce continuations after the primary hit
+  uint           _pad0;
 };
 
 NAMESPACE_SHADERIO_END()

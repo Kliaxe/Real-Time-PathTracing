@@ -24,6 +24,7 @@
 
 #include <glm/vec2.hpp>
 
+#include "PathTracing/PathTracer.h"
 #include "Scene/SceneAssetCatalog.h"
 #include "Scene/SceneResolver.h"
 #include "Scene/SceneRenderer.h"
@@ -38,6 +39,12 @@ namespace nvsamples
 // - Keeps scene/UI/rendering logic isolated from Main.cpp bootstrap code.
 class Application : public nvapp::IAppElement
 {
+  enum class RenderMode
+  {
+    eRasterizer = 0,
+    ePathTracing,
+  };
+
   enum
   {
     eImgRendered,
@@ -71,33 +78,36 @@ private:
   void CompileAndCreateGraphicsShaders();
   void UpdateSceneBuffer(VkCommandBuffer cmd);
   void RasterScene(VkCommandBuffer cmd);
+  void PathTraceScene(VkCommandBuffer cmd);
 
 private:
-  nvapp::Application*              m_App = nullptr;  // Owning application
-  static constexpr uint32_t        kMaxTextureDescriptors = 4096;
-  nvvk::ResourceAllocator          m_Allocator;       // Vulkan allocator
-  nvvk::StagingUploader            m_StagingUploader; // Upload helper
-  nvvk::SamplerPool                m_SamplerPool;     // Sampler pool
-  nvvk::GBuffer                    m_GBuffers;        // Offscreen buffers
-  nvslang::SlangCompiler           m_SlangCompiler;   // Hot reload compiler
+  nvapp::Application*                    m_App = nullptr;  // Owning application
+  static constexpr uint32_t              kMaxTextureDescriptors = 4096;
+  nvvk::ResourceAllocator                m_Allocator;       // Vulkan allocator
+  nvvk::StagingUploader                  m_StagingUploader; // Upload helper
+  nvvk::SamplerPool                      m_SamplerPool;     // Sampler pool
+  nvvk::GBuffer                          m_GBuffers;        // Offscreen buffers
+  nvslang::SlangCompiler                 m_SlangCompiler;   // Hot reload compiler
   std::shared_ptr<nvutils::CameraManipulator> m_CameraManip = std::make_shared<nvutils::CameraManipulator>();
-  nvvk::GraphicsPipelineState      m_DynamicPipeline; // Dynamic pipeline state
-  nvvk::DescriptorPack             m_DescPack;        // Descriptor pack for textures
-  VkPipelineLayout                 m_GraphicPipelineLayout = VK_NULL_HANDLE;
-  VkShaderEXT                      m_VertexShader = VK_NULL_HANDLE;
-  VkShaderEXT                      m_FragmentShader = VK_NULL_HANDLE;
-  std::vector<nvsamples::AssetEntry>       m_ModelAssets;
-  std::vector<nvsamples::AssetEntry>       m_HdriAssets;
-  std::vector<nvsamples::SceneDefinition>  m_SceneDefinitions;
-  size_t                                  m_SelectedSceneIndex = 0;
-  size_t                                  m_SelectedHdriIndex = 0;
-  bool                                    m_SceneReloadRequested = false;
-  bool                                    m_HdriReloadRequested = false;
-  nvshaders::SkySimple                    m_SkySimple;      // Sky compute
-  nvshaders::Tonemapper                   m_Tonemapper;     // Tonemapper compute
-  shaderio::TonemapperData                m_TonemapperData; // Tonemapper parameters
-  glm::vec2                               m_MetallicRoughnessOverride = {-0.01f, -0.01f}; // UI overrides
+  nvvk::GraphicsPipelineState            m_DynamicPipeline; // Dynamic pipeline state
+  nvvk::DescriptorPack                   m_DescPack;        // Descriptor pack for textures
+  VkPipelineLayout                       m_GraphicPipelineLayout = VK_NULL_HANDLE;
+  VkShaderEXT                            m_VertexShader = VK_NULL_HANDLE;
+  VkShaderEXT                            m_FragmentShader = VK_NULL_HANDLE;
+  std::vector<nvsamples::AssetEntry>     m_ModelAssets;
+  std::vector<nvsamples::AssetEntry>     m_HdriAssets;
+  std::vector<nvsamples::SceneDefinition> m_SceneDefinitions;
+  RenderMode                             m_RenderMode = RenderMode::eRasterizer;
+  size_t                                 m_SelectedSceneIndex = 0;
+  size_t                                 m_SelectedHdriIndex = 0;
+  bool                                   m_SceneReloadRequested = false;
+  bool                                   m_HdriReloadRequested = false;
+  nvshaders::SkySimple                   m_SkySimple;      // Sky compute
+  nvshaders::Tonemapper                  m_Tonemapper;     // Tonemapper compute
+  shaderio::TonemapperData               m_TonemapperData; // Tonemapper parameters
+  glm::vec2                              m_MetallicRoughnessOverride = {-0.01f, -0.01f}; // UI overrides
   std::unique_ptr<nvsamples::SceneAssetCatalog> m_SceneAssetCatalog; // Asset discovery helper
+  std::unique_ptr<nvsamples::PathTracer>        m_PathTracer;        // Future ray tracing renderer
   std::unique_ptr<nvsamples::SceneResolver>     m_SceneResolver;     // Scene selection resolver
   std::unique_ptr<nvsamples::SceneRenderer>     m_SceneRenderer;     // Raster scene renderer
   std::unique_ptr<nvsamples::SceneRuntime>      m_SceneRuntime;      // GPU scene runtime owner

@@ -155,12 +155,18 @@ void Application::onAttach(nvapp::Application* app)
     m_SceneAssetCatalog = std::make_unique<nvsamples::SceneAssetCatalog>();
     m_SceneResolver     = std::make_unique<nvsamples::SceneResolver>();
     m_SceneRenderer     = std::make_unique<nvsamples::SceneRenderer>();
+    m_PathTracer        = std::make_unique<nvsamples::PathTracer>(nvsamples::PathTracer::CreateInfo{
+        .app                   = m_App,
+        .allocator             = &m_Allocator,
+        .maxTextureDescriptors = kMaxTextureDescriptors,
+    });
     m_SceneRuntime      = std::make_unique<nvsamples::SceneRuntime>(nvsamples::SceneRuntime::CreateInfo{
         .app             = m_App,
         .allocator       = &m_Allocator,
         .stagingUploader = &m_StagingUploader,
         .samplerPool     = &m_SamplerPool,
     });
+    m_PathTracer->Initialize();
     DiscoverAssets();
     CreateScene(true);
     CreateGraphicsDescriptorSetLayout();
@@ -184,6 +190,7 @@ void Application::onDetach()
     vkDestroyShaderEXT(device, m_VertexShader, nullptr);
     vkDestroyShaderEXT(device, m_FragmentShader, nullptr);
 
+    m_PathTracer->Destroy();
     m_SceneRuntime->Destroy();
 
     m_GBuffers.deinit();
@@ -209,6 +216,27 @@ void Application::onUIRender()
     if(ImGui::Begin("Settings"))
     {
       shaderio::GltfSceneInfo& sceneInfo = m_SceneRuntime->GetSceneInfo();
+
+      if(ImGui::CollapsingHeader("Renderer", ImGuiTreeNodeFlags_DefaultOpen))
+      {
+        int renderMode = static_cast<int>(m_RenderMode);
+        const char* renderModes[] = {"Rasterizer", "Path Tracing"};
+        if(ImGui::Combo("Mode", &renderMode, renderModes, IM_ARRAYSIZE(renderModes)))
+        {
+          m_RenderMode = static_cast<RenderMode>(renderMode);
+        }
+
+        if(m_RenderMode == RenderMode::eRasterizer)
+        {
+          ImGui::TextWrapped("Rasterizer mode uses the existing graphics pipeline path.");
+        }
+        else if(m_PathTracer == nullptr || !m_PathTracer->IsReady())
+        {
+          ImGui::TextWrapped(
+              "Path tracing mode is wired into the app now, but this step still falls back to raster until we build "
+              "the acceleration structures and ray tracing pipeline.");
+        }
+      }
 
       if(ImGui::CollapsingHeader("Camera"))
       {
@@ -364,7 +392,14 @@ void Application::onRender(VkCommandBuffer cmd)
     }
 
     UpdateSceneBuffer(cmd);
-    RasterScene(cmd);
+    if(m_RenderMode == RenderMode::ePathTracing && m_PathTracer != nullptr && m_PathTracer->IsReady())
+    {
+      PathTraceScene(cmd);
+    }
+    else
+    {
+      RasterScene(cmd);
+    }
     PostProcess(cmd);
   }
 
@@ -495,6 +530,10 @@ void Application::CreateGraphicsPipelineLayout()
 void Application::UpdateTextures()
   {
     m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_DescPack, kMaxTextureDescriptors);
+    if(m_PathTracer != nullptr && m_PathTracer->IsReady())
+    {
+      m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_PathTracer->GetDescriptorPack(), kMaxTextureDescriptors);
+    }
   }
 
 VkShaderModuleCreateInfo Application::CompileSlangShader(const std::filesystem::path& filename, const std::span<const uint32_t>& spirvFallback)
@@ -585,6 +624,18 @@ void Application::RasterScene(VkCommandBuffer cmd)
         .vertexShader              = m_VertexShader,
         .fragmentShader            = m_FragmentShader,
         .renderedImageIndex        = eImgRendered,
+    });
+  }
+
+void Application::PathTraceScene(VkCommandBuffer cmd)
+  {
+    m_PathTracer->Render(nvsamples::PathTracer::RenderInput{
+        .cmd                = cmd,
+        .sceneResource      = &m_SceneRuntime->GetSceneResource(),
+        .sceneInfo          = &m_SceneRuntime->GetSceneInfo(),
+        .topLevelAS         = &m_SceneRuntime->GetTopLevelAccelerationStructure(),
+        .gBuffers           = &m_GBuffers,
+        .renderedImageIndex = eImgRendered,
     });
   }
 
