@@ -17,7 +17,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// RealTimePathTracing - Foundation
+// RealTimePathTracing - Rasterizer
 // - Simple rasterized GLTF scene (teapot + plane)
 // - Offscreen HDR render + tonemapping
 // - Slang hot reload (F5) with precompiled fallback
@@ -54,7 +54,7 @@
 // Pre-compiled shaders (generated at build time).
 #include "_autogen/sky_simple.slang.h"   // From nvpro_core2
 #include "_autogen/tonemapper.slang.h"   // From nvpro_core2
-#include "_autogen/Foundation.slang.h"   // From Source/Shaders/Foundation.slang
+#include "_autogen/Rasterizer.slang.h"   // From Source/Shaders/Rasterizer.slang
 
 #include <nvaftermath/aftermath.hpp>
 #include <nvapp/application.hpp>
@@ -89,7 +89,7 @@
 #include "Scene/SceneRuntime.h"
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Foundation app element
+// Rasterizer app element
 //
 
 namespace nvsamples
@@ -591,7 +591,7 @@ void Application::CompileAndCreateGraphicsShaders()
   {
     SCOPED_TIMER(__FUNCTION__);
 
-    VkShaderModuleCreateInfo shaderCode = CompileSlangShader("Foundation.slang", Foundation_slang);
+    VkShaderModuleCreateInfo shaderCode = CompileSlangShader("Rasterizer.slang", Rasterizer_slang);
 
     vkDestroyShaderEXT(m_App->getDevice(), m_VertexShader, nullptr);
     vkDestroyShaderEXT(m_App->getDevice(), m_FragmentShader, nullptr);
@@ -687,6 +687,7 @@ std::shared_ptr<nvapp::IAppElement> CreateApplicationElement(const std::shared_p
 }
 
 }  // namespace nvsamples
+
 
 
 

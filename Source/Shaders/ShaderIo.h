@@ -36,7 +36,7 @@ enum BindingPoints
   eAccumulationImage = 3,  // Storage image that preserves path tracing history across frames
 };
 
-// Push constants used by the raster foundation pass.
+// Push constants used by the rasterizer pass.
 struct TutoPushConstant
 {
   float3x3       normalMatrix;
@@ -66,3 +66,4 @@ struct PathTracePushConstant
 NAMESPACE_SHADERIO_END()
 
 #endif  // SHADERIO_H
+

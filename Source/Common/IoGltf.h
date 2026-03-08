@@ -64,7 +64,7 @@ struct TriangleMesh
   BufferView tangents;   // Tangent stream (vec4, optional)
 };
 
-// Minimal material model for the foundation sample.
+// Minimal material model for the rasterizer sample.
 enum GltfAlphaMode
 {
   eOpaque = 0,
@@ -74,13 +74,13 @@ enum GltfAlphaMode
 
 struct GltfMetallicRoughness
 {
-  float4 baseColorFactor;             // Base color factor (RGBA)
-  float  metallicFactor;              // 0 = dielectric, 1 = metallic
-  float  roughnessFactor;             // 0 = smooth, 1 = rough
-  int    baseColorTextureIndex = -1;  // Base color texture index (optional)
-  float  alphaCutoff           = 0.5f;      // Alpha cutoff (used when alphaMode == eMask)
-  int    alphaMode             = GltfAlphaMode::eOpaque;  // Opaque / Mask / Blend
-  int    _pad0                 = 0;
+  float4 baseColorFactor;                    // Base color factor (RGBA)
+  float  metallicFactor;                     // Scalar metallic fallback when no texture is bound
+  float  roughnessFactor;                    // Scalar roughness fallback when no texture is bound
+  int    baseColorTextureIndex = -1;         // Base color texture index (optional, sampled as sRGB)
+  int    metallicRoughnessTextureIndex = -1; // glTF metallic-roughness texture (B = metallic, G = roughness)
+  float  alphaCutoff                 = 0.5f; // Alpha cutoff (used when alphaMode == eMask)
+  int    alphaMode                   = GltfAlphaMode::eOpaque;  // Opaque / Mask / Blend
 };
 CHECK_STRUCT_ALIGNMENT(GltfMetallicRoughness)
 
@@ -150,5 +150,7 @@ CHECK_STRUCT_ALIGNMENT(GltfSceneInfo)
 NAMESPACE_SHADERIO_END()
 
 #endif  // IO_GLTF_H
+
+
 
 

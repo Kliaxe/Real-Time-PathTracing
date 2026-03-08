@@ -18,7 +18,7 @@ struct AssetEntry
 };
 
 // Fully resolved catalog data returned to runtime systems.
-// RtFoundation consumes this as immutable setup data after discovery.
+// The rasterizer/runtime consumes this as immutable setup data after discovery.
 struct SceneAssetCatalogData
 {
   std::vector<AssetEntry>       modelAssets;
@@ -40,4 +40,5 @@ public:
 };
 
 }  // namespace nvsamples
+
 

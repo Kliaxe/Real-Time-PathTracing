@@ -163,16 +163,17 @@ MaterialAttributes ParseMaterialAttributes(const tinygltf::Material& src)
   return dst;
 }
 
-shaderio::GltfMetallicRoughness ToGpuMaterial(const MaterialAttributes& materialAttributes, int baseColorTextureIndex, float alphaCutoff,
-                                              int alphaMode)
+shaderio::GltfMetallicRoughness ToGpuMaterial(const MaterialAttributes& materialAttributes, int baseColorTextureIndex,
+                                              int metallicRoughnessTextureIndex, float alphaCutoff, int alphaMode)
 {
   shaderio::GltfMetallicRoughness dst{};
-  dst.baseColorFactor       = glm::vec4(materialAttributes.albedo, 1.0f);
-  dst.metallicFactor        = materialAttributes.metallic;
-  dst.roughnessFactor       = materialAttributes.roughness;
-  dst.baseColorTextureIndex = baseColorTextureIndex;
-  dst.alphaCutoff           = alphaCutoff;
-  dst.alphaMode             = alphaMode;
+  dst.baseColorFactor              = glm::vec4(materialAttributes.albedo, 1.0f);
+  dst.metallicFactor               = materialAttributes.metallic;
+  dst.roughnessFactor              = materialAttributes.roughness;
+  dst.baseColorTextureIndex        = baseColorTextureIndex;
+  dst.metallicRoughnessTextureIndex = metallicRoughnessTextureIndex;
+  dst.alphaCutoff                  = alphaCutoff;
+  dst.alphaMode                    = alphaMode;
   return dst;
 }
 
@@ -189,14 +190,14 @@ SceneUploader::SceneUploader(nvapp::Application* app, nvvk::ResourceAllocator* a
 
 int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadState& state) const
 {
-  auto appendRgbaTexture = [&](const std::span<const unsigned char> rgbaPixels, uint32_t width, uint32_t height) -> int {
+  auto appendRgbaTexture = [&](const std::span<const unsigned char> rgbaPixels, uint32_t width, uint32_t height, bool sRgb) -> int {
     if(width == 0 || height == 0 || rgbaPixels.empty())
     {
       return -1;
     }
 
     VkImageCreateInfo imageInfo = DEFAULT_VkImageCreateInfo;
-    imageInfo.format            = VK_FORMAT_R8G8B8A8_SRGB;
+    imageInfo.format            = sRgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
     imageInfo.usage             = VK_IMAGE_USAGE_SAMPLED_BIT;
     imageInfo.extent            = {width, height, 1};
 
@@ -208,7 +209,7 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
     return static_cast<int>(state.textures.size()) - 1;
   };
 
-  auto loadBaseColorImageTexture = [&](const tinygltf::Image& image, const std::filesystem::path& modelPath) -> int {
+  auto loadImageTexture = [&](const tinygltf::Image& image, const std::filesystem::path& modelPath, bool sRgb) -> int {
     if(image.width > 0 && image.height > 0 && !image.image.empty())
     {
       const int srcChannels = std::clamp(image.component, 1, 4);
@@ -240,7 +241,7 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
           rgba[dst + 3] = image.image[src + 3];
       }
 
-      return appendRgbaTexture(rgba, static_cast<uint32_t>(image.width), static_cast<uint32_t>(image.height));
+      return appendRgbaTexture(rgba, static_cast<uint32_t>(image.width), static_cast<uint32_t>(image.height), sRgb);
     }
 
     if(!image.uri.empty())
@@ -250,7 +251,7 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
       const std::filesystem::path texturePath = std::filesystem::weakly_canonical(modelPath.parent_path() / uriPath, ec);
       if(!ec && std::filesystem::exists(texturePath, ec))
       {
-        nvvk::Image texture = nvsamples::LoadAndCreateImage(cmd, *m_StagingUploader, m_App->getDevice(), texturePath);
+        nvvk::Image texture = nvsamples::LoadAndCreateImage(cmd, *m_StagingUploader, m_App->getDevice(), texturePath, sRgb);
         m_SamplerPool->acquireSampler(texture.descriptor.sampler);
         state.textures.emplace_back(texture);
         return static_cast<int>(state.textures.size()) - 1;
@@ -260,7 +261,7 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
     return -1;
   };
 
-  auto loadBaseColorTextureIndices = [&](const tinygltf::Model& model, const std::filesystem::path& modelPath) -> std::vector<int> {
+  auto loadTextureIndices = [&](const tinygltf::Model& model, const std::filesystem::path& modelPath, bool sRgb) -> std::vector<int> {
     std::vector<int> textureMap(model.textures.size(), -1);
     std::vector<int> sourceMap(model.images.size(), -1);
     for(size_t i = 0; i < model.textures.size(); ++i)
@@ -273,14 +274,15 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
       const int sourceIndex = texture.source;
       if(sourceMap[sourceIndex] < 0)
       {
-        sourceMap[sourceIndex] = loadBaseColorImageTexture(model.images[sourceIndex], modelPath);
+        sourceMap[sourceIndex] = loadImageTexture(model.images[sourceIndex], modelPath, sRgb);
       }
       textureMap[i] = sourceMap[sourceIndex];
     }
     return textureMap;
   };
 
-  auto addModelMaterials = [&](const tinygltf::Model& model, const std::vector<int>& textureMap) -> MaterialRange {
+  auto addModelMaterials = [&](const tinygltf::Model& model, const std::vector<int>& baseColorTextureMap,
+                               const std::vector<int>& metallicRoughnessTextureMap) -> MaterialRange {
     const uint32_t materialOffset   = static_cast<uint32_t>(state.sceneResource.materials.size());
     const uint32_t attributesOffset = static_cast<uint32_t>(state.materialAttributes.size());
 
@@ -288,7 +290,7 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
     {
       MaterialAttributes defaultMaterial{};
       state.materialAttributes.push_back(defaultMaterial);
-      state.sceneResource.materials.push_back(ToGpuMaterial(defaultMaterial, -1, 0.5f, shaderio::GltfAlphaMode::eOpaque));
+      state.sceneResource.materials.push_back(ToGpuMaterial(defaultMaterial, -1, -1, 0.5f, shaderio::GltfAlphaMode::eOpaque));
       return {.offset = materialOffset, .count = 1};
     }
 
@@ -299,9 +301,16 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
 
       const int baseColorTex = src.pbrMetallicRoughness.baseColorTexture.index;
       int       baseColorTextureIndex = -1;
-      if(baseColorTex >= 0 && baseColorTex < static_cast<int>(textureMap.size()))
+      if(baseColorTex >= 0 && baseColorTex < static_cast<int>(baseColorTextureMap.size()))
       {
-        baseColorTextureIndex = textureMap[baseColorTex];
+        baseColorTextureIndex = baseColorTextureMap[baseColorTex];
+      }
+
+      const int metallicRoughnessTex = src.pbrMetallicRoughness.metallicRoughnessTexture.index;
+      int       metallicRoughnessTextureIndex = -1;
+      if(metallicRoughnessTex >= 0 && metallicRoughnessTex < static_cast<int>(metallicRoughnessTextureMap.size()))
+      {
+        metallicRoughnessTextureIndex = metallicRoughnessTextureMap[metallicRoughnessTex];
       }
 
       int alphaMode = shaderio::GltfAlphaMode::eOpaque;
@@ -310,8 +319,9 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
       else if(src.alphaMode == "BLEND")
         alphaMode = shaderio::GltfAlphaMode::eBlend;
 
-      state.sceneResource.materials.push_back(
-          ToGpuMaterial(parsedMaterial, baseColorTextureIndex, static_cast<float>(src.alphaCutoff), alphaMode));
+      state.sceneResource.materials.push_back(ToGpuMaterial(parsedMaterial, baseColorTextureIndex,
+                                                             metallicRoughnessTextureIndex, static_cast<float>(src.alphaCutoff),
+                                                             alphaMode));
     }
     return {.offset = materialOffset, .count = static_cast<uint32_t>(state.materialAttributes.size() - attributesOffset)};
   };
@@ -360,8 +370,9 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
     const std::filesystem::path modelPath = nvutils::findFile(modelEntry.assetPath, contentDirs);
     const tinygltf::Model       model     = nvsamples::LoadGltfResources(modelPath);
 
-    const std::vector<int> textureMap     = loadBaseColorTextureIndices(model, modelPath);
-    const MaterialRange    materialRange  = addModelMaterials(model, textureMap);
+    const std::vector<int> baseColorTextureMap         = loadTextureIndices(model, modelPath, true);
+    const std::vector<int> metallicRoughnessTextureMap = loadTextureIndices(model, modelPath, false);
+    const MaterialRange    materialRange               = addModelMaterials(model, baseColorTextureMap, metallicRoughnessTextureMap);
     const uint32_t         meshStartIndex = static_cast<uint32_t>(state.sceneResource.meshes.size());
     const uint32_t         instanceStart  = static_cast<uint32_t>(state.sceneResource.instances.size());
 
@@ -397,3 +408,4 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
 }
 
 }  // namespace nvsamples
+

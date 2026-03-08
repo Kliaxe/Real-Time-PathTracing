@@ -18,6 +18,7 @@
  */
 
 #include <nvshaders/slang_types.h>
+#include "nvshaders/sky_functions.h.slang"
 
 // Shared BSDF helpers (lives under Source/ShaderIncludes and is copied to runtime for hot reload).
 #include "ShaderIncludes/Pbr.h.slang"
@@ -47,21 +48,86 @@ struct VSout
   float2 worldTexCoord : TEXCOORD0;
 };
 
+// Output of the fragment shader.
+struct PSout
+{
+  float4 color : SV_Target;
+};
+
 float2 dirToLatLongUv(float3 dir)
 {
-  const float kInvPi = 0.31830988618;
+  const float kInvPi    = 0.31830988618;
   const float kInvTwoPi = 0.15915494309;
+
   float3 n = normalize(dir);
   float  u = 0.5 - atan2(n.z, n.x) * kInvTwoPi;
   float  v = 0.5 - asin(clamp(n.y, -1.0, 1.0)) * kInvPi;
   return float2(u, v);
 }
 
-// Output of the fragment shader.
-struct PSout
+float3 SampleEnvironment(GltfSceneInfo sceneInfo, float3 direction)
 {
-  float4 color : SV_Target;
-};
+  // Keep the same environment selection logic as the path tracer so both
+  // renderers answer the same question when they need incoming light.
+  if(sceneInfo.useSky != 0)
+  {
+    return evalSimpleSky(sceneInfo.skySimpleParam, direction);
+  }
+
+  if(sceneInfo.useHdrEnv != 0 && sceneInfo.environmentTextureIndex >= 0)
+  {
+    const float2 uv = dirToLatLongUv(direction);
+    return textures[sceneInfo.environmentTextureIndex].Sample(uv).xyz;
+  }
+
+  return sceneInfo.backgroundColor;
+}
+
+float3 EvaluateEnvironmentMaterial(GltfSceneInfo sceneInfo, float3 albedo, float metallic, float roughness, float3 normal, float3 viewDir)
+{
+  // Keep the raster path readable: a soft diffuse base from the albedo, plus a
+  // real environment-map reflection that becomes stronger at grazing angles via
+  // Fresnel. This gives us honest view-dependent reflections without pretending
+  // we already have a full image-based-lighting pipeline.
+  const float3 ambientColor = lerp(float3(0.08, 0.08, 0.08), sceneInfo.backgroundColor, 0.35);
+  const float3 diffuse      = albedo * ambientColor * (1.0 - metallic);
+
+  const float  clampedRoughness     = clamp(roughness, 0.0, 1.0);
+  const float3 reflectionDir        = reflect(-viewDir, normal);
+  const float3 glossyReflectionDir  = normalize(lerp(reflectionDir, normal, clampedRoughness * clampedRoughness));
+  const float3 envReflection        = SampleEnvironment(sceneInfo, glossyReflectionDir);
+
+  const float  cMinReflectance = 0.04;
+  const float3 f0              = lerp(float3(cMinReflectance), albedo, metallic);
+  const float  nDotV           = clampedDot(normal, viewDir);
+  const float3 fresnel         = schlickFresnel(f0, float3(1.0), nDotV);
+
+  // Proper glossy IBL would sample a prefiltered environment map by mip level.
+  // Until we add that, we approximate roughness in two simple ways:
+  // 1. bend rough reflections back toward the surface normal
+  // 2. attenuate their intensity so rough dielectrics stop reading as mirrors
+  const float  reflectionStrength = lerp(1.0, 0.08, clampedRoughness * clampedRoughness);
+  const float3 specular           = envReflection * fresnel * reflectionStrength;
+
+  return diffuse + specular;
+}
+float2 ResolveMetallicRoughness(GltfMetallicRoughness material, float2 texCoord)
+{
+  // glTF stores perceptual roughness in G and metallic in B for the combined
+  // metallic-roughness texture. When no texture is present, the scalar factors
+  // remain the material-wide fallback.
+  float metallic  = material.metallicFactor;
+  float roughness = material.roughnessFactor;
+
+  if(material.metallicRoughnessTextureIndex > -1)
+  {
+    const float4 metallicRoughnessSample = textures[material.metallicRoughnessTextureIndex].Sample(texCoord);
+    roughness *= metallicRoughnessSample.g;
+    metallic *= metallicRoughnessSample.b;
+  }
+
+  return clamp(float2(metallic, roughness), 0.0, 1.0);
+}
 
 __generic<T : IFloat> T getAttribute(uint8_t* dataBufferAddress, BufferView bufferView, uint attributeIndex)
 {
@@ -118,58 +184,23 @@ VSout vertexMain(VSin input, uint vertexIndex : SV_VertexID)
 [shader("pixel")]
 PSout fragmentMain(VSout stage)
 {
-  GltfSceneInfo         sceneInfo = pushConst.sceneInfoAddress[0];
+  GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
   if(pushConst.instanceIndex < 0)
   {
-    float3 color = sceneInfo.backgroundColor;
-    if(sceneInfo.useHdrEnv != 0 && sceneInfo.environmentTextureIndex >= 0)
-    {
-      // Use the same camera reconstruction helper as the path tracer so the
-      // raster background and ray traced camera rays stay perfectly aligned.
-      float3 worldDir = ReconstructWorldDirectionFromPixel(stage.sv_position.xy, sceneInfo);
-      float2 envUv      = dirToLatLongUv(worldDir);
-      color = textures[sceneInfo.environmentTextureIndex].Sample(envUv).xyz;
-    }
+    // Use the same camera reconstruction helper as the path tracer so the
+    // raster background and ray traced camera rays stay perfectly aligned.
+    float3 worldDir = ReconstructWorldDirectionFromPixel(stage.sv_position.xy, sceneInfo);
+    float3 color    = SampleEnvironment(sceneInfo, worldDir);
 
     PSout output;
     output.color = float4(color, 1.0);
     return output;
   }
 
-  GltfInstance          instance  = sceneInfo.instances[pushConst.instanceIndex];
-  GltfMetallicRoughness material  = sceneInfo.materials[instance.materialIndex];
-
-  GltfPunctual light = sceneInfo.punctualLights[0];  // We use only the first light for now.
-
-  if(sceneInfo.useSky == 1)
-  {
-    light.direction = sceneInfo.skySimpleParam.sunDirection;
-    light.color     = sceneInfo.skySimpleParam.sunColor;
-    light.intensity = sceneInfo.skySimpleParam.sunIntensity;
-    light.type      = GltfLightType::eDirectional;
-  }
-
-  if(light.type == GltfLightType::ePoint)
-  {
-    light.direction = light.position - stage.worldPos;
-    float d         = length(light.direction);
-    light.intensity /= (d * d);
-  }
-  else if(light.type == GltfLightType::eSpot)
-  {
-    float3 lightDir = light.position - stage.worldPos;
-    float  d        = length(lightDir);
-    light.intensity /= (d * d);
-
-    float theta         = (dot(normalize(lightDir), normalize(light.direction)));
-    float spotIntensity = clamp((theta - cos(light.coneAngle)) / (1.0 - cos(light.coneAngle)), 0.0, 1.0);
-    light.intensity *= spotIntensity;
-    light.direction = lightDir;
-  }
-
-  float3 V = normalize(sceneInfo.cameraPosition - stage.worldPos);
-  float3 N = normalize(stage.worldNormal);
-  float3 L = normalize(light.direction);
+  GltfInstance          instance = sceneInfo.instances[pushConst.instanceIndex];
+  GltfMetallicRoughness material = sceneInfo.materials[instance.materialIndex];
+  float3                N        = normalize(stage.worldNormal);
+  float3                V        = normalize(sceneInfo.cameraPosition - stage.worldPos);
 
   // Base color from factor and optional texture.
   float4 baseColor = material.baseColorFactor;
@@ -184,9 +215,12 @@ PSout fragmentMain(VSout stage)
   }
   float3 albedo = baseColor.xyz;
 
-  // Metallic/roughness with optional UI override.
-  float metallic  = material.metallicFactor;
-  float roughness = material.roughnessFactor;
+  // Metallic and roughness still matter here, but only for how strongly the
+  // environment reflection shows up. The diffuse base remains intentionally
+  // simple so the shader stays easy to read while we learn Vulkan plumbing.
+  float2 metallicRoughness = ResolveMetallicRoughness(material, stage.worldTexCoord);
+  float  metallic          = metallicRoughness.x;
+  float  roughness         = metallicRoughness.y;
   if(pushConst.metallicRoughnessOverride.x >= 0.0)
   {
     metallic = pushConst.metallicRoughnessOverride.x;
@@ -196,13 +230,19 @@ PSout fragmentMain(VSout stage)
     roughness = pushConst.metallicRoughnessOverride.y;
   }
 
-  // Simple PBR lighting.
-  float3 color = pbrMetallicRoughness(albedo, metallic, roughness, N, V, L);
-  color *= light.color * light.intensity;
+  const float3 color = EvaluateEnvironmentMaterial(sceneInfo, albedo, metallic, roughness, N, V);
 
   PSout output;
   output.color = float4(max(color, float3(0.0)), 1.0);
   return output;
 }
+
+
+
+
+
+
+
+
 
 

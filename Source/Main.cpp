@@ -109,7 +109,7 @@ int main(int argc, char** argv)
 
   // Build app elements in one place so Main stays orchestration-only.
   auto cameraManip = std::make_shared<nvutils::CameraManipulator>();
-  auto foundation  = nvsamples::CreateApplicationElement(cameraManip);
+  auto rasterizer  = nvsamples::CreateApplicationElement(cameraManip);
   auto elemCamera  = std::make_shared<nvapp::ElementCamera>();
   auto windowTitle = std::make_shared<nvapp::ElementDefaultWindowTitle>();
   auto windowMenu  = std::make_shared<nvapp::ElementDefaultMenu>();
@@ -119,7 +119,7 @@ int main(int argc, char** argv)
   application.addElement(windowMenu);
   application.addElement(windowTitle);
   application.addElement(elemCamera);
-  application.addElement(foundation);
+  application.addElement(rasterizer);
 
   application.run();
 
@@ -128,6 +128,7 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
 
 
 
