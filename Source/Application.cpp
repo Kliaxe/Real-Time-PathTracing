@@ -216,6 +216,7 @@ void Application::onUIRender()
     if(ImGui::Begin("Settings"))
     {
       shaderio::GltfSceneInfo& sceneInfo = m_SceneRuntime->GetSceneInfo();
+      bool                     invalidatePathTracingHistory = false;
 
       if(ImGui::CollapsingHeader("Renderer", ImGuiTreeNodeFlags_DefaultOpen))
       {
@@ -224,6 +225,7 @@ void Application::onUIRender()
         if(ImGui::Combo("Mode", &renderMode, renderModes, IM_ARRAYSIZE(renderModes)))
         {
           m_RenderMode = static_cast<RenderMode>(renderMode);
+          invalidatePathTracingHistory = true;
         }
 
         if(m_RenderMode == RenderMode::eRasterizer)
@@ -232,9 +234,29 @@ void Application::onUIRender()
         }
         else if(m_PathTracer == nullptr || !m_PathTracer->IsReady())
         {
+          ImGui::TextWrapped("Path tracing mode is present in the UI, but the renderer is not ready yet.");
+        }
+        else
+        {
+          nvsamples::PathTracer::Settings& pathTracingSettings = m_PathTracer->GetSettings();
+
+          bool accumulate = pathTracingSettings.accumulate;
+          if(ImGui::Checkbox("Accumulate", &accumulate))
+          {
+            pathTracingSettings.accumulate = accumulate;
+            invalidatePathTracingHistory   = true;
+          }
+
+          ImGui::SameLine();
+          if(ImGui::Button("Reset Accumulation"))
+          {
+            invalidatePathTracingHistory = true;
+          }
+
+          ImGui::Text("Accumulated Frames: %u", m_PathTracer->GetAccumulatedFrameCount());
           ImGui::TextWrapped(
-              "Path tracing mode is wired into the app now, but this step still falls back to raster until we build "
-              "the acceleration structures and ray tracing pipeline.");
+              "Accumulation averages path traced samples across frames and automatically resets when the camera, "
+              "scene, HDRI, sky, or viewport changes.");
         }
       }
 
@@ -279,8 +301,8 @@ void Application::onUIRender()
               const bool selected = (m_SelectedHdriIndex == i);
               if(ImGui::Selectable(m_HdriAssets[i].label.c_str(), selected))
               {
-                m_SelectedHdriIndex = i;
-                m_HdriReloadRequested = true;
+                m_SelectedHdriIndex    = i;
+                m_HdriReloadRequested  = true;
               }
               if(selected)
               {
@@ -297,13 +319,15 @@ void Application::onUIRender()
         bool useHdri = (sceneInfo.useHdrEnv != 0);
         if(ImGui::Checkbox("Use HDRI", &useHdri))
         {
-          sceneInfo.useHdrEnv = useHdri ? 1 : 0;
+          sceneInfo.useHdrEnv          = useHdri ? 1 : 0;
+          invalidatePathTracingHistory = true;
         }
 
         bool useSky = (sceneInfo.useSky != 0);
         if(ImGui::Checkbox("Use Sky", &useSky))
         {
-          sceneInfo.useSky = useSky ? 1 : 0;
+          sceneInfo.useSky            = useSky ? 1 : 0;
+          invalidatePathTracingHistory = true;
         }
 
         if(sceneInfo.useHdrEnv != 0)
@@ -319,12 +343,12 @@ void Application::onUIRender()
         }
         else if(sceneInfo.useSky != 0)
         {
-          nvgui::skySimpleParametersUI(sceneInfo.skySimpleParam);
+          invalidatePathTracingHistory |= nvgui::skySimpleParametersUI(sceneInfo.skySimpleParam);
         }
         else
         {
           PE::begin();
-          PE::ColorEdit3("Background", (float*)&sceneInfo.backgroundColor);
+          invalidatePathTracingHistory |= PE::ColorEdit3("Background", (float*)&sceneInfo.backgroundColor);
           PE::end();
 
           // Light.
@@ -367,13 +391,18 @@ void Application::onUIRender()
       PE::SliderFloat2("Metallic/Roughness", glm::value_ptr(m_MetallicRoughnessOverride), -0.01f, 1.0f, "%.2f",
                        ImGuiSliderFlags_AlwaysClamp, "Override all material metallic and roughness");
       PE::end();
+
+      if(invalidatePathTracingHistory)
+      {
+        InvalidatePathTracingHistory();
+      }
     }
     ImGui::End();
   }
-
 void Application::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
   {
     NVVK_CHECK(m_GBuffers.update(cmd, size));
+    InvalidatePathTracingHistory();
   }
 
 void Application::onRender(VkCommandBuffer cmd)
@@ -451,6 +480,7 @@ void Application::RebuildSceneFromSelection()
   {
     CreateScene(false);
     UpdateTextures();
+    InvalidatePathTracingHistory();
   }
 
 void Application::PostProcess(VkCommandBuffer cmd)
@@ -487,8 +517,9 @@ void Application::CreateScene(bool resetCamera)
         m_App->getQueue(0).queue,
         nvsamples::SceneUploader::UploadInput{.sceneDefinition = *resolved.sceneDefinition, .selectedHdriRelativePath = resolved.hdriRelativePath},
         resetCamera, m_CameraManip.get());
-  }
 
+    InvalidatePathTracingHistory();
+  }
 void Application::CreateGraphicsDescriptorSetLayout()
   {
     nvvk::DescriptorBindings bindings;
@@ -639,6 +670,13 @@ void Application::PathTraceScene(VkCommandBuffer cmd)
     });
   }
 
+void Application::InvalidatePathTracingHistory()
+  {
+    if(m_PathTracer != nullptr && m_PathTracer->IsReady())
+    {
+      m_PathTracer->InvalidateAccumulation();
+    }
+  }
 // ---------------------------------------------------------------------------------------------------------------------
 // Application module API
 //
@@ -649,5 +687,9 @@ std::shared_ptr<nvapp::IAppElement> CreateApplicationElement(const std::shared_p
 }
 
 }  // namespace nvsamples
+
+
+
+
 
 

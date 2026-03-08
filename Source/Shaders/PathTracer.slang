@@ -21,16 +21,18 @@
 #include "ShaderIo.h"
 
 // clang-format off
-[[vk::push_constant]]                         ConstantBuffer<PathTracePushConstant> pushConst;
-[[vk::binding(BindingPoints::eTextures)]]     Sampler2D textures[];
-[[vk::binding(BindingPoints::eTlas)]]         RaytracingAccelerationStructure topLevelAS;
-[[vk::binding(BindingPoints::eOutputImage)]]  RWTexture2D<float4> outImage;
+[[vk::push_constant]]                              ConstantBuffer<PathTracePushConstant> pushConst;
+[[vk::binding(BindingPoints::eTextures)]]          Sampler2D textures[];
+[[vk::binding(BindingPoints::eTlas)]]              RaytracingAccelerationStructure topLevelAS;
+[[vk::binding(BindingPoints::eOutputImage)]]       RWTexture2D<float4> outImage;
+[[vk::binding(BindingPoints::eAccumulationImage)]] RWTexture2D<float4> accumulationImage;
 // clang-format on
 
 // Slang does not provide a built-in symbolic "infinite" ray distance here, so
 // we use a very large finite value for "trace until the scene or miss shader
 // says otherwise". This keeps the ray setup explicit for learning purposes.
 static const float kRayTMax = 1.0e32;
+static const uint  kPathTraceFlagAccumulate = 0x1u;
 
 struct PathPayload
 {
@@ -39,6 +41,11 @@ struct PathPayload
   uint   seed;
   uint   depth;
 };
+
+bool IsAccumulationEnabled()
+{
+  return (pushConst.flags & kPathTraceFlagAccumulate) != 0;
+}
 
 float2 dirToLatLongUv(float3 dir)
 {
@@ -84,8 +91,8 @@ float3 SampleCosineHemisphere(float3 normal, inout uint seed)
 {
   const float2 xi = float2(NextRandom(seed), NextRandom(seed));
 
-  const float  r   = sqrt(xi.x);
-  const float  phi = 6.28318530718 * xi.y;
+  const float  r        = sqrt(xi.x);
+  const float  phi      = 6.28318530718 * xi.y;
   const float3 localDir = float3(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - xi.x)));
 
   const float3 tangent   = BuildTangent(normal);
@@ -132,8 +139,7 @@ __generic<T : IFloat> T getTriangleAttribute(uint8_t* dataBufferAddress, BufferV
 [shader("raygeneration")]
 void rgenMain()
 {
-  const uint2 launchID   = DispatchRaysIndex().xy;
-  const uint2 launchSize = DispatchRaysDimensions().xy;
+  const uint2 launchID = DispatchRaysIndex().xy;
 
   GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
 
@@ -150,26 +156,38 @@ void rgenMain()
   PathPayload payload;
   payload.radiance   = float3(0.0, 0.0, 0.0);
   payload.throughput = float3(1.0, 1.0, 1.0);
-  payload.seed       = xxhash32(uint3(launchID, pushConst.frameNumber));
+  payload.seed       = xxhash32(uint3(launchID, pushConst.rngFrameNumber));
   payload.depth      = 0;
 
   TraceRay(topLevelAS, 0, 0xFF, 0, 0, 0, ray, payload);
-  outImage[int2(launchID)] = float4(max(payload.radiance, float3(0.0, 0.0, 0.0)), 1.0);
+
+  const float3 sampleRadiance = max(payload.radiance, float3(0.0, 0.0, 0.0));
+  float3       resolvedRadiance = sampleRadiance;
+
+  if(IsAccumulationEnabled() && pushConst.accumulatedFrames > 0)
+  {
+    const float3 previousAverage = accumulationImage[int2(launchID)].xyz;
+    const float  historyWeight   = float(pushConst.accumulatedFrames);
+    resolvedRadiance = (previousAverage * historyWeight + sampleRadiance) / (historyWeight + 1.0);
+  }
+
+  accumulationImage[int2(launchID)] = float4(resolvedRadiance, 1.0);
+  outImage[int2(launchID)]          = float4(resolvedRadiance, 1.0);
 }
 
 [shader("miss")]
 void rmissMain(inout PathPayload payload)
 {
   const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
-  const float3 envColor = SampleEnvironment(sceneInfo, WorldRayDirection());
+  const float3        envColor  = SampleEnvironment(sceneInfo, WorldRayDirection());
   payload.radiance += payload.throughput * envColor;
 }
 
 [shader("closesthit")]
 void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
-  const float3 barycentrics = float3(1.0 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
-  const uint   instanceIndex = InstanceIndex();
+  const float3 barycentrics   = float3(1.0 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
+  const uint   instanceIndex  = InstanceIndex();
   const uint   primitiveIndex = PrimitiveIndex();
 
   const GltfSceneInfo         sceneInfo = pushConst.sceneInfoAddress[0];
@@ -177,13 +195,13 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
   const GltfMesh              mesh      = sceneInfo.meshes[instance.meshIndex];
   const GltfMetallicRoughness material  = sceneInfo.materials[instance.materialIndex];
 
-  const int3   indices   = getTriangleIndices(mesh.gltfBuffer, mesh.triMesh, primitiveIndex);
-  const float3 pos       = getTriangleAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.positions, indices, barycentrics);
-  const float3 nrm       = getTriangleAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.normals, indices, barycentrics);
-  const float2 texCoord  = getTriangleAttribute<float2>(mesh.gltfBuffer, mesh.triMesh.texCoords, indices, barycentrics);
+  const int3   indices  = getTriangleIndices(mesh.gltfBuffer, mesh.triMesh, primitiveIndex);
+  const float3 pos      = getTriangleAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.positions, indices, barycentrics);
+  const float3 nrm      = getTriangleAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.normals, indices, barycentrics);
+  const float2 texCoord = getTriangleAttribute<float2>(mesh.gltfBuffer, mesh.triMesh.texCoords, indices, barycentrics);
 
   const float3 worldPos = mul(float4(pos, 1.0), ObjectToWorld4x3()).xyz;
-  float3 worldNormal    = normalize(mul(WorldToObject4x3(), nrm).xyz);
+  float3       worldNormal = normalize(mul(WorldToObject4x3(), nrm).xyz);
 
   if(dot(worldNormal, WorldRayDirection()) > 0.0)
   {
@@ -214,6 +232,5 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
 
   TraceRay(topLevelAS, 0, 0xFF, 0, 0, 0, bounceRay, payload);
 }
-
 
 

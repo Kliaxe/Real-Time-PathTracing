@@ -79,6 +79,7 @@ private:
   void UpdateSceneBuffer(VkCommandBuffer cmd);
   void RasterScene(VkCommandBuffer cmd);
   void PathTraceScene(VkCommandBuffer cmd);
+  void InvalidatePathTracingHistory();
 
 private:
   nvapp::Application*                    m_App = nullptr;  // Owning application
@@ -118,3 +119,6 @@ std::shared_ptr<nvapp::IAppElement> CreateApplicationElement(
     const std::shared_ptr<nvutils::CameraManipulator>& cameraManip);
 
 }  // namespace nvsamples
+
+
+

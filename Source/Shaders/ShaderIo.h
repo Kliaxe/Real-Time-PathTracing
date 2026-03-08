@@ -26,12 +26,14 @@ NAMESPACE_SHADERIO_BEGIN()
 
 // Binding points shared by raster and ray tracing shaders.
 // Raster currently uses only eTextures, while the path tracer also binds the
-// TLAS and the storage image it writes into.
+// TLAS, the storage image shown on screen, and the persistent accumulation
+// image used when multi-frame averaging is enabled.
 enum BindingPoints
 {
-  eTextures    = 0,  // Combined image sampler array
-  eTlas        = 1,  // Top-level acceleration structure
-  eOutputImage = 2,  // Storage image for ray tracing output
+  eTextures          = 0,  // Combined image sampler array
+  eTlas              = 1,  // Top-level acceleration structure
+  eOutputImage       = 2,  // Storage image for the current frame's display result
+  eAccumulationImage = 3,  // Storage image that preserves path tracing history across frames
 };
 
 // Push constants used by the raster foundation pass.
@@ -43,15 +45,22 @@ struct TutoPushConstant
   float2         metallicRoughnessOverride;  // Metallic and roughness override values
 };
 
+// Bit flags used by the path tracing push constants.
+enum PathTraceFlags
+{
+  ePathTraceFlagAccumulate = 0x1u,
+};
+
 // Push constants used by the path tracing pass.
-// This is intentionally small: it just points the shaders at the shared scene
-// info buffer and provides a tiny bit of per-frame control data.
+// We keep both a random-seed frame index and an accumulation frame count so the
+// renderer can keep showing changing noise even when accumulation is disabled.
 struct PathTracePushConstant
 {
-  GltfSceneInfo* sceneInfoAddress;  // Address of the shared scene information buffer
-  uint           frameNumber;       // Frame index used to vary random seeds
-  uint           maxBounces;        // Number of bounce continuations after the primary hit
-  uint           _pad0;
+  GltfSceneInfo* sceneInfoAddress;    // Address of the shared scene information buffer
+  uint           rngFrameNumber;      // Always-incrementing frame index used to vary random seeds
+  uint           accumulatedFrames;   // Number of frames already accumulated into the history image
+  uint           maxBounces;          // Number of bounce continuations after the primary hit
+  uint           flags;               // PathTraceFlags bit mask
 };
 
 NAMESPACE_SHADERIO_END()
