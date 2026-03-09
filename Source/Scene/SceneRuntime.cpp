@@ -69,12 +69,18 @@ nvvk::AccelerationStructureGeometryInfo CreateBottomLevelGeometry(const shaderio
       .sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
       .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
       .geometry     = {.triangles = triangles},
-      .flags        = VK_GEOMETRY_OPAQUE_BIT_KHR,
+      .flags        = 0,
   };
 
   result.rangeInfo = VkAccelerationStructureBuildRangeInfoKHR{.primitiveCount = triangleCount};
 
   return result;
+}
+
+
+bool UsesAlphaMask(const shaderio::GltfMetallicRoughness& material)
+{
+  return material.alphaMode == shaderio::GltfAlphaMode::eMask;
 }
 
 }  // namespace
@@ -384,7 +390,16 @@ void SceneRuntime::BuildTopLevelAccelerationStructure()
     tlasInstance.accelerationStructureReference = m_BottomLevelAS[sceneInstance.meshIndex].address;
     tlasInstance.instanceShaderBindingTableRecordOffset = 0;
     tlasInstance.mask = 0xFF;
-    tlasInstance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+
+    VkGeometryInstanceFlagsKHR instanceFlags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+    if(sceneInstance.materialIndex < m_SceneResource.materials.size()
+       && !UsesAlphaMask(m_SceneResource.materials[sceneInstance.materialIndex]))
+    {
+      // Opaque materials can skip any-hit entirely, but masked materials must
+      // leave visibility to the shader-side alpha test.
+      instanceFlags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+    }
+    tlasInstance.flags = instanceFlags;
     m_TlasInstances.push_back(tlasInstance);
   }
 
@@ -478,7 +493,4 @@ void SceneRuntime::DestroyTextures()
 }
 
 }  // namespace nvsamples
-
-
-
 
