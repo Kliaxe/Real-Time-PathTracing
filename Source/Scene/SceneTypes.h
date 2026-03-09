@@ -16,12 +16,16 @@ struct MaterialAttributes
 {
   glm::vec3 emission           = glm::vec3(0.0f, 0.0f, 0.0f);
   glm::vec3 albedo             = glm::vec3(1.0f, 1.0f, 1.0f);
+  bool      doubleSided        = false;
   float     specular           = 1.0f;
   float     specularTint       = 0.0f;
   float     metallic           = 0.0f;
   float     roughness          = 1.0f;
   float     subsurface         = 0.0f;
   float     anisotropy         = 0.0f;
+  glm::vec3 attenuationColor   = glm::vec3(1.0f, 1.0f, 1.0f);
+  float     attenuationDistance = 1.0e30f;
+  float     volumeThickness    = 0.0f;
   float     sheenRoughness     = 0.0f;
   float     sheenTint          = 0.0f;
   float     clearcoat          = 0.0f;
@@ -58,4 +62,3 @@ struct SceneDefinition
 };
 
 }  // namespace nvsamples
-

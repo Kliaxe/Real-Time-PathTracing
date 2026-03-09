@@ -370,6 +370,40 @@ void CreateGltfSceneInfoBuffer(GltfSceneResource& sceneResource, nvvk::StagingUp
   NVVK_DBG_NAME(sceneResource.bMaterials.buffer);
   NVVK_CHECK(stagingUploader.appendBuffer(sceneResource.bMaterials, 0, std::span<const shaderio::GltfMetallicRoughness>(sceneResource.materials)));
 
+  if(!sceneResource.emissiveTriangles.empty())
+  {
+    allocator->createBuffer(sceneResource.bEmissiveTriangles, std::span(sceneResource.emissiveTriangles).size_bytes(),
+                            VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT);
+    NVVK_DBG_NAME(sceneResource.bEmissiveTriangles.buffer);
+    NVVK_CHECK(stagingUploader.appendBuffer(sceneResource.bEmissiveTriangles, 0,
+                                            std::span<const shaderio::PathTraceEmissiveTriangle>(sceneResource.emissiveTriangles)));
+  }
+
+  if(!sceneResource.emissiveTriangleCdf.empty())
+  {
+    allocator->createBuffer(sceneResource.bEmissiveTriangleCdf, std::span(sceneResource.emissiveTriangleCdf).size_bytes(),
+                            VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT);
+    NVVK_DBG_NAME(sceneResource.bEmissiveTriangleCdf.buffer);
+    NVVK_CHECK(
+        stagingUploader.appendBuffer(sceneResource.bEmissiveTriangleCdf, 0, std::span<const float>(sceneResource.emissiveTriangleCdf)));
+  }
+
+  if(!sceneResource.environmentCdf.empty())
+  {
+    allocator->createBuffer(sceneResource.bEnvironmentCdf, std::span(sceneResource.environmentCdf).size_bytes(),
+                            VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT);
+    NVVK_DBG_NAME(sceneResource.bEnvironmentCdf.buffer);
+    NVVK_CHECK(stagingUploader.appendBuffer(sceneResource.bEnvironmentCdf, 0, std::span<const float>(sceneResource.environmentCdf)));
+  }
+
+  if(!sceneResource.environmentPdf.empty())
+  {
+    allocator->createBuffer(sceneResource.bEnvironmentPdf, std::span(sceneResource.environmentPdf).size_bytes(),
+                            VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT);
+    NVVK_DBG_NAME(sceneResource.bEnvironmentPdf.buffer);
+    NVVK_CHECK(stagingUploader.appendBuffer(sceneResource.bEnvironmentPdf, 0, std::span<const float>(sceneResource.environmentPdf)));
+  }
+
   // SceneInfo buffer.
   NVVK_CHECK(allocator->createBuffer(sceneResource.bSceneInfo,
                                      std::span<const shaderio::GltfSceneInfo>(&sceneResource.sceneInfo, 1).size_bytes(),

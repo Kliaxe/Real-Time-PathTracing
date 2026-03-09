@@ -4,10 +4,14 @@
 // Performs glTF parsing, texture/material packing, and import upload for runtime scenes.
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
 #include <span>
 #include <vector>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
 #include <nvapp/application.hpp>
 #include <nvvk/check_error.hpp>
 #include <nvvk/default_structs.hpp>
@@ -29,6 +33,22 @@ struct MaterialRange
 {
   uint32_t offset = 0;
   uint32_t count  = 0;
+};
+
+struct MaterialTextureIndices
+{
+  int baseColor          = -1;
+  int metallicRoughness  = -1;
+  int emissive           = -1;
+  int normal             = -1;
+  int specular           = -1;
+  int specularColor      = -1;
+  int transmission       = -1;
+  int thickness          = -1;
+  int clearcoat          = -1;
+  int clearcoatRoughness = -1;
+  int sheenColor         = -1;
+  int sheenRoughness     = -1;
 };
 
 float Clamp01(float value)
@@ -86,6 +106,18 @@ glm::vec3 ReadObjectVec3(const tinygltf::Value::Object& object, const char* key,
   return glm::vec3(ReadValueAsFloat(arr[0], fallback.x), ReadValueAsFloat(arr[1], fallback.y), ReadValueAsFloat(arr[2], fallback.z));
 }
 
+int ReadObjectTextureIndex(const tinygltf::Value::Object& object, const char* key, int fallback)
+{
+  const tinygltf::Value* value = FindObjectMember(object, key);
+  if(value == nullptr || !value->IsObject())
+  {
+    return fallback;
+  }
+
+  const tinygltf::Value::Object& textureObject = value->Get<tinygltf::Value::Object>();
+  return static_cast<int>(ReadObjectNumber(textureObject, "index", static_cast<float>(fallback)));
+}
+
 const tinygltf::Value::Object* FindMaterialExtensionObject(const tinygltf::Material& material, const char* extensionName)
 {
   const auto extIt = material.extensions.find(extensionName);
@@ -111,6 +143,12 @@ MaterialAttributes ParseMaterialAttributes(const tinygltf::Material& src)
   {
     dst.emission = glm::vec3(static_cast<float>(src.emissiveFactor[0]), static_cast<float>(src.emissiveFactor[1]),
                              static_cast<float>(src.emissiveFactor[2]));
+  }
+  dst.doubleSided = src.doubleSided;
+  if(const tinygltf::Value::Object* ext = FindMaterialExtensionObject(src, "KHR_materials_emissive_strength"))
+  {
+    const float emissiveStrength = std::max(ReadObjectNumber(*ext, "emissiveStrength", 1.0f), 0.0f);
+    dst.emission *= emissiveStrength;
   }
   dst.metallic  = static_cast<float>(src.pbrMetallicRoughness.metallicFactor);
   dst.roughness = static_cast<float>(src.pbrMetallicRoughness.roughnessFactor);
@@ -146,7 +184,9 @@ MaterialAttributes ParseMaterialAttributes(const tinygltf::Material& src)
   }
   if(const tinygltf::Value::Object* ext = FindMaterialExtensionObject(src, "KHR_materials_volume"))
   {
-    dst.subsurface = ReadObjectNumber(*ext, "thicknessFactor", dst.subsurface);
+    dst.volumeThickness     = ReadObjectNumber(*ext, "thicknessFactor", dst.volumeThickness);
+    dst.attenuationDistance = ReadObjectNumber(*ext, "attenuationDistance", dst.attenuationDistance);
+    dst.attenuationColor    = ReadObjectVec3(*ext, "attenuationColor", dst.attenuationColor);
   }
 
   dst.specular           = Clamp01(dst.specular);
@@ -155,6 +195,9 @@ MaterialAttributes ParseMaterialAttributes(const tinygltf::Material& src)
   dst.roughness          = Clamp01(dst.roughness);
   dst.subsurface         = Clamp01(dst.subsurface);
   dst.anisotropy         = Clamp01(dst.anisotropy);
+  dst.attenuationColor   = glm::clamp(dst.attenuationColor, glm::vec3(0.0f), glm::vec3(1.0f));
+  dst.attenuationDistance = std::max(dst.attenuationDistance, 0.0f);
+  dst.volumeThickness    = std::max(dst.volumeThickness, 0.0f);
   dst.sheenRoughness     = Clamp01(dst.sheenRoughness);
   dst.sheenTint          = Clamp01(dst.sheenTint);
   dst.clearcoat          = Clamp01(dst.clearcoat);
@@ -164,17 +207,267 @@ MaterialAttributes ParseMaterialAttributes(const tinygltf::Material& src)
 }
 
 shaderio::GltfMetallicRoughness ToGpuMaterial(const MaterialAttributes& materialAttributes, int baseColorTextureIndex,
-                                              int metallicRoughnessTextureIndex, float alphaCutoff, int alphaMode)
+                                              int metallicRoughnessTextureIndex, const MaterialTextureIndices& textureIndices,
+                                              float alphaCutoff, int alphaMode)
 {
   shaderio::GltfMetallicRoughness dst{};
-  dst.baseColorFactor              = glm::vec4(materialAttributes.albedo, 1.0f);
-  dst.metallicFactor               = materialAttributes.metallic;
-  dst.roughnessFactor              = materialAttributes.roughness;
-  dst.baseColorTextureIndex        = baseColorTextureIndex;
+  dst.baseColorFactor               = glm::vec4(materialAttributes.albedo, 1.0f);
+  dst.emissionFactor                = materialAttributes.emission;
+  dst.doubleSided                   = materialAttributes.doubleSided ? 1 : 0;
+  dst.metallicFactor                = materialAttributes.metallic;
+  dst.roughnessFactor               = materialAttributes.roughness;
+  dst.specularFactor                = materialAttributes.specular;
+  dst.specularTint                  = materialAttributes.specularTint;
+  dst.subsurfaceFactor              = materialAttributes.subsurface;
+  dst.anisotropy                    = materialAttributes.anisotropy;
+  dst.attenuationColor              = materialAttributes.attenuationColor;
+  dst.transmissionFactor            = materialAttributes.transmission;
+  dst.attenuationDistance           = materialAttributes.attenuationDistance;
+  dst.volumeThickness               = materialAttributes.volumeThickness;
+  dst.refractionIndex               = materialAttributes.refraction;
+  dst.clearcoatFactor               = materialAttributes.clearcoat;
+  dst.clearcoatRoughness            = materialAttributes.clearcoatRoughness;
+  dst.sheenFactor                   = materialAttributes.sheenRoughness;
+  dst.sheenTint                     = materialAttributes.sheenTint;
+  dst.baseColorTextureIndex         = baseColorTextureIndex;
   dst.metallicRoughnessTextureIndex = metallicRoughnessTextureIndex;
-  dst.alphaCutoff                  = alphaCutoff;
-  dst.alphaMode                    = alphaMode;
+  dst.emissiveTextureIndex          = textureIndices.emissive;
+  dst.normalTextureIndex            = textureIndices.normal;
+  dst.specularTextureIndex          = textureIndices.specular;
+  dst.specularColorTextureIndex     = textureIndices.specularColor;
+  dst.transmissionTextureIndex      = textureIndices.transmission;
+  dst.thicknessTextureIndex         = textureIndices.thickness;
+  dst.clearcoatTextureIndex         = textureIndices.clearcoat;
+  dst.clearcoatRoughnessTextureIndex = textureIndices.clearcoatRoughness;
+  dst.sheenColorTextureIndex        = textureIndices.sheenColor;
+  dst.sheenRoughnessTextureIndex    = textureIndices.sheenRoughness;
+  dst.alphaCutoff                   = alphaCutoff;
+  dst.alphaMode                     = alphaMode;
   return dst;
+}
+
+float Luminance(const glm::vec3& color)
+{
+  return glm::dot(color, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+}
+
+template <typename T>
+T ReadStridedValue(const unsigned char* base, const shaderio::BufferView& view, uint32_t index, const T& fallback)
+{
+  if(view.count == 0 || index >= view.count || view.offset == std::numeric_limits<uint32_t>::max())
+  {
+    return fallback;
+  }
+
+  T value{};
+  std::memcpy(&value, base + view.offset + static_cast<size_t>(index) * view.byteStride, sizeof(T));
+  return value;
+}
+
+glm::uvec3 ReadTriangleIndices(const unsigned char* base, const shaderio::GltfMesh& mesh, uint32_t primitiveIndex)
+{
+  const size_t indexOffset = mesh.triMesh.indices.offset + static_cast<size_t>(primitiveIndex) * 3ull * mesh.triMesh.indices.byteStride;
+  if(mesh.triMesh.indices.byteStride == sizeof(uint16_t))
+  {
+    glm::u16vec3 indices{};
+    std::memcpy(&indices, base + indexOffset, sizeof(indices));
+    return glm::uvec3(indices);
+  }
+
+  glm::uvec3 indices{};
+  std::memcpy(&indices, base + indexOffset, sizeof(indices));
+  return indices;
+}
+
+glm::vec3 TransformPosition(const glm::mat4& transform, const glm::vec3& position)
+{
+  return glm::vec3(transform * glm::vec4(position, 1.0f));
+}
+
+bool ModelNeedsFallbackMaterial(const tinygltf::Model& model)
+{
+  if(model.materials.empty())
+  {
+    return true;
+  }
+
+  for(const tinygltf::Mesh& mesh : model.meshes)
+  {
+    for(const tinygltf::Primitive& primitive : mesh.primitives)
+    {
+      if(primitive.mode != TINYGLTF_MODE_TRIANGLES || primitive.indices < 0)
+      {
+        continue;
+      }
+
+      if(primitive.material < 0 || primitive.material >= static_cast<int>(model.materials.size()))
+      {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+void BuildEnvironmentSamplingData(const std::filesystem::path& hdriPath, GltfSceneResource& sceneResource)
+{
+  sceneResource.environmentCdf.clear();
+  sceneResource.environmentPdf.clear();
+  sceneResource.environmentWidth  = 0;
+  sceneResource.environmentHeight = 0;
+
+  const std::optional<ImageDataFloat4> image = LoadImageFloat4(hdriPath);
+  if(!image.has_value() || image->width == 0 || image->height == 0)
+  {
+    return;
+  }
+
+  const uint32_t width  = image->width;
+  const uint32_t height = image->height;
+  const size_t   texelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+
+  std::vector<double> weights(texelCount, 0.0);
+  double              totalWeight = 0.0;
+
+  for(uint32_t y = 0; y < height; ++y)
+  {
+    const float rowV     = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+    const float sinTheta = std::max(std::sin(glm::pi<float>() * rowV), 1.0e-6f);
+    for(uint32_t x = 0; x < width; ++x)
+    {
+      const size_t index = static_cast<size_t>(y) * width + x;
+      const glm::vec3 radiance(image->pixels[index * 4 + 0], image->pixels[index * 4 + 1], image->pixels[index * 4 + 2]);
+      const double    weight = static_cast<double>(std::max(Luminance(radiance), 0.0f) * sinTheta);
+      weights[index]         = weight;
+      totalWeight += weight;
+    }
+  }
+
+  if(totalWeight <= 0.0)
+  {
+    return;
+  }
+
+  sceneResource.environmentWidth  = width;
+  sceneResource.environmentHeight = height;
+  sceneResource.environmentCdf.resize(texelCount);
+  sceneResource.environmentPdf.resize(texelCount);
+
+  double cumulative = 0.0;
+  for(size_t i = 0; i < texelCount; ++i)
+  {
+    const double probability            = weights[i] / totalWeight;
+    cumulative                         += probability;
+    sceneResource.environmentPdf[i]     = static_cast<float>(probability);
+    sceneResource.environmentCdf[i]     = static_cast<float>(std::min(cumulative, 1.0));
+  }
+}
+
+void BuildEmissiveTriangleSamplingData(GltfSceneResource& sceneResource)
+{
+  sceneResource.emissiveTriangleCdf.clear();
+  if(sceneResource.emissiveTriangles.empty())
+  {
+    return;
+  }
+
+  std::vector<double> weights(sceneResource.emissiveTriangles.size(), 0.0);
+  double              totalWeight = 0.0;
+  for(size_t i = 0; i < sceneResource.emissiveTriangles.size(); ++i)
+  {
+    const shaderio::PathTraceEmissiveTriangle& light = sceneResource.emissiveTriangles[i];
+    if(light.materialIndex >= sceneResource.materials.size())
+    {
+      continue;
+    }
+
+    const shaderio::GltfMetallicRoughness& material = sceneResource.materials[light.materialIndex];
+    const double weight = static_cast<double>(light.area) * static_cast<double>(std::max(Luminance(glm::vec3(material.emissionFactor)), 0.0f));
+    weights[i]          = weight;
+    totalWeight += weight;
+  }
+
+  if(totalWeight <= 0.0)
+  {
+    sceneResource.emissiveTriangles.clear();
+    return;
+  }
+
+  sceneResource.emissiveTriangleCdf.resize(sceneResource.emissiveTriangles.size());
+  double cumulative = 0.0;
+  for(size_t i = 0; i < sceneResource.emissiveTriangles.size(); ++i)
+  {
+    cumulative += weights[i] / totalWeight;
+    sceneResource.emissiveTriangleCdf[i] = static_cast<float>(std::min(cumulative, 1.0));
+  }
+}
+
+void AppendEmissiveTrianglesFromModel(const tinygltf::Model& model,
+                                      const GltfSceneResource& sceneResource,
+                                      uint32_t instanceStart,
+                                      uint32_t instanceCount,
+                                      std::vector<shaderio::PathTraceEmissiveTriangle>& outTriangles)
+{
+  if(model.buffers.empty())
+  {
+    return;
+  }
+
+  const unsigned char* base = model.buffers[0].data.data();
+  for(uint32_t instanceOffset = 0; instanceOffset < instanceCount; ++instanceOffset)
+  {
+    const uint32_t sceneInstanceIndex = instanceStart + instanceOffset;
+    const shaderio::GltfInstance& instance = sceneResource.instances[sceneInstanceIndex];
+    if(instance.materialIndex >= sceneResource.materials.size() || instance.meshIndex >= sceneResource.meshes.size())
+    {
+      continue;
+    }
+
+    const shaderio::GltfMetallicRoughness& material = sceneResource.materials[instance.materialIndex];
+    if(Luminance(glm::vec3(material.emissionFactor)) <= 0.0f)
+    {
+      continue;
+    }
+
+    const shaderio::GltfMesh& mesh = sceneResource.meshes[instance.meshIndex];
+    const uint32_t primitiveCount  = mesh.triMesh.indices.count / 3u;
+    for(uint32_t primitiveIndex = 0; primitiveIndex < primitiveCount; ++primitiveIndex)
+    {
+      const glm::uvec3 indices = ReadTriangleIndices(base, mesh, primitiveIndex);
+
+      const glm::vec3 position0 = ReadStridedValue(base, mesh.triMesh.positions, indices.x, glm::vec3(0.0f));
+      const glm::vec3 position1 = ReadStridedValue(base, mesh.triMesh.positions, indices.y, glm::vec3(0.0f));
+      const glm::vec3 position2 = ReadStridedValue(base, mesh.triMesh.positions, indices.z, glm::vec3(0.0f));
+      const glm::vec2 texCoord0 = ReadStridedValue(base, mesh.triMesh.texCoords, indices.x, glm::vec2(0.0f));
+      const glm::vec2 texCoord1 = ReadStridedValue(base, mesh.triMesh.texCoords, indices.y, glm::vec2(0.0f));
+      const glm::vec2 texCoord2 = ReadStridedValue(base, mesh.triMesh.texCoords, indices.z, glm::vec2(0.0f));
+
+      const glm::vec3 worldPosition0 = TransformPosition(instance.transform, position0);
+      const glm::vec3 worldPosition1 = TransformPosition(instance.transform, position1);
+      const glm::vec3 worldPosition2 = TransformPosition(instance.transform, position2);
+      const glm::vec3 crossProduct   = glm::cross(worldPosition1 - worldPosition0, worldPosition2 - worldPosition0);
+      const float     area           = 0.5f * glm::length(crossProduct);
+      if(area <= 1.0e-6f)
+      {
+        continue;
+      }
+
+      shaderio::PathTraceEmissiveTriangle light{};
+      light.position0       = worldPosition0;
+      light.position1       = worldPosition1;
+      light.position2       = worldPosition2;
+      light.area            = area;
+      light.materialIndex   = instance.materialIndex;
+      light.instanceIndex   = sceneInstanceIndex;
+      light.primitiveIndex  = primitiveIndex;
+      light.geometricNormal = glm::normalize(crossProduct);
+      light.texCoord0       = texCoord0;
+      light.texCoord1       = texCoord1;
+      light.texCoord2       = texCoord2;
+      outTriangles.push_back(light);
+    }
+  }
 }
 
 }  // namespace
@@ -281,8 +574,17 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
     return textureMap;
   };
 
-  auto addModelMaterials = [&](const tinygltf::Model& model, const std::vector<int>& baseColorTextureMap,
-                               const std::vector<int>& metallicRoughnessTextureMap) -> MaterialRange {
+  auto getTextureIndex = [](const std::vector<int>& textureMap, int gltfTextureIndex) -> int {
+    if(gltfTextureIndex < 0 || gltfTextureIndex >= static_cast<int>(textureMap.size()))
+    {
+      return -1;
+    }
+
+    return textureMap[gltfTextureIndex];
+  };
+
+  auto addModelMaterials = [&](const tinygltf::Model& model, const std::vector<int>& srgbTextureMap,
+                               const std::vector<int>& linearTextureMap) -> MaterialRange {
     const uint32_t materialOffset   = static_cast<uint32_t>(state.sceneResource.materials.size());
     const uint32_t attributesOffset = static_cast<uint32_t>(state.materialAttributes.size());
 
@@ -290,7 +592,8 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
     {
       MaterialAttributes defaultMaterial{};
       state.materialAttributes.push_back(defaultMaterial);
-      state.sceneResource.materials.push_back(ToGpuMaterial(defaultMaterial, -1, -1, 0.5f, shaderio::GltfAlphaMode::eOpaque));
+      state.sceneResource.materials.push_back(ToGpuMaterial(defaultMaterial, -1, -1, MaterialTextureIndices{}, 0.5f,
+                                                            shaderio::GltfAlphaMode::eOpaque));
       return {.offset = materialOffset, .count = 1};
     }
 
@@ -299,18 +602,40 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
       const MaterialAttributes parsedMaterial = ParseMaterialAttributes(src);
       state.materialAttributes.push_back(parsedMaterial);
 
-      const int baseColorTex = src.pbrMetallicRoughness.baseColorTexture.index;
-      int       baseColorTextureIndex = -1;
-      if(baseColorTex >= 0 && baseColorTex < static_cast<int>(baseColorTextureMap.size()))
-      {
-        baseColorTextureIndex = baseColorTextureMap[baseColorTex];
-      }
+      MaterialTextureIndices textureIndices{};
+      textureIndices.baseColor         = getTextureIndex(srgbTextureMap, src.pbrMetallicRoughness.baseColorTexture.index);
+      textureIndices.metallicRoughness = getTextureIndex(linearTextureMap, src.pbrMetallicRoughness.metallicRoughnessTexture.index);
+      textureIndices.emissive          = getTextureIndex(srgbTextureMap, src.emissiveTexture.index);
+      textureIndices.normal            = getTextureIndex(linearTextureMap, src.normalTexture.index);
 
-      const int metallicRoughnessTex = src.pbrMetallicRoughness.metallicRoughnessTexture.index;
-      int       metallicRoughnessTextureIndex = -1;
-      if(metallicRoughnessTex >= 0 && metallicRoughnessTex < static_cast<int>(metallicRoughnessTextureMap.size()))
+      if(const tinygltf::Value::Object* ext = FindMaterialExtensionObject(src, "KHR_materials_transmission"))
       {
-        metallicRoughnessTextureIndex = metallicRoughnessTextureMap[metallicRoughnessTex];
+        textureIndices.transmission = getTextureIndex(linearTextureMap, ReadObjectTextureIndex(*ext, "transmissionTexture", -1));
+      }
+      if(const tinygltf::Value::Object* ext = FindMaterialExtensionObject(src, "KHR_materials_volume"))
+      {
+        textureIndices.thickness = getTextureIndex(linearTextureMap, ReadObjectTextureIndex(*ext, "thicknessTexture", -1));
+      }
+      if(const tinygltf::Value::Object* ext = FindMaterialExtensionObject(src, "KHR_materials_clearcoat"))
+      {
+        textureIndices.clearcoat =
+            getTextureIndex(linearTextureMap, ReadObjectTextureIndex(*ext, "clearcoatTexture", -1));
+        textureIndices.clearcoatRoughness =
+            getTextureIndex(linearTextureMap, ReadObjectTextureIndex(*ext, "clearcoatRoughnessTexture", -1));
+      }
+      if(const tinygltf::Value::Object* ext = FindMaterialExtensionObject(src, "KHR_materials_specular"))
+      {
+        textureIndices.specular =
+            getTextureIndex(linearTextureMap, ReadObjectTextureIndex(*ext, "specularTexture", -1));
+        textureIndices.specularColor =
+            getTextureIndex(srgbTextureMap, ReadObjectTextureIndex(*ext, "specularColorTexture", -1));
+      }
+      if(const tinygltf::Value::Object* ext = FindMaterialExtensionObject(src, "KHR_materials_sheen"))
+      {
+        textureIndices.sheenRoughness =
+            getTextureIndex(linearTextureMap, ReadObjectTextureIndex(*ext, "sheenRoughnessTexture", -1));
+        textureIndices.sheenColor =
+            getTextureIndex(srgbTextureMap, ReadObjectTextureIndex(*ext, "sheenColorTexture", -1));
       }
 
       int alphaMode = shaderio::GltfAlphaMode::eOpaque;
@@ -319,14 +644,24 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
       else if(src.alphaMode == "BLEND")
         alphaMode = shaderio::GltfAlphaMode::eBlend;
 
-      state.sceneResource.materials.push_back(ToGpuMaterial(parsedMaterial, baseColorTextureIndex,
-                                                             metallicRoughnessTextureIndex, static_cast<float>(src.alphaCutoff),
-                                                             alphaMode));
+      state.sceneResource.materials.push_back(ToGpuMaterial(parsedMaterial, textureIndices.baseColor,
+                                                            textureIndices.metallicRoughness, textureIndices,
+                                                            static_cast<float>(src.alphaCutoff), alphaMode));
     }
     return {.offset = materialOffset, .count = static_cast<uint32_t>(state.materialAttributes.size() - attributesOffset)};
   };
 
-  auto applyMaterialOverrides = [&](const MaterialRange& range, const std::vector<SceneMaterialOverride>& overrides) {
+  auto addDefaultMaterial = [&]() -> uint32_t {
+    const uint32_t materialIndex = static_cast<uint32_t>(state.sceneResource.materials.size());
+    MaterialAttributes defaultMaterial{};
+    state.materialAttributes.push_back(defaultMaterial);
+    state.sceneResource.materials.push_back(ToGpuMaterial(defaultMaterial, -1, -1, MaterialTextureIndices{}, 0.5f,
+                                                          shaderio::GltfAlphaMode::eOpaque));
+    return materialIndex;
+  };
+
+  auto applyMaterialOverrides = [&](const MaterialRange& range, const std::vector<SceneMaterialOverride>& overrides,
+                                    std::optional<uint32_t> fallbackMaterialIndex = std::nullopt) {
     if(range.count == 0 || overrides.empty())
       return;
 
@@ -348,8 +683,48 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
         state.materialAttributes[i] = overrideDef.attributes;
         shaderio::GltfMetallicRoughness& gpuMaterial = state.sceneResource.materials[i];
         gpuMaterial.baseColorFactor                    = glm::vec4(overrideDef.attributes.albedo, gpuMaterial.baseColorFactor.w);
+        gpuMaterial.emissionFactor                     = overrideDef.attributes.emission;
+        gpuMaterial.doubleSided                        = overrideDef.attributes.doubleSided ? 1 : 0;
         gpuMaterial.metallicFactor                     = overrideDef.attributes.metallic;
         gpuMaterial.roughnessFactor                    = overrideDef.attributes.roughness;
+        gpuMaterial.specularFactor                     = overrideDef.attributes.specular;
+        gpuMaterial.specularTint                       = overrideDef.attributes.specularTint;
+        gpuMaterial.subsurfaceFactor                   = overrideDef.attributes.subsurface;
+        gpuMaterial.anisotropy                         = overrideDef.attributes.anisotropy;
+        gpuMaterial.attenuationColor                   = overrideDef.attributes.attenuationColor;
+        gpuMaterial.transmissionFactor                 = overrideDef.attributes.transmission;
+        gpuMaterial.attenuationDistance                = overrideDef.attributes.attenuationDistance;
+        gpuMaterial.volumeThickness                    = overrideDef.attributes.volumeThickness;
+        gpuMaterial.refractionIndex                    = overrideDef.attributes.refraction;
+        gpuMaterial.clearcoatFactor                    = overrideDef.attributes.clearcoat;
+        gpuMaterial.clearcoatRoughness                 = overrideDef.attributes.clearcoatRoughness;
+        gpuMaterial.sheenFactor                        = overrideDef.attributes.sheenRoughness;
+        gpuMaterial.sheenTint                          = overrideDef.attributes.sheenTint;
+      }
+
+      if(overrideDef.materialSlot < 0 && fallbackMaterialIndex.has_value())
+      {
+        const uint32_t fallbackIndex = *fallbackMaterialIndex;
+        state.materialAttributes[fallbackIndex] = overrideDef.attributes;
+        shaderio::GltfMetallicRoughness& gpuMaterial = state.sceneResource.materials[fallbackIndex];
+        gpuMaterial.baseColorFactor                    = glm::vec4(overrideDef.attributes.albedo, gpuMaterial.baseColorFactor.w);
+        gpuMaterial.emissionFactor                     = overrideDef.attributes.emission;
+        gpuMaterial.doubleSided                        = overrideDef.attributes.doubleSided ? 1 : 0;
+        gpuMaterial.metallicFactor                     = overrideDef.attributes.metallic;
+        gpuMaterial.roughnessFactor                    = overrideDef.attributes.roughness;
+        gpuMaterial.specularFactor                     = overrideDef.attributes.specular;
+        gpuMaterial.specularTint                       = overrideDef.attributes.specularTint;
+        gpuMaterial.subsurfaceFactor                   = overrideDef.attributes.subsurface;
+        gpuMaterial.anisotropy                         = overrideDef.attributes.anisotropy;
+        gpuMaterial.attenuationColor                   = overrideDef.attributes.attenuationColor;
+        gpuMaterial.transmissionFactor                 = overrideDef.attributes.transmission;
+        gpuMaterial.attenuationDistance                = overrideDef.attributes.attenuationDistance;
+        gpuMaterial.volumeThickness                    = overrideDef.attributes.volumeThickness;
+        gpuMaterial.refractionIndex                    = overrideDef.attributes.refraction;
+        gpuMaterial.clearcoatFactor                    = overrideDef.attributes.clearcoat;
+        gpuMaterial.clearcoatRoughness                 = overrideDef.attributes.clearcoatRoughness;
+        gpuMaterial.sheenFactor                        = overrideDef.attributes.sheenRoughness;
+        gpuMaterial.sheenTint                          = overrideDef.attributes.sheenTint;
       }
     }
   };
@@ -362,6 +737,7 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
     m_SamplerPool->acquireSampler(texture.descriptor.sampler);
     state.textures.emplace_back(texture);
     environmentTextureIndex = static_cast<int>(state.textures.size()) - 1;
+    BuildEnvironmentSamplingData(hdriPath, state.sceneResource);
   }
 
   const std::vector<std::filesystem::path> contentDirs = nvsamples::GetContentDirs();
@@ -370,14 +746,25 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
     const std::filesystem::path modelPath = nvutils::findFile(modelEntry.assetPath, contentDirs);
     const tinygltf::Model       model     = nvsamples::LoadGltfResources(modelPath);
 
-    const std::vector<int> baseColorTextureMap         = loadTextureIndices(model, modelPath, true);
-    const std::vector<int> metallicRoughnessTextureMap = loadTextureIndices(model, modelPath, false);
-    const MaterialRange    materialRange               = addModelMaterials(model, baseColorTextureMap, metallicRoughnessTextureMap);
+    const std::vector<int> srgbTextureMap   = loadTextureIndices(model, modelPath, true);
+    const std::vector<int> linearTextureMap = loadTextureIndices(model, modelPath, false);
+    const MaterialRange    materialRange    = addModelMaterials(model, srgbTextureMap, linearTextureMap);
+    const bool             needsFallbackMaterial = ModelNeedsFallbackMaterial(model);
+    std::optional<uint32_t> fallbackMaterialIndex;
+    if(model.materials.empty())
+    {
+      fallbackMaterialIndex = materialRange.offset;
+    }
+    else if(needsFallbackMaterial)
+    {
+      fallbackMaterialIndex = addDefaultMaterial();
+    }
+
     const uint32_t         meshStartIndex = static_cast<uint32_t>(state.sceneResource.meshes.size());
     const uint32_t         instanceStart  = static_cast<uint32_t>(state.sceneResource.instances.size());
 
     nvsamples::ImportGltfData(state.sceneResource, model, *m_StagingUploader, modelEntry.importNodeInstances, materialRange.offset,
-                              materialRange.offset);
+                              fallbackMaterialIndex.value_or(materialRange.offset));
 
     uint32_t importedInstanceCount = static_cast<uint32_t>(state.sceneResource.instances.size()) - instanceStart;
     if(importedInstanceCount == 0)
@@ -386,7 +773,7 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
       for(uint32_t meshLocal = 0; meshLocal < meshCount; ++meshLocal)
       {
         const uint32_t meshIndex = meshStartIndex + meshLocal;
-        uint32_t       materialIndex = materialRange.offset;
+        uint32_t       materialIndex = fallbackMaterialIndex.value_or(materialRange.offset);
         if(meshIndex < state.sceneResource.meshMaterialIndices.size())
           materialIndex = state.sceneResource.meshMaterialIndices[meshIndex];
         state.sceneResource.instances.push_back(
@@ -401,9 +788,11 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
       instance.transform                = modelEntry.transform * instance.transform;
     }
 
-    applyMaterialOverrides(materialRange, modelEntry.materialOverrides);
+    applyMaterialOverrides(materialRange, modelEntry.materialOverrides, fallbackMaterialIndex);
+    AppendEmissiveTrianglesFromModel(model, state.sceneResource, instanceStart, importedInstanceCount, state.sceneResource.emissiveTriangles);
   }
 
+  BuildEmissiveTriangleSamplingData(state.sceneResource);
   return environmentTextureIndex;
 }
 

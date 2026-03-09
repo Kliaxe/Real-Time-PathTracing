@@ -98,7 +98,7 @@ private:
   std::vector<nvsamples::AssetEntry>     m_ModelAssets;
   std::vector<nvsamples::AssetEntry>     m_HdriAssets;
   std::vector<nvsamples::SceneDefinition> m_SceneDefinitions;
-  RenderMode                             m_RenderMode = RenderMode::eRasterizer;
+  RenderMode                             m_RenderMode = RenderMode::ePathTracing;
   size_t                                 m_SelectedSceneIndex = 0;
   size_t                                 m_SelectedHdriIndex = 0;
   bool                                   m_SceneReloadRequested = false;

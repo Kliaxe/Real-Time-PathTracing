@@ -20,6 +20,7 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -31,6 +32,13 @@
 
 namespace nvsamples
 {
+
+struct ImageDataFloat4
+{
+  uint32_t           width  = 0;
+  uint32_t           height = 0;
+  std::vector<float> pixels;
+};
 
 // Helper for building VkShaderModuleCreateInfo from SPIR-V.
 inline VkShaderModuleCreateInfo GetShaderModuleCreateInfo(const std::span<const uint32_t>& spirv)
@@ -44,5 +52,6 @@ inline VkShaderModuleCreateInfo GetShaderModuleCreateInfo(const std::span<const 
 
 // Loads an image from disk and uploads it into a sampled VkImage via the staging uploader.
 nvvk::Image LoadAndCreateImage(VkCommandBuffer cmd, nvvk::StagingUploader& staging, VkDevice device, const std::filesystem::path& filename, bool sRgb = true);
+std::optional<ImageDataFloat4> LoadImageFloat4(const std::filesystem::path& filename);
 
 }  // namespace nvsamples

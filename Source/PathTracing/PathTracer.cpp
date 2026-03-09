@@ -87,6 +87,7 @@ void PathTracer::Destroy()
 
   m_RngFrameNumber          = 0;
   m_MaxBounceLimit          = 0;
+  m_PipelineBounceLimit     = 0;
   m_AccumulatedFrames       = 0;
   m_AccumulationInvalidated = true;
   m_HasAccumulationSignature = false;
@@ -115,6 +116,11 @@ uint32_t PathTracer::GetAccumulatedFrameCount() const
 uint32_t PathTracer::GetMaxBounceLimit() const
 {
   return m_MaxBounceLimit;
+}
+
+uint32_t PathTracer::GetPipelineBounceLimit() const
+{
+  return m_PipelineBounceLimit;
 }
 
 void PathTracer::InvalidateAccumulation()
@@ -227,15 +233,18 @@ void PathTracer::Render(const RenderInput& input)
                           m_DescPack.getSetPtr(frameSetIndex), 0, nullptr);
 
   const uint32_t clampedMaxBounces = std::min(m_Settings.maxBounces, m_MaxBounceLimit);
+  const uint32_t pipelineSafeMaxBounces = std::min(clampedMaxBounces, m_PipelineBounceLimit);
   const shaderio::PathTracePushConstant pushConstant{
       .sceneInfoAddress  = (shaderio::GltfSceneInfo*)input.sceneResource->bSceneInfo.address,
       .rngFrameNumber    = m_RngFrameNumber++,
       .accumulatedFrames = m_Settings.accumulate ? m_AccumulatedFrames : 0,
-      .maxBounces        = clampedMaxBounces,
+      .maxBounces        = pipelineSafeMaxBounces,
       .flags             = m_Settings.accumulate ? shaderio::ePathTraceFlagAccumulate : 0u,
   };
   vkCmdPushConstants(input.cmd, m_PipelineLayout,
-                     VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, 0,
+                     VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
+                         | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
+                     0,
                      sizeof(shaderio::PathTracePushConstant), &pushConstant);
 
   vkCmdTraceRaysKHR(input.cmd, &m_SbtRegions.raygen, &m_SbtRegions.miss, &m_SbtRegions.hit, &m_SbtRegions.callable, size.width,
@@ -288,14 +297,16 @@ void PathTracer::QueryRayTracingProperties()
   // Every extra bounce after the primary hit requires one more recursive TraceRay.
   // That means the shader-side bounce budget must stay below the pipeline's
   // maximum recursion depth minus the initial primary ray.
-  m_MaxBounceLimit    = (m_RtProperties.maxRayRecursionDepth > 0) ? (m_RtProperties.maxRayRecursionDepth - 1) : 0;
-  m_Settings.maxBounces = std::min(kRequestedMaxBounces, m_MaxBounceLimit);
+  m_MaxBounceLimit      = (m_RtProperties.maxRayRecursionDepth > 0) ? (m_RtProperties.maxRayRecursionDepth - 1) : 0;
+  m_PipelineBounceLimit = std::min(kRequestedMaxBounces, m_MaxBounceLimit);
+  m_Settings.maxBounces = m_PipelineBounceLimit;
 }
 
 void PathTracer::CreateDescriptorSetLayout()
 {
   const VkShaderStageFlags rayTracingStages =
-      VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+      VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
+      | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
 
   nvvk::DescriptorBindings bindings;
   bindings.addBinding({.binding         = shaderio::BindingPoints::eTextures,
@@ -323,7 +334,8 @@ void PathTracer::CreateDescriptorSetLayout()
 void PathTracer::CreatePipelineLayout()
 {
   const VkPushConstantRange pushConstantRange{
-      .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
+      .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
+                    | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
       .offset     = 0,
       .size       = sizeof(shaderio::PathTracePushConstant),
   };
@@ -341,6 +353,9 @@ void PathTracer::CreateRayTracingPipeline()
   {
     eRaygen,
     eMiss,
+    eShadowMiss,
+    eAnyHit,
+    eShadowAnyHit,
     eClosestHit,
     eShaderGroupCount,
   };
@@ -358,6 +373,15 @@ void PathTracer::CreateRayTracingPipeline()
   stages[eMiss].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
   stages[eMiss].pName = "rmissMain";
 
+  stages[eShadowMiss].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
+  stages[eShadowMiss].pName = "shadowMissMain";
+
+  stages[eAnyHit].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+  stages[eAnyHit].pName = "rahitMain";
+
+  stages[eShadowAnyHit].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+  stages[eShadowAnyHit].pName = "shadowAnyHitMain";
+
   stages[eClosestHit].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
   stages[eClosestHit].pName = "rchitMain";
 
@@ -368,7 +392,7 @@ void PathTracer::CreateRayTracingPipeline()
   group.intersectionShader = VK_SHADER_UNUSED_KHR;
 
   std::vector<VkRayTracingShaderGroupCreateInfoKHR> shaderGroups;
-  shaderGroups.reserve(3);
+  shaderGroups.reserve(5);
 
   group.type          = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
   group.generalShader = eRaygen;
@@ -378,12 +402,23 @@ void PathTracer::CreateRayTracingPipeline()
   group.generalShader = eMiss;
   shaderGroups.push_back(group);
 
+  group.type          = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+  group.generalShader = eShadowMiss;
+  shaderGroups.push_back(group);
+
   group.type             = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
   group.generalShader    = VK_SHADER_UNUSED_KHR;
+  group.anyHitShader     = eAnyHit;
   group.closestHitShader = eClosestHit;
   shaderGroups.push_back(group);
 
-  const uint32_t recursionDepth = std::max(1u, std::min(m_Settings.maxBounces, m_MaxBounceLimit) + 1);
+  group.type             = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+  group.generalShader    = VK_SHADER_UNUSED_KHR;
+  group.anyHitShader     = eShadowAnyHit;
+  group.closestHitShader = VK_SHADER_UNUSED_KHR;
+  shaderGroups.push_back(group);
+
+  const uint32_t recursionDepth = std::max(1u, m_PipelineBounceLimit + 1);
 
   VkRayTracingPipelineCreateInfoKHR pipelineInfo{
       .sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,

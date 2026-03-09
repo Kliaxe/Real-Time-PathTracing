@@ -239,11 +239,19 @@ void Application::onUIRender()
         else
         {
           nvsamples::PathTracer::Settings& pathTracingSettings = m_PathTracer->GetSettings();
+          const uint32_t                   bounceLimit         = m_PathTracer->GetPipelineBounceLimit();
 
           bool accumulate = pathTracingSettings.accumulate;
           if(ImGui::Checkbox("Accumulate", &accumulate))
           {
             pathTracingSettings.accumulate = accumulate;
+            invalidatePathTracingHistory   = true;
+          }
+
+          int maxBounces = static_cast<int>(pathTracingSettings.maxBounces);
+          if(ImGui::SliderInt("Max Bounces", &maxBounces, 0, static_cast<int>(bounceLimit)))
+          {
+            pathTracingSettings.maxBounces = static_cast<uint32_t>(maxBounces);
             invalidatePathTracingHistory   = true;
           }
 
@@ -256,7 +264,7 @@ void Application::onUIRender()
           ImGui::Text("Accumulated Frames: %u", m_PathTracer->GetAccumulatedFrameCount());
           ImGui::TextWrapped(
               "Accumulation averages path traced samples across frames and automatically resets when the camera, "
-              "scene, HDRI, sky, or viewport changes.");
+              "scene, HDRI, sky, viewport, or bounce budget changes.");
         }
       }
 

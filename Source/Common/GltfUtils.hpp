@@ -40,6 +40,12 @@ struct GltfSceneResource
   std::vector<shaderio::GltfMesh>              meshes;     // Mesh descriptions
   std::vector<shaderio::GltfInstance>          instances;  // Instances
   std::vector<shaderio::GltfMetallicRoughness> materials;  // Materials
+  std::vector<shaderio::PathTraceEmissiveTriangle> emissiveTriangles; // Direct-light emissive triangles
+  std::vector<float>                          emissiveTriangleCdf; // Normalized CDF for emissive triangle sampling
+  std::vector<float>                          environmentCdf; // Normalized CDF for HDRI texel sampling
+  std::vector<float>                          environmentPdf; // Normalized discrete HDRI texel probabilities
+  uint32_t                                    environmentWidth  = 0;
+  uint32_t                                    environmentHeight = 0;
   shaderio::GltfSceneInfo                      sceneInfo;  // Scene parameters
 
   // GPU buffers
@@ -47,6 +53,10 @@ struct GltfSceneResource
   nvvk::Buffer              bMeshes;     // Packed mesh array
   nvvk::Buffer              bInstances;  // Packed instance array
   nvvk::Buffer              bMaterials;  // Packed material array
+  nvvk::Buffer              bEmissiveTriangles;   // Emissive triangle light list
+  nvvk::Buffer              bEmissiveTriangleCdf; // Emissive triangle CDF
+  nvvk::Buffer              bEnvironmentCdf;      // HDRI texel CDF
+  nvvk::Buffer              bEnvironmentPdf;      // HDRI texel probabilities
   nvvk::Buffer              bSceneInfo;  // Scene info struct
 
   // meshToBufferIndex[meshIndex] = bufferIndex into bGltfDatas

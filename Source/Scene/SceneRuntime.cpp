@@ -135,6 +135,13 @@ void SceneRuntime::RebuildScene(VkQueue queue, const SceneUploader::UploadInput&
   sceneInfo.punctualLights[0].direction = glm::vec3(1.0f, 1.0f, 1.0f);
   sceneInfo.punctualLights[0].type      = shaderio::GltfLightType::ePoint;
   sceneInfo.punctualLights[0].coneAngle = 0.9f;
+  sceneInfo.emissiveTriangles           = (shaderio::PathTraceEmissiveTriangle*)m_SceneResource.bEmissiveTriangles.address;
+  sceneInfo.emissiveTriangleCdf         = (float*)m_SceneResource.bEmissiveTriangleCdf.address;
+  sceneInfo.environmentCdf              = (float*)m_SceneResource.bEnvironmentCdf.address;
+  sceneInfo.environmentPdf              = (float*)m_SceneResource.bEnvironmentPdf.address;
+  sceneInfo.emissiveTriangleCount       = static_cast<uint32_t>(m_SceneResource.emissiveTriangles.size());
+  sceneInfo.environmentWidth            = m_SceneResource.environmentWidth;
+  sceneInfo.environmentHeight           = m_SceneResource.environmentHeight;
 
   m_App->submitAndWaitTempCmdBuffer(cmd);
 
@@ -206,6 +213,13 @@ void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewM
   m_SceneResource.sceneInfo.instances      = (shaderio::GltfInstance*)m_SceneResource.bInstances.address;
   m_SceneResource.sceneInfo.meshes         = (shaderio::GltfMesh*)m_SceneResource.bMeshes.address;
   m_SceneResource.sceneInfo.materials      = (shaderio::GltfMetallicRoughness*)m_SceneResource.bMaterials.address;
+  m_SceneResource.sceneInfo.emissiveTriangles   = (shaderio::PathTraceEmissiveTriangle*)m_SceneResource.bEmissiveTriangles.address;
+  m_SceneResource.sceneInfo.emissiveTriangleCdf = (float*)m_SceneResource.bEmissiveTriangleCdf.address;
+  m_SceneResource.sceneInfo.environmentCdf      = (float*)m_SceneResource.bEnvironmentCdf.address;
+  m_SceneResource.sceneInfo.environmentPdf      = (float*)m_SceneResource.bEnvironmentPdf.address;
+  m_SceneResource.sceneInfo.emissiveTriangleCount = static_cast<uint32_t>(m_SceneResource.emissiveTriangles.size());
+  m_SceneResource.sceneInfo.environmentWidth      = m_SceneResource.environmentWidth;
+  m_SceneResource.sceneInfo.environmentHeight     = m_SceneResource.environmentHeight;
 
   const VkPipelineStageFlags2 shaderReadStages =
       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
@@ -442,6 +456,10 @@ void SceneRuntime::DestroySceneResources()
   m_Allocator->destroyBuffer(m_SceneResource.bMeshes);
   m_Allocator->destroyBuffer(m_SceneResource.bMaterials);
   m_Allocator->destroyBuffer(m_SceneResource.bInstances);
+  m_Allocator->destroyBuffer(m_SceneResource.bEmissiveTriangles);
+  m_Allocator->destroyBuffer(m_SceneResource.bEmissiveTriangleCdf);
+  m_Allocator->destroyBuffer(m_SceneResource.bEnvironmentCdf);
+  m_Allocator->destroyBuffer(m_SceneResource.bEnvironmentPdf);
   for(auto& gltfData : m_SceneResource.bGltfDatas)
   {
     m_Allocator->destroyBuffer(gltfData);

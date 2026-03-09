@@ -63,6 +63,7 @@ public:
   const Settings& GetSettings() const;
   uint32_t        GetAccumulatedFrameCount() const;
   uint32_t        GetMaxBounceLimit() const;
+  uint32_t        GetPipelineBounceLimit() const;
   void            InvalidateAccumulation();
 
   // Expose the descriptor pack so Application can keep the texture binding in
@@ -106,6 +107,7 @@ private:
   uint32_t                 m_MaxTextureDescriptors = 0;
   uint32_t                 m_RngFrameNumber        = 0;
   uint32_t                 m_MaxBounceLimit        = 0;
+  uint32_t                 m_PipelineBounceLimit   = 0;
   uint32_t                 m_AccumulatedFrames     = 0;
   bool                     m_AccumulationInvalidated = true;
   bool                     m_HasAccumulationSignature = false;

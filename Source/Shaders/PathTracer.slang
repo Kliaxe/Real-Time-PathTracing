@@ -17,135 +17,27 @@
 #include <nvshaders/slang_types.h>
 #include "nvshaders/random.h.slang"
 #include "nvshaders/sky_functions.h.slang"
+#include "ShaderIncludes/Pbr.h.slang"
 #include "ShaderIncludes/Camera.h.slang"
 #include "ShaderIo.h"
+#include "ShaderIncludes/PathTracing/Globals.h.slang"
 
-// clang-format off
-[[vk::push_constant]]                              ConstantBuffer<PathTracePushConstant> pushConst;
-[[vk::binding(BindingPoints::eTextures)]]          Sampler2D textures[];
-[[vk::binding(BindingPoints::eTlas)]]              RaytracingAccelerationStructure topLevelAS;
-[[vk::binding(BindingPoints::eOutputImage)]]       RWTexture2D<float4> outImage;
-[[vk::binding(BindingPoints::eAccumulationImage)]] RWTexture2D<float4> accumulationImage;
-// clang-format on
-
-// Slang does not provide a built-in symbolic "infinite" ray distance here, so
-// we use a very large finite value for "trace until the scene or miss shader
-// says otherwise". This keeps the ray setup explicit for learning purposes.
-static const float kRayTMax = 1.0e32;
-static const uint  kPathTraceFlagAccumulate = 0x1u;
-
-struct PathPayload
-{
-  float3 radiance;
-  float3 throughput;
-  uint   seed;
-  uint   depth;
-};
-
-bool IsAccumulationEnabled()
-{
-  return (pushConst.flags & kPathTraceFlagAccumulate) != 0;
-}
-
-float2 dirToLatLongUv(float3 dir)
-{
-  const float kInvPi    = 0.31830988618;
-  const float kInvTwoPi = 0.15915494309;
-
-  float3 n = normalize(dir);
-  float  u = 0.5 - atan2(n.z, n.x) * kInvTwoPi;
-  float  v = 0.5 - asin(clamp(n.y, -1.0, 1.0)) * kInvPi;
-  return float2(u, v);
-}
-
-float3 SampleEnvironment(GltfSceneInfo sceneInfo, float3 direction)
-{
-  // Match the scene-level environment selection used elsewhere in the sample:
-  // procedural sky first, then HDRI, then the plain fallback background color.
-  if(sceneInfo.useSky != 0)
-  {
-    return evalSimpleSky(sceneInfo.skySimpleParam, direction);
-  }
-
-  if(sceneInfo.useHdrEnv != 0 && sceneInfo.environmentTextureIndex >= 0)
-  {
-    const float2 uv = dirToLatLongUv(direction);
-    return textures[sceneInfo.environmentTextureIndex].SampleLevel(uv, 0.0).xyz;
-  }
-
-  return sceneInfo.backgroundColor;
-}
-
-float NextRandom(inout uint seed)
-{
-  return rand(seed);
-}
-
-float3 BuildTangent(float3 normal)
-{
-  const float3 up = (abs(normal.z) < 0.999) ? float3(0.0, 0.0, 1.0) : float3(0.0, 1.0, 0.0);
-  return normalize(cross(up, normal));
-}
-
-float3 SampleCosineHemisphere(float3 normal, inout uint seed)
-{
-  const float2 xi = float2(NextRandom(seed), NextRandom(seed));
-
-  const float  r        = sqrt(xi.x);
-  const float  phi      = 6.28318530718 * xi.y;
-  const float3 localDir = float3(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - xi.x)));
-
-  const float3 tangent   = BuildTangent(normal);
-  const float3 bitangent = cross(normal, tangent);
-
-  return normalize(localDir.x * tangent + localDir.y * bitangent + localDir.z * normal);
-}
-
-__generic<T : IFloat> T getAttribute(uint8_t* dataBufferAddress, BufferView bufferView, uint attributeIndex)
-{
-  if(bufferView.count > 0)
-  {
-    T* ptr = (T*)(dataBufferAddress + bufferView.offset + attributeIndex * bufferView.byteStride);
-    return ptr[0];
-  }
-
-  return T(1);
-}
-
-int3 getTriangleIndices(uint8_t* dataBufferAddress, const TriangleMesh mesh, int primitiveID)
-{
-  if(mesh.indices.byteStride == sizeof(int16_t))
-  {
-    int16_t3* indices = (int16_t3*)(dataBufferAddress + mesh.indices.offset);
-    return indices[primitiveID];
-  }
-  else if(mesh.indices.byteStride == sizeof(int32_t))
-  {
-    int3* indices = (int3*)(dataBufferAddress + mesh.indices.offset);
-    return indices[primitiveID];
-  }
-
-  return int3(-1);
-}
-
-__generic<T : IFloat> T getTriangleAttribute(uint8_t* dataBufferAddress, BufferView bufferView, uint3 attributeIndex, float3 barycentrics)
-{
-  T attr0 = getAttribute<T>(dataBufferAddress, bufferView, attributeIndex.x);
-  T attr1 = getAttribute<T>(dataBufferAddress, bufferView, attributeIndex.y);
-  T attr2 = getAttribute<T>(dataBufferAddress, bufferView, attributeIndex.z);
-  return T(barycentrics.x) * attr0 + T(barycentrics.y) * attr1 + T(barycentrics.z) * attr2;
-}
+#include "ShaderIncludes/PathTracing/Common.h.slang"
+#include "ShaderIncludes/PathTracing/Utility.h.slang"
+#include "ShaderIncludes/PathTracing/MonteCarlo.h.slang"
+#include "ShaderIncludes/PathTracing/Volume.h.slang"
+#include "ShaderIncludes/PathTracing/Hdri.h.slang"
+#include "ShaderIncludes/PathTracing/Disney.h.slang"
+#include "ShaderIncludes/PathTracing/Intersection.h.slang"
+#include "ShaderIncludes/PathTracing/Lights.h.slang"
 
 [shader("raygeneration")]
 void rgenMain()
 {
   const uint2 launchID = DispatchRaysIndex().xy;
 
-  GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
-
-  // Match the raster sky/background path exactly: both rendering modes rebuild
-  // camera rays from the same shared scene buffer data and helper function.
-  const float2 pixelCenter = float2(launchID) + 0.5;
+  const GltfSceneInfo sceneInfo   = pushConst.sceneInfoAddress[0];
+  const float2        pixelCenter = float2(launchID) + 0.5;
 
   RayDesc ray;
   ray.Origin    = sceneInfo.cameraPosition;
@@ -154,14 +46,21 @@ void rgenMain()
   ray.TMax      = kRayTMax;
 
   PathPayload payload;
-  payload.radiance   = float3(0.0, 0.0, 0.0);
-  payload.throughput = float3(1.0, 1.0, 1.0);
-  payload.seed       = xxhash32(uint3(launchID, pushConst.rngFrameNumber));
-  payload.depth      = 0;
+  payload.radiance          = float3(0.0);
+  payload.throughput        = float3(1.0);
+  payload.mediumAttenuation = float3(0.0);
+  payload.mediumThickness   = 0.0;
+  payload.lastSurfacePosition = sceneInfo.cameraPosition;
+  payload.lastSurfaceNormal = float3(0.0, 1.0, 0.0);
+  payload.lastBsdfPdf       = 0.0;
+  payload.seed              = xxhash32(uint3(launchID, pushConst.rngFrameNumber));
+  payload.depth             = 0;
+  payload.mediumActive      = 0;
+  payload.hasLastBsdfSample = 0;
 
   TraceRay(topLevelAS, 0, 0xFF, 0, 0, 0, ray, payload);
 
-  const float3 sampleRadiance = max(payload.radiance, float3(0.0, 0.0, 0.0));
+  const float3 sampleRadiance   = max(payload.radiance, float3(0.0));
   float3       resolvedRadiance = sampleRadiance;
 
   if(IsAccumulationEnabled() && pushConst.accumulatedFrames > 0)
@@ -180,57 +79,144 @@ void rmissMain(inout PathPayload payload)
 {
   const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
   const float3        envColor  = SampleEnvironment(sceneInfo, WorldRayDirection());
-  payload.radiance += payload.throughput * envColor;
+
+  float misWeight = 1.0;
+  if(payload.hasLastBsdfSample != 0)
+  {
+    const float lightPdf = EvaluateEnvironmentLightPdf(sceneInfo, payload.lastSurfaceNormal, WorldRayDirection());
+    if(lightPdf > 0.0 && payload.lastBsdfPdf > 0.0)
+    {
+      misWeight = MisMixWeight(payload.lastBsdfPdf, lightPdf);
+    }
+  }
+
+  float3 envThroughput = payload.throughput;
+  if(payload.mediumActive != 0)
+  {
+    envThroughput *= EvaluateMediumTransmittance(payload.mediumAttenuation, payload.mediumThickness);
+  }
+
+  payload.radiance += envThroughput * envColor * misWeight;
+}
+
+[shader("miss")]
+void shadowMissMain(inout ShadowPayload payload)
+{
+  payload.visible = 1;
+}
+
+[shader("anyhit")]
+void rahitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+{
+  if(IsMaskedSurfaceHit(attr))
+  {
+    IgnoreHit();
+  }
+}
+
+[shader("anyhit")]
+void shadowAnyHitMain(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr)
+{
+  if(IsMaskedSurfaceHit(attr))
+  {
+    IgnoreHit();
+  }
 }
 
 [shader("closesthit")]
 void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
-  const float3 barycentrics   = float3(1.0 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
-  const uint   instanceIndex  = InstanceIndex();
-  const uint   primitiveIndex = PrimitiveIndex();
+  const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
+  const SurfaceData   surface   = LoadSurfaceData(attr);
+  const float3        viewDir   = -WorldRayDirection();
 
-  const GltfSceneInfo         sceneInfo = pushConst.sceneInfoAddress[0];
-  const GltfInstance          instance  = sceneInfo.instances[instanceIndex];
-  const GltfMesh              mesh      = sceneInfo.meshes[instance.meshIndex];
-  const GltfMetallicRoughness material  = sceneInfo.materials[instance.materialIndex];
+  ApplyCurrentMediumAttenuation(payload, RayTCurrent());
 
-  const int3   indices  = getTriangleIndices(mesh.gltfBuffer, mesh.triMesh, primitiveIndex);
-  const float3 pos      = getTriangleAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.positions, indices, barycentrics);
-  const float3 nrm      = getTriangleAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.normals, indices, barycentrics);
-  const float2 texCoord = getTriangleAttribute<float2>(mesh.gltfBuffer, mesh.triMesh.texCoords, indices, barycentrics);
-
-  const float3 worldPos = mul(float4(pos, 1.0), ObjectToWorld4x3()).xyz;
-  float3       worldNormal = normalize(mul(WorldToObject4x3(), nrm).xyz);
-
-  if(dot(worldNormal, WorldRayDirection()) > 0.0)
+  float emissiveMisWeight = 1.0;
+  if(payload.hasLastBsdfSample != 0 && SafeMax3(surface.emission) > 0.0)
   {
-    worldNormal = -worldNormal;
+    const float lightPdf =
+        EvaluateCurrentEmissiveHitPdf(sceneInfo, InstanceIndex(), PrimitiveIndex(), payload.lastSurfacePosition, surface.worldPosition);
+    if(lightPdf > 0.0)
+    {
+      emissiveMisWeight = MisMixWeight(payload.lastBsdfPdf, lightPdf);
+    }
   }
 
-  float4 baseColor = material.baseColorFactor;
-  if(material.baseColorTextureIndex >= 0)
-  {
-    baseColor *= textures[material.baseColorTextureIndex].SampleLevel(texCoord, 0.0);
-  }
-
-  const float3 albedo = max(baseColor.xyz, float3(0.0, 0.0, 0.0));
+  payload.radiance += payload.throughput * surface.emission * emissiveMisWeight;
+  AccumulateEnvironmentDirectLight(payload, surface, sceneInfo, viewDir);
+  AccumulateEmissiveDirectLight(payload, surface, sceneInfo, viewDir);
 
   if(payload.depth >= pushConst.maxBounces)
   {
     return;
   }
 
+  float3 bounceDir;
+  float3 bsdfOverPdf;
+  float  bsdfPdf = 0.0;
+  if(!SampleSurfaceBsdf(surface, viewDir, payload.seed, bounceDir, bsdfOverPdf, bsdfPdf))
+  {
+    return;
+  }
+
+  const float geometricDot = dot(surface.geometricNormal, bounceDir);
+  const bool  isTransmissionBounce = surface.transmission > 0.001 && geometricDot < 0.0;
+  if(!isTransmissionBounce && geometricDot <= 0.0)
+  {
+    return;
+  }
+
+  float3 nextThroughput = payload.throughput * max(bsdfOverPdf, float3(0.0));
+  if(SafeMax3(nextThroughput) <= 0.0)
+  {
+    return;
+  }
+
   payload.depth += 1;
-  payload.throughput *= albedo;
+
+  // Russian roulette is only there to terminate long, low-energy paths. We
+  // start after the first secondary bounce so single-bounce comparisons stay
+  // predictable while longer paths remain stable.
+  if(payload.depth > 1)
+  {
+    const float continueProbability = clamp(SafeMax3(nextThroughput), 0.05, 0.95);
+    if(NextRandom(payload.seed) > continueProbability)
+    {
+      return;
+    }
+
+    nextThroughput /= continueProbability;
+  }
+
+  payload.throughput        = nextThroughput;
+  if(isTransmissionBounce)
+  {
+    if(surface.isFrontFace != 0 && HasVolumeAttenuation(surface))
+    {
+      payload.mediumAttenuation = BuildAttenuationCoefficient(surface.attenuationColor, surface.attenuationDistance);
+      payload.mediumThickness   = surface.volumeThickness;
+      payload.mediumActive      = 1;
+    }
+    else if(surface.isFrontFace == 0)
+    {
+      payload.mediumAttenuation = float3(0.0);
+      payload.mediumThickness   = 0.0;
+      payload.mediumActive      = 0;
+    }
+  }
+  payload.lastSurfacePosition = surface.worldPosition;
+  payload.lastSurfaceNormal = surface.shadingNormal;
+  payload.lastBsdfPdf       = bsdfPdf;
+  payload.hasLastBsdfSample = 1;
+
+  const float3 originNormal = geometricDot >= 0.0 ? surface.geometricNormal : -surface.geometricNormal;
 
   RayDesc bounceRay;
-  bounceRay.Origin    = worldPos + worldNormal * 0.001;
-  bounceRay.Direction = SampleCosineHemisphere(worldNormal, payload.seed);
+  bounceRay.Origin    = OffsetRay(surface.worldPosition, originNormal);
+  bounceRay.Direction = bounceDir;
   bounceRay.TMin      = 0.001;
   bounceRay.TMax      = kRayTMax;
 
   TraceRay(topLevelAS, 0, 0xFF, 0, 0, 0, bounceRay, payload);
 }
-
-
