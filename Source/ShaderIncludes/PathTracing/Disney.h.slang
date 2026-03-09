@@ -437,6 +437,126 @@ float3 EvaluateClearcoat(DisneyMaterialData material, DisneyBrdfData brdf, out f
   return float3(D * V * F);
 }
 
+float BroadGroupProbability(DisneyLobeSetup setup)
+{
+  // Broad lobes share the same cosine-weighted proposal, so direct lighting can
+  // treat them as one estimator family.
+  return setup.diffuseProbability + setup.sheenProbability;
+}
+
+float ReflectionGroupProbability(DisneyLobeSetup setup)
+{
+  // Dielectric and metallic reflection both use the same visible-GGX proposal,
+  // so continuation rays can sample them as one glossy-reflection family.
+  return setup.dielectricProbability + setup.metalProbability;
+}
+
+float3 EvaluateBroadBsdfGroup(DisneyMaterialData material, DisneyBrdfData brdf, DisneyLobeSetup setup, out float pdf)
+{
+  // This group is the "area-light / environment-light friendly" part of the
+  // BSDF. Everything here can be sampled by a cosine hemisphere proposal.
+  pdf = 0.0;
+  if(!brdf.reflection)
+  {
+    return float3(0.0);
+  }
+
+  float3 result = float3(0.0);
+  float  tmpPdf = 0.0;
+
+  if(setup.diffuseProbability > 0.0)
+  {
+    result += EvaluateDisneyDiffuse(material, brdf, tmpPdf) * setup.diffuseWeight;
+  }
+
+  if(setup.sheenProbability > 0.0)
+  {
+    result += EvaluateSheen(material, brdf, tmpPdf) * setup.sheenWeight;
+  }
+
+  if(SafeMax3(result) <= 0.0)
+  {
+    return float3(0.0);
+  }
+
+  // Diffuse and sheen both live on the same cosine proposal, so the group PDF
+  // is just the cosine-hemisphere PDF once, not one value per sub-lobe.
+  pdf = abs(brdf.NdotL) * kInvPi;
+  return result * abs(brdf.NdotL);
+}
+
+float3 EvaluateReflectionBsdfGroup(DisneyMaterialData material, DisneyBrdfData brdf, DisneyLobeSetup setup, out float pdf)
+{
+  // This group is continuation-ray only. Direct lighting never samples it
+  // explicitly, so its PDF only needs to be coherent with the BSDF sampler.
+  pdf = 0.0;
+  if(!brdf.reflection)
+  {
+    return float3(0.0);
+  }
+
+  float3 result = float3(0.0);
+  float  tmpPdf = 0.0;
+
+  if(setup.dielectricProbability > 0.0)
+  {
+    const float fresnelWeight =
+        (DielectricFresnel(abs(brdf.VdotH), brdf.etaI, brdf.etaT) - material.baseF0) / max(1.0 - material.baseF0, 1.0e-5);
+    result += EvaluateMicrofacetReflection(material, brdf, lerp(material.specularColor, float3(1.0), fresnelWeight), tmpPdf)
+              * setup.dielectricWeight;
+    // Dielectric and metal share the same visible-GGX half-vector proposal, so
+    // the conditional PDF for the whole reflection group is the same proposal.
+    pdf = tmpPdf;
+  }
+
+  if(setup.metalProbability > 0.0)
+  {
+    result += EvaluateMicrofacetReflection(material, brdf, lerp(material.albedo, float3(1.0), F_SchlickWeight(abs(brdf.VdotH))), tmpPdf)
+              * setup.metalWeight;
+    pdf = tmpPdf;
+  }
+
+  return result * abs(brdf.NdotL);
+}
+
+float3 EvaluateGlassBsdfGroup(DisneyMaterialData material, DisneyBrdfData brdf, DisneyLobeSetup setup, out float pdf)
+{
+  // Glass stays in its own group because the sampled event can flip between
+  // reflection and refraction after Fresnel branching.
+  pdf = 0.0;
+  if(setup.glassProbability <= 0.0)
+  {
+    return float3(0.0);
+  }
+
+  const float fresnel = DielectricFresnel(abs(brdf.VdotH), brdf.etaI, brdf.etaT);
+  float       tmpPdf  = 0.0;
+
+  if(brdf.reflection)
+  {
+    const float3 reflection = EvaluateMicrofacetReflection(material, brdf, float3(fresnel), tmpPdf) * setup.glassWeight;
+    pdf                     = tmpPdf * fresnel;
+    return reflection * abs(brdf.NdotL);
+  }
+
+  const float3 transmission = EvaluateMicrofacetRefraction(material, brdf, fresnel, tmpPdf) * setup.glassWeight;
+  pdf                       = tmpPdf * (1.0 - fresnel);
+  return transmission * abs(brdf.NdotL);
+}
+
+float3 EvaluateClearcoatBsdfGroup(DisneyMaterialData material, DisneyBrdfData brdf, DisneyLobeSetup setup, out float pdf)
+{
+  // Clearcoat keeps its own group because it uses its own isotropic GGX
+  // proposal instead of the base anisotropic reflection sampler.
+  pdf = 0.0;
+  if(setup.clearcoatProbability <= 0.0)
+  {
+    return float3(0.0);
+  }
+
+  return EvaluateClearcoat(material, brdf, pdf) * setup.clearcoatWeight * abs(brdf.NdotL);
+}
+
 float3 EvaluateSurfaceBsdf(SurfaceData surface, float3 viewDir, float3 lightDir, out float pdf)
 {
   // This is the source-of-truth BSDF evaluation used by both direct lighting and continuation rays.
@@ -444,62 +564,38 @@ float3 EvaluateSurfaceBsdf(SurfaceData surface, float3 viewDir, float3 lightDir,
   const DisneyBrdfData     brdf     = PrepareBrdfData(surface, material, viewDir, lightDir);
   const DisneyLobeSetup    setup    = GetLobeSetup(material, brdf);
 
-  float3 result = float3(0.0);
-  pdf           = 0.0;
+  float broadPdf = 0.0;
+  float specPdf  = 0.0;
+  float glassPdf = 0.0;
+  float coatPdf  = 0.0;
 
-  float tmpPdf = 0.0;
+  const float3 broad = EvaluateBroadBsdfGroup(material, brdf, setup, broadPdf);
+  const float3 spec  = EvaluateReflectionBsdfGroup(material, brdf, setup, specPdf);
+  const float3 glass = EvaluateGlassBsdfGroup(material, brdf, setup, glassPdf);
+  const float3 coat  = EvaluateClearcoatBsdfGroup(material, brdf, setup, coatPdf);
 
-  if(setup.diffuseProbability > 0.0 && brdf.reflection)
-  {
-    result += EvaluateDisneyDiffuse(material, brdf, tmpPdf) * setup.diffuseWeight;
-    pdf += tmpPdf * setup.diffuseProbability;
-  }
+  // This is the full mixture PDF in outgoing-direction solid angle. It is what
+  // direct-light MIS should compare against when it wants to ask:
+  // "how likely was the BSDF path to generate this same direction?"
+  pdf = broadPdf * BroadGroupProbability(setup) + specPdf * ReflectionGroupProbability(setup) + glassPdf * setup.glassProbability
+        + coatPdf * setup.clearcoatProbability;
 
-  if(setup.dielectricProbability > 0.0 && brdf.reflection)
-  {
-    const float fresnelWeight =
-        (DielectricFresnel(abs(brdf.VdotH), brdf.etaI, brdf.etaT) - material.baseF0) / max(1.0 - material.baseF0, 1.0e-5);
-    result += EvaluateMicrofacetReflection(material, brdf, lerp(material.specularColor, float3(1.0), fresnelWeight), tmpPdf)
-              * setup.dielectricWeight;
-    pdf += tmpPdf * setup.dielectricProbability;
-  }
+  return broad + spec + glass + coat;
+}
 
-  if(setup.metalProbability > 0.0 && brdf.reflection)
-  {
-    result += EvaluateMicrofacetReflection(material, brdf, lerp(material.albedo, float3(1.0), F_SchlickWeight(abs(brdf.VdotH))), tmpPdf)
-              * setup.metalWeight;
-    pdf += tmpPdf * setup.metalProbability;
-  }
+float3 EvaluateDirectLightBsdf(SurfaceData surface, float3 viewDir, float3 lightDir, out float pdf)
+{
+  // Explicit direct lighting estimates only the broad cosine-proposal BSDF group. Glossy / transmission groups are owned by continuation rays.
+  const DisneyMaterialData material = GetDisneyMaterialData(surface);
+  const DisneyBrdfData     brdf     = PrepareBrdfData(surface, material, viewDir, lightDir);
+  const DisneyLobeSetup    setup    = GetLobeSetup(material, brdf);
 
-  if(setup.glassProbability > 0.0)
-  {
-    const float fresnel = DielectricFresnel(abs(brdf.VdotH), brdf.etaI, brdf.etaT);
-    if(brdf.reflection)
-    {
-      result += EvaluateMicrofacetReflection(material, brdf, float3(fresnel), tmpPdf) * setup.glassWeight;
-      pdf += tmpPdf * setup.glassProbability * fresnel;
-    }
-    else
-    {
-      result += EvaluateMicrofacetRefraction(material, brdf, fresnel, tmpPdf) * setup.glassWeight;
-      pdf += tmpPdf * setup.glassProbability * (1.0 - fresnel);
-    }
-  }
-
-  if(setup.sheenProbability > 0.0 && brdf.reflection)
-  {
-    result += EvaluateSheen(material, brdf, tmpPdf) * setup.sheenWeight;
-    pdf += tmpPdf * setup.sheenProbability;
-  }
-
-  if(setup.clearcoatProbability > 0.0 && brdf.reflection)
-  {
-    result += EvaluateClearcoat(material, brdf, tmpPdf) * setup.clearcoatWeight;
-    pdf += tmpPdf * setup.clearcoatProbability;
-  }
-
-  // The caller expects f * |N dot L|, not plain f, so the cosine term is applied once here.
-  return result * abs(brdf.NdotL);
+  float groupPdf = 0.0;
+  const float3 result = EvaluateBroadBsdfGroup(material, brdf, setup, groupPdf);
+  // The direct-light estimator samples the whole broad group as one proposal,
+  // so the reported PDF must include the probability of choosing that group.
+  pdf                 = groupPdf * BroadGroupProbability(setup);
+  return result;
 }
 
 // -------------------------------------------------------------------------
@@ -511,31 +607,54 @@ bool SampleSurfaceBsdf(SurfaceData surface,
                        inout uint seed,
                        out float3 lightDir,
                        out float3 bsdfOverPdf,
-                       out float pdf,
+                       out float directLightPdf,
                        out bool isTransmissionEvent)
 {
-  // Samples exactly the same lobe set that EvaluateSurfaceBsdf() evaluates, which keeps MIS and path throughput coherent.
+  // Samples proposal groups explicitly: broad cosine lobes, glossy reflection,
+  // glass, and clearcoat. The return values are intentionally split:
+  // - bsdfOverPdf: throughput for the sampled continuation event
+  // - directLightPdf: only the PDF of the subset that direct-light sampling can
+  //   compete with later in miss/emissive-hit MIS
   const DisneyMaterialData material  = GetDisneyMaterialData(surface);
   const DisneyBrdfData     probeBrdf = PrepareBrdfData(surface, material, viewDir, surface.shadingNormal);
   const DisneyLobeSetup    setup     = GetLobeSetup(material, probeBrdf);
+  lightDir                         = float3(0.0);
+  bsdfOverPdf                      = float3(0.0);
   isTransmissionEvent               = false;
+  directLightPdf                   = 0.0;
 
-  const float  sampleLobe    = NextRandom(seed);
+  const float broadProbability      = BroadGroupProbability(setup);
+  const float reflectionProbability = ReflectionGroupProbability(setup);
+  const float glassProbability      = setup.glassProbability;
+  const float clearcoatProbability  = setup.clearcoatProbability;
+  const float totalProbability =
+      broadProbability + reflectionProbability + glassProbability + clearcoatProbability;
+  if(totalProbability <= 0.0)
+  {
+    return false;
+  }
+
+  const float  sampleGroup   = NextRandom(seed);
   const float2 xi            = float2(NextRandom(seed), NextRandom(seed));
-  const float  cdfDiffuse    = setup.diffuseProbability;
-  const float  cdfDielectric = cdfDiffuse + setup.dielectricProbability;
-  const float  cdfMetal      = cdfDielectric + setup.metalProbability;
-  const float  cdfGlass      = cdfMetal + setup.glassProbability;
-  const float  cdfSheen      = cdfGlass + setup.sheenProbability;
+  const float  cdfBroad      = broadProbability;
+  const float  cdfReflection = cdfBroad + reflectionProbability;
+  const float  cdfGlass      = cdfReflection + glassProbability;
+  const bool   sampleBroad   = sampleGroup < cdfBroad;
+  const bool   sampleReflection = sampleGroup >= cdfBroad && sampleGroup < cdfReflection;
+  const bool   sampleGlass      = sampleGroup >= cdfReflection && sampleGroup < cdfGlass;
 
-  if(sampleLobe < cdfDiffuse)
+  if(sampleBroad)
   {
-    // Diffuse and sheen both use cosine-weighted proposals, but the CDF decides which mixture interval we landed in.
-    lightDir = SampleCosineHemisphereDirection(surface.shadingNormal, seed, pdf);
+    // One cosine sample stands in for both diffuse and sheen. The BSDF
+    // evaluation later resolves how much each sub-lobe contributes.
+    float ignoredPdf = 0.0;
+    lightDir         = SampleCosineHemisphereDirection(surface.shadingNormal, seed, ignoredPdf);
   }
-  else if(sampleLobe < cdfMetal)
+  else if(sampleReflection || sampleGlass)
   {
-    // Dielectric and metallic reflection both sample an anisotropic visible GGX half vector.
+    // Glossy reflection and glass start from the same visible-GGX microfacet
+    // sample. Glass then does a second Fresnel branch to decide reflection vs
+    // refraction for that sampled microfacet.
     const float3 viewLocal = ToLocal(surface.shadingNormal, surface.tangent, surface.bitangent, normalize(viewDir));
     float3       halfLocal = ImportanceSampleVisibleGGX(viewLocal, material.alphaAnisotropicX, material.alphaAnisotropicY, xi);
     if(halfLocal.z < 0.0)
@@ -544,45 +663,33 @@ bool SampleSurfaceBsdf(SurfaceData surface,
     }
 
     const float3 halfVector = ToWorld(surface.shadingNormal, surface.tangent, surface.bitangent, halfLocal);
-    lightDir                = normalize(reflect(-viewDir, halfVector));
-  }
-  else if(sampleLobe < cdfGlass)
-  {
-    // Glass first samples a microfacet, then uses Fresnel to branch between reflection and refraction.
-    const float3 viewLocal = ToLocal(surface.shadingNormal, surface.tangent, surface.bitangent, normalize(viewDir));
-    float3       halfLocal = ImportanceSampleVisibleGGX(viewLocal, material.alphaAnisotropicX, material.alphaAnisotropicY, xi);
-    if(halfLocal.z < 0.0)
-    {
-      halfLocal = -halfLocal;
-    }
-
-    const float3 halfVector = ToWorld(surface.shadingNormal, surface.tangent, surface.bitangent, halfLocal);
-    const float  etaI       = surface.isFrontFace != 0 ? 1.0 : material.refractionIndex;
-    const float  etaT       = surface.isFrontFace != 0 ? material.refractionIndex : 1.0;
-    const float  fresnel    = DielectricFresnel(abs(dot(normalize(viewDir), halfVector)), etaI, etaT);
-    const float  remapped   = RescaleRandomNumber(sampleLobe, cdfMetal, cdfGlass);
-    if(remapped < fresnel)
+    if(sampleReflection)
     {
       lightDir = normalize(reflect(-viewDir, halfVector));
     }
     else
     {
-      const float eta = etaI / etaT;
-      lightDir        = normalize(refract(-viewDir, halfVector, eta));
-      if(dot(lightDir, lightDir) <= 0.0)
+      const float etaI     = surface.isFrontFace != 0 ? 1.0 : material.refractionIndex;
+      const float etaT     = surface.isFrontFace != 0 ? material.refractionIndex : 1.0;
+      const float fresnel  = DielectricFresnel(abs(dot(normalize(viewDir), halfVector)), etaI, etaT);
+      const float remapped = RescaleRandomNumber(sampleGroup, cdfReflection, cdfGlass);
+      if(remapped < fresnel)
       {
         lightDir = normalize(reflect(-viewDir, halfVector));
       }
+      else
+      {
+        const float eta = etaI / etaT;
+        lightDir        = normalize(refract(-viewDir, halfVector, eta));
+        if(dot(lightDir, lightDir) <= 0.0)
+        {
+          lightDir = normalize(reflect(-viewDir, halfVector));
+        }
+      }
     }
-  }
-  else if(sampleLobe < cdfSheen)
-  {
-    // Sheen reuses the cosine proposal and is disambiguated later by the full BSDF evaluation / PDF.
-    lightDir = SampleCosineHemisphereDirection(surface.shadingNormal, seed, pdf);
   }
   else
   {
-    // Clearcoat uses an isotropic GGX proposal independent of the base anisotropy.
     float3 halfLocal = ImportanceSampleGGX(material.clearcoatAlpha, xi);
     if(halfLocal.z < 0.0)
     {
@@ -595,26 +702,51 @@ bool SampleSurfaceBsdf(SurfaceData surface,
 
   if(dot(lightDir, lightDir) <= 0.0)
   {
-    // Invalid samples are reported explicitly so the caller can terminate the path cleanly.
-    isTransmissionEvent = false;
-    bsdfOverPdf = float3(0.0);
-    pdf         = 0.0;
     return false;
   }
 
-  // Re-evaluate the full mixture at the sampled direction so bsdf/pdf matches the same source-of-truth logic.
+  // Rebuild the BRDF data at the sampled direction so the sampled event and the
+  // evaluated contribution are driven by the same geometry/Fresnel terms.
   const DisneyBrdfData sampleBrdf = PrepareBrdfData(surface, material, viewDir, lightDir);
-  const float3 bsdf = EvaluateSurfaceBsdf(surface, viewDir, lightDir, pdf);
-  if(pdf <= 0.0 || SafeMax3(bsdf) <= 0.0)
+  float                conditionalPdf = 0.0;
+  float3               contribution    = float3(0.0);
+  float                samplePdf       = 0.0;
+
+  if(sampleBroad)
+  {
+    contribution  = EvaluateBroadBsdfGroup(material, sampleBrdf, setup, conditionalPdf);
+    samplePdf     = broadProbability * conditionalPdf;
+    // Only broad-group samples can be compared against explicit direct-light
+    // sampling, so only this branch exports a direct-light-compatible PDF.
+    directLightPdf = samplePdf;
+  }
+  else if(sampleReflection)
+  {
+    contribution = EvaluateReflectionBsdfGroup(material, sampleBrdf, setup, conditionalPdf);
+    samplePdf    = reflectionProbability * conditionalPdf;
+  }
+  else if(sampleGlass)
+  {
+    contribution       = EvaluateGlassBsdfGroup(material, sampleBrdf, setup, conditionalPdf);
+    samplePdf          = glassProbability * conditionalPdf;
+    isTransmissionEvent = !sampleBrdf.reflection;
+  }
+  else
+  {
+    contribution = EvaluateClearcoatBsdfGroup(material, sampleBrdf, setup, conditionalPdf);
+    samplePdf    = clearcoatProbability * conditionalPdf;
+  }
+
+  if(samplePdf <= 0.0 || SafeMax3(contribution) <= 0.0)
   {
     isTransmissionEvent = false;
-    bsdfOverPdf = float3(0.0);
-    pdf         = 0.0;
+    directLightPdf      = 0.0;
     return false;
   }
 
-  isTransmissionEvent = !sampleBrdf.reflection;
-  bsdfOverPdf = bsdf / pdf;
+  // Continuation throughput always uses the actual sampled proposal PDF, even
+  // though miss/emissive MIS may later use a narrower directLightPdf contract.
+  bsdfOverPdf = contribution / samplePdf;
   return true;
 }
 

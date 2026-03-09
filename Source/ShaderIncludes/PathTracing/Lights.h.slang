@@ -155,9 +155,9 @@ void AccumulateEmissiveDirectLight(inout PathPayload payload, SurfaceData surfac
     return;
   }
 
-  // EvaluateSurfaceBsdf already returns f * |N dot L|, so the estimator divides only by the light PDF here.
+  // Explicit emissive sampling estimates only the broad cosine-proposal BSDF group, so MIS only competes against broad BSDF samples.
   float  bsdfPdf = 0.0;
-  float3 bsdf    = EvaluateSurfaceBsdf(surface, viewDir, lightDir, bsdfPdf);
+  float3 bsdf    = EvaluateDirectLightBsdf(surface, viewDir, lightDir, bsdfPdf);
   if(bsdfPdf <= 0.0 || SafeMax3(bsdf) <= 0.0)
   {
     return;

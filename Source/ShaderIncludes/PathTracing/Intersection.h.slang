@@ -353,9 +353,8 @@ bool SampleEnvironmentLightDirection(GltfSceneInfo sceneInfo,
 
 void AccumulateEnvironmentDirectLight(inout PathPayload payload, SurfaceData surface, GltfSceneInfo sceneInfo, float3 viewDir)
 {
-  // The infinite light uses two direct-light modes in this tracer:
-  //   1. opaque / reflective surfaces sample it directly unless the BSDF should own the transport
-  //   2. transmissive surfaces sample it only at the exit interface, where a straight connection to the environment is meaningful
+  // Explicit environment lighting estimates only the broad cosine-proposal BSDF group on opaque surfaces.
+  // Glossy reflection / transmission groups are left to continuation rays and miss-side environment hits.
   bool   sampleReflectionNee = CanSampleEnvironmentReflectionDirectLight(surface);
   bool   sampleTransmissionExitNee = CanSampleEnvironmentTransmissionExitLight(surface);
   float3 receiverNormal      = surface.shadingNormal;
@@ -366,10 +365,6 @@ void AccumulateEnvironmentDirectLight(inout PathPayload payload, SurfaceData sur
   }
 
   if(!sampleReflectionNee && !sampleTransmissionExitNee)
-  {
-    return;
-  }
-  if(sampleReflectionNee && ShouldBsdfOwnEnvironmentTransport(surface))
   {
     return;
   }
@@ -387,7 +382,7 @@ void AccumulateEnvironmentDirectLight(inout PathPayload payload, SurfaceData sur
   }
 
   float  bsdfPdf = 0.0;
-  float3 bsdf    = EvaluateSurfaceBsdf(surface, viewDir, lightDir, bsdfPdf);
+  float3 bsdf    = EvaluateDirectLightBsdf(surface, viewDir, lightDir, bsdfPdf);
 
   if(bsdfPdf <= 0.0 || SafeMax3(bsdf) <= 0.0)
   {

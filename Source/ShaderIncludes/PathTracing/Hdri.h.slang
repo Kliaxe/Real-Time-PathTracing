@@ -81,29 +81,6 @@ bool CanSampleEnvironmentTransmissionExitLight(SurfaceData surface)
   return false;
 }
 
-float ComputeEnvironmentBsdfProposalWeight(SurfaceData surface)
-{
-  // This ownership heuristic is intentionally narrow. The decision is made per surface, not per lobe, so using a generic
-  // "smooth specular" test here would wrongly disable explicit sky lighting for glossy dielectrics whose diffuse/base
-  // energy still benefits from environment NEE. Pure metals are the current case where the continuation ray is a good
-  // enough stand-in for the whole surface response, because their visible energy is concentrated in the reflective lobe.
-  if(!CanSampleEnvironmentReflectionDirectLight(surface))
-  {
-    return 0.0;
-  }
-
-  const float smoothness = 1.0 - surface.roughness;
-  return clamp(surface.metallic * smoothness * smoothness, 0.0, 0.95);
-}
-
-bool ShouldBsdfOwnEnvironmentTransport(SurfaceData surface)
-{
-  // In the current tracer this "ownership" policy is reserved for metal-dominant surfaces. Broad lobes and glossy
-  // dielectrics still keep explicit environment NEE so the sky can light their non-specular energy instead of relying
-  // on rare continuation-path hits.
-  return ComputeEnvironmentBsdfProposalWeight(surface) >= 0.5;
-}
-
 float EvaluateEnvironmentLightPdf(GltfSceneInfo sceneInfo, float3 receiverNormal, float3 direction)
 {
   // The canonical explicit environment sampler in this tracer is the scene-wide HDRI proposal only.

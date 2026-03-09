@@ -34,6 +34,9 @@
 [shader("raygeneration")]
 void rgenMain()
 {
+  // GPU-side entry point for one camera sample. The CPU has already filled
+  // push constants and descriptor bindings; this shader just reconstructs the
+  // primary ray and starts the recursive path state machine.
   const uint2 launchID = DispatchRaysIndex().xy;
 
   const GltfSceneInfo sceneInfo   = pushConst.sceneInfoAddress[0];
@@ -46,13 +49,16 @@ void rgenMain()
   ray.TMax      = kRayTMax;
 
   PathPayload payload;
+  // The payload is our per-path "mutable state object". Coming from a C#
+  // mental model, it helps to think of this as a small struct instance that is
+  // passed from shader stage to shader stage and updated in place.
   payload.radiance          = float3(0.0);
   payload.throughput        = float3(1.0);
   payload.mediumAttenuation = float3(0.0);
   payload.mediumThickness   = 0.0;
   payload.lastSurfacePosition = sceneInfo.cameraPosition;
   payload.lastSurfaceNormal = float3(0.0, 1.0, 0.0);
-  payload.lastBsdfPdf       = 0.0;
+  payload.lastDirectLightBsdfPdf = 0.0;
   payload.seed              = xxhash32(uint3(launchID, pushConst.rngFrameNumber));
   payload.depth             = 0;
   payload.mediumActive      = 0;
@@ -78,6 +84,10 @@ void rgenMain()
 [shader("miss")]
 void rmissMain(inout PathPayload payload)
 {
+  // A path reaches the miss shader when nothing in the TLAS was hit. For this
+  // tracer that means "sample the environment" and optionally apply MIS
+  // against the explicit environment-light estimator that might have sampled
+  // the same direction from the previous surface.
   const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
   const float3        envColor  = SampleEnvironment(sceneInfo, WorldRayDirection());
 
@@ -87,15 +97,17 @@ void rmissMain(inout PathPayload payload)
     // Miss-side MIS only competes against the scene-wide explicit environment sampler. When a surface lets the
     // BSDF continuation ray own environment transport, lastEnvironmentNeeActive is zero and this branch is skipped.
     const float lightPdf = EvaluateEnvironmentLightPdf(sceneInfo, payload.lastSurfaceNormal, WorldRayDirection());
-    if(lightPdf > 0.0 && payload.lastBsdfPdf > 0.0)
+    if(lightPdf > 0.0 && payload.lastDirectLightBsdfPdf > 0.0)
     {
-      misWeight = MisMixWeight(payload.lastBsdfPdf, lightPdf);
+      misWeight = MisMixWeight(payload.lastDirectLightBsdfPdf, lightPdf);
     }
   }
 
   float3 envThroughput = payload.throughput;
   if(payload.mediumActive != 0)
   {
+    // Environment radiance still has to travel through the current medium
+    // segment. This is the "Beer-Lambert on the last leg" case.
     envThroughput *= EvaluateMediumTransmittance(payload.mediumAttenuation, payload.mediumThickness);
   }
 
@@ -129,10 +141,17 @@ void shadowAnyHitMain(inout ShadowPayload payload, in BuiltInTriangleIntersectio
 [shader("closesthit")]
 void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
+  // This is the main integrator step:
+  // 1. resolve the material/surface
+  // 2. accumulate any radiance produced directly at this hit
+  // 3. sample one BSDF continuation event
+  // 4. update payload state and trace the next ray
   const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
   const SurfaceData   surface   = LoadSurfaceData(attr);
   const float3        viewDir   = -WorldRayDirection();
 
+  // If the ray segment that just ended was inside an absorbing medium, apply
+  // that segment's attenuation before doing any new surface work.
   ApplyCurrentMediumAttenuation(payload, RayTCurrent());
 
   float emissiveMisWeight = 1.0;
@@ -140,13 +159,19 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
   {
     const float lightPdf =
         EvaluateCurrentEmissiveHitPdf(sceneInfo, InstanceIndex(), PrimitiveIndex(), payload.lastSurfacePosition, surface.worldPosition);
-    if(lightPdf > 0.0)
+    if(lightPdf > 0.0 && payload.lastDirectLightBsdfPdf > 0.0)
     {
-      emissiveMisWeight = MisMixWeight(payload.lastBsdfPdf, lightPdf);
+      // Only broad-group BSDF samples export lastDirectLightBsdfPdf, so
+      // emissive-hit MIS only activates when the previous continuation event
+      // came from the same estimator family as explicit light sampling.
+      emissiveMisWeight = MisMixWeight(payload.lastDirectLightBsdfPdf, lightPdf);
     }
   }
 
   payload.radiance += payload.throughput * surface.emission * emissiveMisWeight;
+  // Explicit direct lighting is evaluated before sampling the next bounce so
+  // this hit contributes both local emission and any visible finite/infinite
+  // lights from the broad BSDF group.
   AccumulateEnvironmentDirectLight(payload, surface, sceneInfo, viewDir);
   AccumulateEmissiveDirectLight(payload, surface, sceneInfo, viewDir);
 
@@ -156,10 +181,10 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
   }
 
   float3 bounceDir;
-  float3 bsdfOverPdf;
-  float  bsdfPdf = 0.0;
+  float3 bsdfOverPdf         = float3(0.0);
+  float  directLightBsdfPdf  = 0.0;
   bool   isTransmissionEvent = false;
-  if(!SampleSurfaceBsdf(surface, viewDir, payload.seed, bounceDir, bsdfOverPdf, bsdfPdf, isTransmissionEvent))
+  if(!SampleSurfaceBsdf(surface, viewDir, payload.seed, bounceDir, bsdfOverPdf, directLightBsdfPdf, isTransmissionEvent))
   {
     return;
   }
@@ -167,9 +192,13 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
   const float geometricDot = dot(surface.geometricNormal, bounceDir);
   if(abs(geometricDot) <= 1.0e-6)
   {
+    // The sampled direction ended up numerically tangent to the true triangle
+    // plane. Terminate instead of spawning an unstable self-intersecting ray.
     return;
   }
 
+  // Throughput is the path weight that will multiply everything seen by the
+  // next ray. SampleSurfaceBsdf already gave us f*cos/pdf for the sampled event.
   float3 nextThroughput = payload.throughput * max(bsdfOverPdf, float3(0.0));
   if(SafeMax3(nextThroughput) <= 0.0)
   {
@@ -209,25 +238,30 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
     }
   }
   payload.lastSurfacePosition = surface.worldPosition;
-  payload.lastSurfaceNormal =
-      (isTransmissionEvent && CanSampleEnvironmentTransmissionExitLight(surface)) ? -surface.shadingNormal : surface.shadingNormal;
-  payload.lastBsdfPdf       = bsdfPdf;
+  payload.lastSurfaceNormal      = surface.shadingNormal;
+  // This is intentionally not "the full BSDF PDF". It is only the part of the
+  // BSDF proposal that explicit direct lighting can compete against later.
+  payload.lastDirectLightBsdfPdf = directLightBsdfPdf;
 
   bool environmentNeeActive = false;
   if(isTransmissionEvent)
   {
-    environmentNeeActive = CanSampleEnvironmentTransmissionExitLight(surface);
+    environmentNeeActive = CanSampleEnvironmentTransmissionExitLight(surface) && directLightBsdfPdf > 0.0;
   }
   else
   {
-    environmentNeeActive = CanSampleEnvironmentReflectionDirectLight(surface) && !ShouldBsdfOwnEnvironmentTransport(surface);
+    environmentNeeActive = CanSampleEnvironmentReflectionDirectLight(surface) && directLightBsdfPdf > 0.0;
   }
   payload.lastEnvironmentNeeActive = environmentNeeActive ? 1u : 0u;
-  payload.hasLastBsdfSample = 1;
+  // This flag says "a real continuation sample launched the current ray", so
+  // miss/emissive-hit shaders are allowed to do MIS against that previous event.
+  payload.hasLastBsdfSample        = 1u;
 
   const float3 originNormal = SelectOffsetNormal(surface.geometricNormal, bounceDir);
 
   RayDesc bounceRay;
+  // The next ray is launched from a side-aware offset based on the sampled
+  // direction so glossy rays don't immediately self-hit the triangle they came from.
   bounceRay.Origin    = OffsetRay(surface.worldPosition, originNormal);
   bounceRay.Direction = bounceDir;
   bounceRay.TMin      = 0.001;

@@ -26,7 +26,7 @@ struct PathPayload
   float  mediumThickness;      // Minimum segment length for thin-volume absorption when geometry thickness is tiny.
   float3 lastSurfacePosition;  // Previous shading point used when evaluating finite-light MIS on emissive hits.
   float3 lastSurfaceNormal;    // Previous environment-light sampling normal used when evaluating miss-side environment MIS.
-  float  lastBsdfPdf;          // BSDF PDF of the event that launched the current ray.
+  float  lastDirectLightBsdfPdf;  // BSDF PDF of the previous event only for the lobe group that explicit direct lighting also estimates.
   uint   seed;                 // Per-path RNG state advanced in shaders only.
   uint   depth;                // Number of continuation rays already spawned by this path.
   uint   mediumActive;         // Non-zero while the next ray segment travels inside an absorbing dielectric.
