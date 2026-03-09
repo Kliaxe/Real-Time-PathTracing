@@ -47,9 +47,9 @@ float3 SampleEnvironment(GltfSceneInfo sceneInfo, float3 direction)
   return sceneInfo.backgroundColor;
 }
 
-float EvaluateEnvironmentLightPdf(GltfSceneInfo sceneInfo, float3 receiverNormal, float3 direction)
+float EvaluateEnvironmentBaseLightPdf(GltfSceneInfo sceneInfo, float3 receiverNormal, float3 direction)
 {
-  // When an HDRI importance table exists, return the corresponding solid-angle PDF for MIS.
+  // Baseline environment proposal: HDRI luminance CDF when available, otherwise cosine-weighted fallback.
   if(sceneInfo.useHdrEnv != 0 && sceneInfo.environmentTextureIndex >= 0 && sceneInfo.environmentWidth > 0
      && sceneInfo.environmentHeight > 0)
   {
@@ -66,12 +66,56 @@ float EvaluateEnvironmentLightPdf(GltfSceneInfo sceneInfo, float3 receiverNormal
   return PdfCosineHemisphere(receiverNormal, direction);
 }
 
-bool SampleEnvironmentLight(GltfSceneInfo sceneInfo,
-                            float3 receiverNormal,
-                            inout uint seed,
-                            out float3 lightDir,
-                            out float3 radiance,
-                            out float lightPdf)
+bool CanSampleEnvironmentReflectionDirectLight(SurfaceData surface)
+{
+  // Opaque surfaces sample the environment explicitly.
+  // Transmissive materials currently own environment transport through continuation rays only, because the explicit
+  // environment MIS contract for their reflection/transmission events has not been derived and validated yet.
+  return surface.transmission <= 0.001;
+}
+
+bool CanSampleEnvironmentTransmissionExitLight(SurfaceData surface)
+{
+  // Transmission currently owns environment transport through continuation rays only.
+  // That keeps the glass path on one estimator until the transmission-side environment MIS contract is derived and verified.
+  return false;
+}
+
+float ComputeEnvironmentBsdfProposalWeight(SurfaceData surface)
+{
+  // This ownership heuristic is intentionally narrow. The decision is made per surface, not per lobe, so using a generic
+  // "smooth specular" test here would wrongly disable explicit sky lighting for glossy dielectrics whose diffuse/base
+  // energy still benefits from environment NEE. Pure metals are the current case where the continuation ray is a good
+  // enough stand-in for the whole surface response, because their visible energy is concentrated in the reflective lobe.
+  if(!CanSampleEnvironmentReflectionDirectLight(surface))
+  {
+    return 0.0;
+  }
+
+  const float smoothness = 1.0 - surface.roughness;
+  return clamp(surface.metallic * smoothness * smoothness, 0.0, 0.95);
+}
+
+bool ShouldBsdfOwnEnvironmentTransport(SurfaceData surface)
+{
+  // In the current tracer this "ownership" policy is reserved for metal-dominant surfaces. Broad lobes and glossy
+  // dielectrics still keep explicit environment NEE so the sky can light their non-specular energy instead of relying
+  // on rare continuation-path hits.
+  return ComputeEnvironmentBsdfProposalWeight(surface) >= 0.5;
+}
+
+float EvaluateEnvironmentLightPdf(GltfSceneInfo sceneInfo, float3 receiverNormal, float3 direction)
+{
+  // The canonical explicit environment sampler in this tracer is the scene-wide HDRI proposal only.
+  return EvaluateEnvironmentBaseLightPdf(sceneInfo, receiverNormal, direction);
+}
+
+bool SampleEnvironmentBaseLight(GltfSceneInfo sceneInfo,
+                                float3 receiverNormal,
+                                inout uint seed,
+                                out float3 lightDir,
+                                out float3 radiance,
+                                out float lightPdf)
 {
   radiance = float3(0.0);
   lightPdf = 0.0;
@@ -89,7 +133,7 @@ bool SampleEnvironmentLight(GltfSceneInfo sceneInfo,
 
     lightDir  = LatLongUvToDir(uv);
     radiance  = SampleEnvironment(sceneInfo, lightDir);
-    lightPdf  = EvaluateEnvironmentLightPdf(sceneInfo, receiverNormal, lightDir);
+    lightPdf  = EvaluateEnvironmentBaseLightPdf(sceneInfo, receiverNormal, lightDir);
     return lightPdf > 0.0 && SafeMax3(radiance) > 0.0;
   }
 

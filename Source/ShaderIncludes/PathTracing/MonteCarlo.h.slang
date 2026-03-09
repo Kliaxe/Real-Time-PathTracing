@@ -58,24 +58,25 @@ float3 ImportanceSampleGGX(float alpha, float2 xi)
 
 float3 ImportanceSampleVisibleGGX(float3 viewDirectionLocal, float alphaX, float alphaY, float2 xi)
 {
-  // Samples the visible normal distribution function so the microfacet proposals match the actual masking term better.
+  // Exact Heitz VNDF sampling for anisotropic GGX in the local shading frame.
   const float3 stretchedView = normalize(float3(alphaX * viewDirectionLocal.x, alphaY * viewDirectionLocal.y, viewDirectionLocal.z));
-  const float  lensq         = stretchedView.x * stretchedView.x + stretchedView.y * stretchedView.y;
   const float3 tangent1 =
-      lensq > 0.0 ? float3(-stretchedView.y, stretchedView.x, 0.0) * rsqrt(lensq) : float3(1.0, 0.0, 0.0);
-  const float3 tangent2 = cross(stretchedView, tangent1);
+      stretchedView.z < 0.99999 ? normalize(cross(stretchedView, float3(0.0, 0.0, 1.0))) : float3(1.0, 0.0, 0.0);
+  const float3 tangent2 = cross(tangent1, stretchedView);
 
+  const float a   = 1.0 / (1.0 + stretchedView.z);
   const float r   = sqrt(xi.x);
-  const float phi = 6.28318530718 * xi.y;
-  const float t1  = r * cos(phi);
-  float       t2  = r * sin(phi);
-  const float s   = 0.5 * (1.0 + stretchedView.z);
-  t2              = lerp(sqrt(max(0.0, 1.0 - t1 * t1)), t2, s);
+  const float phi = xi.y < a ? (xi.y / a) * 3.14159265359 : 3.14159265359 + ((xi.y - a) / max(1.0 - a, 1.0e-6)) * 3.14159265359;
+  const float p1  = r * cos(phi);
+  const float p2  = r * sin(phi) * (xi.y < a ? 1.0 : stretchedView.z);
 
-  const float3 normalHemisphere =
-      t1 * tangent1 + t2 * tangent2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * stretchedView;
+  float3 halfVector = p1 * tangent1 + p2 * tangent2
+                      + sqrt(max(0.0, 1.0 - p1 * p1 - p2 * p2)) * stretchedView;
 
-  return normalize(float3(alphaX * normalHemisphere.x, alphaY * normalHemisphere.y, max(0.0, normalHemisphere.z)));
+  halfVector.x *= alphaX;
+  halfVector.y *= alphaY;
+  halfVector.z = max(0.0, halfVector.z);
+  return normalize(halfVector);
 }
 
 float RescaleRandomNumber(float randomValue, float lowerBound, float upperBound)

@@ -13,9 +13,9 @@ struct DisneyMaterialData
 {
   float3 albedo;              // Base diffuse / metal color after texturing.
   float3 specularColor;       // Dielectric F0 color after specular + tint remapping.
-  float3 sheenColor;          // Final sheen tint color derived from albedo.
+  float3 sheenColor;          // RGB sheen reflectance resolved from the material.
   float  metallic;            // Metalness selector for base lobe partitioning.
-  float  roughness;           // Perceptual roughness kept for diffuse and Charlie terms.
+  float  roughness;           // Perceptual roughness kept for diffuse terms.
   float  alpha;               // Squared roughness used by GGX.
   float  alphaAnisotropicX;   // Tangent-axis GGX alpha.
   float  alphaAnisotropicY;   // Bitangent-axis GGX alpha.
@@ -28,8 +28,7 @@ struct DisneyMaterialData
   float  clearcoat;           // Extra top-layer lobe strength.
   float  clearcoatRoughness;  // Perceptual clearcoat roughness.
   float  clearcoatAlpha;      // Squared clearcoat roughness.
-  float  sheen;               // Sheen strength / roughness-like control.
-  float  sheenTint;           // Sheen tint amount.
+  float  sheenRoughness;      // Charlie sheen roughness parameter.
   float  baseF0;              // Untinted dielectric F0 derived only from IOR.
 };
 
@@ -52,7 +51,9 @@ struct DisneyBrdfData
   float  LdotY;       // Bitangent projection of light.
   float  HdotX;       // Tangent projection of half vector.
   float  HdotY;       // Bitangent projection of half vector.
-  float  eta;         // Relative IOR used for the current transmission event.
+  float  etaI;        // Incident IOR for the current interface orientation.
+  float  etaT;        // Transmitted IOR for the current interface orientation.
+  float  eta;         // Relative IOR (etaI / etaT) used by transmission formulas.
   bool   reflection;  // True when view and light stay on the same side of the shading normal.
 };
 
@@ -242,13 +243,12 @@ DisneyMaterialData GetDisneyMaterialData(SurfaceData surface)
   material.clearcoat          = clamp(surface.clearcoat, 0.0, 1.0);
   material.clearcoatRoughness = clamp(surface.clearcoatRoughness, 0.045, 1.0);
   material.clearcoatAlpha     = material.clearcoatRoughness * material.clearcoatRoughness;
-  material.sheen              = clamp(surface.sheen, 0.0, 1.0);
-  material.sheenTint          = clamp(surface.sheenTint, 0.0, 1.0);
+  material.sheenColor         = clamp(surface.sheenColor, float3(0.0), float3(1.0));
+  material.sheenRoughness     = clamp(surface.sheenRoughness, 0.0, 1.0);
   material.baseF0             = DielectricF0(material.refractionIndex);
 
   const float3 tint           = CalculateTint(material.albedo);
   material.specularColor      = float3(material.baseF0) * lerp(float3(1.0), tint, material.specularTint) * material.specular;
-  material.sheenColor         = lerp(float3(1.0), tint, material.sheenTint);
 
   // Maps the single anisotropy control onto separate tangent/bitangent roughnesses.
   const float aspect          = sqrt(max(1.0 - 0.9 * material.anisotropy, 0.001));
@@ -269,7 +269,12 @@ DisneyBrdfData PrepareBrdfData(SurfaceData surface, DisneyMaterialData material,
   data.NdotV      = dot(data.N, data.V);
   data.NdotL      = dot(data.N, data.L);
   data.reflection = (data.NdotV * data.NdotL) > 0.0;
-  data.eta        = data.NdotV <= 0.0 ? material.refractionIndex : (1.0 / material.refractionIndex);
+  data.etaI       = surface.isFrontFace != 0 ? 1.0 : material.refractionIndex;
+  data.etaT       = surface.isFrontFace != 0 ? material.refractionIndex : 1.0;
+  data.eta        = data.etaI / data.etaT;
+  // Transmission uses the generalized dielectric half vector consistent with refract(-V, H, etaI / etaT):
+  // wm ∝ wt + wo * eta, where eta = etaI / etaT. Putting eta on the transmitted direction instead flips the
+  // transmission-side half-vector geometry and breaks Fresnel / D / G / PDF coherence for the BTDF.
   data.H          = data.NdotL <= 0.0 ? normalize(data.L + data.V * data.eta) : normalize(data.L + data.V);
   if(dot(data.N, data.H) < 0.0)
   {
@@ -298,7 +303,7 @@ DisneyLobeSetup GetLobeSetup(DisneyMaterialData material, DisneyBrdfData brdf)
   setup.dielectricWeight          = setup.diffuseWeight;
   setup.metalWeight               = material.metallic * clearcoatEnergyLoss;
   setup.glassWeight               = (1.0 - material.metallic) * material.transmission;
-  setup.sheenWeight               = material.sheen;
+  setup.sheenWeight               = clearcoatEnergyLoss;
   setup.clearcoatWeight           = material.clearcoat;
 
   // The probabilities are luminance-weighted so bright lobes get sampled more often even when their energy weight is similar.
@@ -308,7 +313,7 @@ DisneyLobeSetup GetLobeSetup(DisneyMaterialData material, DisneyBrdfData brdf)
       setup.dielectricWeight * Luminance(lerp(material.specularColor, float3(1.0), schlickWeight));
   const float metalProbability    = setup.metalWeight * Luminance(lerp(material.albedo, float3(1.0), schlickWeight));
   const float glassProbability    = setup.glassWeight;
-  const float sheenProbability    = setup.sheenWeight;
+  const float sheenProbability    = setup.sheenWeight * Luminance(material.sheenColor);
   const float clearcoatProbability = setup.clearcoatWeight;
 
   const float total = max(diffuseProbability + dielectricProbability + metalProbability + glassProbability + sheenProbability
@@ -353,13 +358,15 @@ float3 EvaluateMicrofacetReflection(DisneyMaterialData material, DisneyBrdfData 
   }
 
   const float D  = D_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.HdotX, brdf.HdotY, abs(brdf.NdotH));
-  const float V1 =
+  const float G1V =
       V_Smith_G1_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.VdotX, brdf.VdotY, abs(brdf.NdotV));
-  const float V2 = V_Smith_G2_Correlated_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.VdotX,
-                                                         brdf.VdotY, brdf.LdotX, brdf.LdotY, abs(brdf.NdotV), abs(brdf.NdotL));
+  const float G1L =
+      V_Smith_G1_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.LdotX, brdf.LdotY, abs(brdf.NdotL));
 
-  pdf = D * V1 / max(4.0 * abs(brdf.NdotV), 1.0e-5);
-  return fresnel * D * V2;
+  pdf = D * G1V / max(4.0 * abs(brdf.NdotV), 1.0e-5);
+
+  const float G = G1V * G1L;
+  return fresnel * D * G / max(4.0 * abs(brdf.NdotV) * abs(brdf.NdotL), 1.0e-5);
 }
 
 float3 EvaluateMicrofacetRefraction(DisneyMaterialData material, DisneyBrdfData brdf, float fresnel, out float pdf)
@@ -371,19 +378,32 @@ float3 EvaluateMicrofacetRefraction(DisneyMaterialData material, DisneyBrdfData 
     return float3(0.0);
   }
 
-  const float D  = D_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.HdotX, brdf.HdotY, abs(brdf.NdotH));
-  const float V1 =
-      V_Smith_G1_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.VdotX, brdf.VdotY, abs(brdf.NdotV));
-  const float V2 = V_Smith_G2_Correlated_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.VdotX,
-                                                         brdf.VdotY, brdf.LdotX, brdf.LdotY, abs(brdf.NdotV), abs(brdf.NdotL));
+  if(brdf.VdotH * brdf.NdotV <= 0.0 || brdf.LdotH * brdf.NdotL <= 0.0)
+  {
+    return float3(0.0);
+  }
 
+  const float D  = D_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.HdotX, brdf.HdotY, abs(brdf.NdotH));
+  const float G1V =
+      V_Smith_G1_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.VdotX, brdf.VdotY, abs(brdf.NdotV));
+  const float G1L =
+      V_Smith_G1_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.LdotX, brdf.LdotY, abs(brdf.NdotL));
+
+  // With wm ∝ wt + wo * eta, the transmission change-of-variables uses:
+  //   dwm / dwt = |wt . wm| / (wt . wm + eta * wo . wm)^2
+  // Matching this convention in both PDF and BSDF evaluation is what keeps bsdf/pdf coherent for glass.
   float denom    = brdf.LdotH + brdf.VdotH * brdf.eta;
   denom *= denom;
-  const float eta2     = brdf.eta * brdf.eta;
   const float jacobian = abs(brdf.LdotH) / max(denom, 1.0e-5);
 
-  pdf = D * V1 * max(0.0, brdf.VdotH) * jacobian / max(abs(brdf.NdotV), 1.0e-5);
-  return sqrt(material.albedo) * (1.0 - fresnel) * D * V2 * abs(brdf.VdotH) * jacobian * eta2 * 4.0;
+  pdf = D * G1V * abs(brdf.VdotH) * jacobian / max(abs(brdf.NdotV), 1.0e-5);
+
+  const float G             = G1V * G1L;
+  const float transmission  =
+      (1.0 - fresnel) * D * G * abs(brdf.LdotH * brdf.VdotH)
+      / max(abs(brdf.NdotV * brdf.NdotL) * denom, 1.0e-5);
+  const float radianceScale = 1.0 / max(brdf.eta * brdf.eta, 1.0e-5);
+  return sqrt(material.albedo) * transmission * radianceScale;
 }
 
 float3 EvaluateSheen(DisneyMaterialData material, DisneyBrdfData brdf, out float pdf)
@@ -396,7 +416,7 @@ float3 EvaluateSheen(DisneyMaterialData material, DisneyBrdfData brdf, out float
   }
 
   pdf = abs(brdf.NdotL) * kInvPi;
-  return D_Charlie(material.sheen, clamp(brdf.NdotH, 0.0, 1.0)) * V_Neubelt(abs(brdf.NdotV), abs(brdf.NdotL))
+  return D_Charlie(material.sheenRoughness, clamp(brdf.NdotH, 0.0, 1.0)) * V_Neubelt(abs(brdf.NdotV), abs(brdf.NdotL))
          * material.sheenColor;
 }
 
@@ -438,7 +458,7 @@ float3 EvaluateSurfaceBsdf(SurfaceData surface, float3 viewDir, float3 lightDir,
   if(setup.dielectricProbability > 0.0 && brdf.reflection)
   {
     const float fresnelWeight =
-        (DielectricFresnel(abs(brdf.VdotH), 1.0, material.refractionIndex) - material.baseF0) / max(1.0 - material.baseF0, 1.0e-5);
+        (DielectricFresnel(abs(brdf.VdotH), brdf.etaI, brdf.etaT) - material.baseF0) / max(1.0 - material.baseF0, 1.0e-5);
     result += EvaluateMicrofacetReflection(material, brdf, lerp(material.specularColor, float3(1.0), fresnelWeight), tmpPdf)
               * setup.dielectricWeight;
     pdf += tmpPdf * setup.dielectricProbability;
@@ -453,7 +473,7 @@ float3 EvaluateSurfaceBsdf(SurfaceData surface, float3 viewDir, float3 lightDir,
 
   if(setup.glassProbability > 0.0)
   {
-    const float fresnel = DielectricFresnel(abs(brdf.VdotH), 1.0, material.refractionIndex);
+    const float fresnel = DielectricFresnel(abs(brdf.VdotH), brdf.etaI, brdf.etaT);
     if(brdf.reflection)
     {
       result += EvaluateMicrofacetReflection(material, brdf, float3(fresnel), tmpPdf) * setup.glassWeight;
@@ -486,12 +506,19 @@ float3 EvaluateSurfaceBsdf(SurfaceData surface, float3 viewDir, float3 lightDir,
 //    Lobe sampling
 // -------------------------------------------------------------------------
 
-bool SampleSurfaceBsdf(SurfaceData surface, float3 viewDir, inout uint seed, out float3 lightDir, out float3 bsdfOverPdf, out float pdf)
+bool SampleSurfaceBsdf(SurfaceData surface,
+                       float3 viewDir,
+                       inout uint seed,
+                       out float3 lightDir,
+                       out float3 bsdfOverPdf,
+                       out float pdf,
+                       out bool isTransmissionEvent)
 {
   // Samples exactly the same lobe set that EvaluateSurfaceBsdf() evaluates, which keeps MIS and path throughput coherent.
   const DisneyMaterialData material  = GetDisneyMaterialData(surface);
   const DisneyBrdfData     probeBrdf = PrepareBrdfData(surface, material, viewDir, surface.shadingNormal);
   const DisneyLobeSetup    setup     = GetLobeSetup(material, probeBrdf);
+  isTransmissionEvent               = false;
 
   const float  sampleLobe    = NextRandom(seed);
   const float2 xi            = float2(NextRandom(seed), NextRandom(seed));
@@ -530,7 +557,9 @@ bool SampleSurfaceBsdf(SurfaceData surface, float3 viewDir, inout uint seed, out
     }
 
     const float3 halfVector = ToWorld(surface.shadingNormal, surface.tangent, surface.bitangent, halfLocal);
-    const float  fresnel    = DielectricFresnel(abs(dot(normalize(viewDir), halfVector)), 1.0, material.refractionIndex);
+    const float  etaI       = surface.isFrontFace != 0 ? 1.0 : material.refractionIndex;
+    const float  etaT       = surface.isFrontFace != 0 ? material.refractionIndex : 1.0;
+    const float  fresnel    = DielectricFresnel(abs(dot(normalize(viewDir), halfVector)), etaI, etaT);
     const float  remapped   = RescaleRandomNumber(sampleLobe, cdfMetal, cdfGlass);
     if(remapped < fresnel)
     {
@@ -538,7 +567,7 @@ bool SampleSurfaceBsdf(SurfaceData surface, float3 viewDir, inout uint seed, out
     }
     else
     {
-      const float eta = surface.isFrontFace != 0 ? (1.0 / material.refractionIndex) : material.refractionIndex;
+      const float eta = etaI / etaT;
       lightDir        = normalize(refract(-viewDir, halfVector, eta));
       if(dot(lightDir, lightDir) <= 0.0)
       {
@@ -567,20 +596,24 @@ bool SampleSurfaceBsdf(SurfaceData surface, float3 viewDir, inout uint seed, out
   if(dot(lightDir, lightDir) <= 0.0)
   {
     // Invalid samples are reported explicitly so the caller can terminate the path cleanly.
+    isTransmissionEvent = false;
     bsdfOverPdf = float3(0.0);
     pdf         = 0.0;
     return false;
   }
 
   // Re-evaluate the full mixture at the sampled direction so bsdf/pdf matches the same source-of-truth logic.
+  const DisneyBrdfData sampleBrdf = PrepareBrdfData(surface, material, viewDir, lightDir);
   const float3 bsdf = EvaluateSurfaceBsdf(surface, viewDir, lightDir, pdf);
   if(pdf <= 0.0 || SafeMax3(bsdf) <= 0.0)
   {
+    isTransmissionEvent = false;
     bsdfOverPdf = float3(0.0);
     pdf         = 0.0;
     return false;
   }
 
+  isTransmissionEvent = !sampleBrdf.reflection;
   bsdfOverPdf = bsdf / pdf;
   return true;
 }

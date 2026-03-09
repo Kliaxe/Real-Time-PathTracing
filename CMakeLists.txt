@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.22...3.31)
 
 project(RealTimePathTracing VERSION 0.1 LANGUAGES C CXX)
 
+include(CTest)
+
 # ----------------------------------------------------------------------------------------------------------------------
 # CMake setup
 #

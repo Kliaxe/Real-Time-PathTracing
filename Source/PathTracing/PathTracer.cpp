@@ -28,7 +28,10 @@ namespace nvsamples
 namespace
 {
 
-constexpr uint32_t kRequestedMaxBounces  = 3;
+// Glass often needs multiple internal events before a path escapes a closed object.
+// A tiny recursion budget is enough for metals, but it biases solid dielectrics dark because many
+// transmission paths die inside the shape before they can ever see the environment.
+constexpr uint32_t kRequestedMaxBounces  = 8;
 constexpr VkFormat kAccumulationFormat   = VK_FORMAT_R32G32B32A32_SFLOAT;
 
 VkShaderModuleCreateInfo GetPathTracingShaderCode()

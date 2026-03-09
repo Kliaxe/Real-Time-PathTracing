@@ -26,8 +26,8 @@ struct MaterialAttributes
   glm::vec3 attenuationColor   = glm::vec3(1.0f, 1.0f, 1.0f);
   float     attenuationDistance = 1.0e30f;
   float     volumeThickness    = 0.0f;
+  glm::vec3 sheenColor         = glm::vec3(0.0f, 0.0f, 0.0f);
   float     sheenRoughness     = 0.0f;
-  float     sheenTint          = 0.0f;
   float     clearcoat          = 0.0f;
   float     clearcoatRoughness = 0.0f;
   float     refraction         = 1.5f;

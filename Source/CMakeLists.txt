@@ -34,3 +34,16 @@ target_sources(RealTimePathTracing PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/PathTracer.h"
 )
 
+if(BUILD_TESTING)
+    add_executable(PathTracingDiagnostics
+        "${CMAKE_CURRENT_LIST_DIR}/Diagnostics/PathTracingDiagnostics.cpp"
+    )
+
+    target_include_directories(PathTracingDiagnostics PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}"
+    )
+
+    add_test(NAME PathTracingDiagnostics COMMAND PathTracingDiagnostics)
+    set_target_properties(PathTracingDiagnostics PROPERTIES FOLDER "Diagnostics")
+endif()
+

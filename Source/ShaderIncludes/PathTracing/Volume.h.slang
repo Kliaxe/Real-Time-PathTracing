@@ -34,9 +34,8 @@ void ApplyCurrentMediumAttenuation(inout PathPayload payload, float segmentDista
     return;
   }
 
-  // Thin-volume authoring can produce unrealistically tiny geometric path lengths, so clamp to the authored thickness floor.
-  const float effectiveDistance = max(segmentDistance, payload.mediumThickness);
-  payload.throughput *= EvaluateMediumTransmittance(payload.mediumAttenuation, effectiveDistance);
+  // Beer-Lambert attenuation depends on the actual distance traveled in the medium along this ray segment.
+  payload.throughput *= EvaluateMediumTransmittance(payload.mediumAttenuation, segmentDistance);
 }
 
 bool HasVolumeAttenuation(SurfaceData surface)

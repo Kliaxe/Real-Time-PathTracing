@@ -179,8 +179,7 @@ MaterialAttributes ParseMaterialAttributes(const tinygltf::Material& src)
   if(const tinygltf::Value::Object* ext = FindMaterialExtensionObject(src, "KHR_materials_sheen"))
   {
     dst.sheenRoughness = ReadObjectNumber(*ext, "sheenRoughnessFactor", dst.sheenRoughness);
-    const glm::vec3 sheenColor = ReadObjectVec3(*ext, "sheenColorFactor", glm::vec3(0.0f));
-    dst.sheenTint              = (sheenColor.x + sheenColor.y + sheenColor.z) / 3.0f;
+    dst.sheenColor     = ReadObjectVec3(*ext, "sheenColorFactor", dst.sheenColor);
   }
   if(const tinygltf::Value::Object* ext = FindMaterialExtensionObject(src, "KHR_materials_volume"))
   {
@@ -198,8 +197,8 @@ MaterialAttributes ParseMaterialAttributes(const tinygltf::Material& src)
   dst.attenuationColor   = glm::clamp(dst.attenuationColor, glm::vec3(0.0f), glm::vec3(1.0f));
   dst.attenuationDistance = std::max(dst.attenuationDistance, 0.0f);
   dst.volumeThickness    = std::max(dst.volumeThickness, 0.0f);
+  dst.sheenColor         = glm::clamp(dst.sheenColor, glm::vec3(0.0f), glm::vec3(1.0f));
   dst.sheenRoughness     = Clamp01(dst.sheenRoughness);
-  dst.sheenTint          = Clamp01(dst.sheenTint);
   dst.clearcoat          = Clamp01(dst.clearcoat);
   dst.clearcoatRoughness = Clamp01(dst.clearcoatRoughness);
   dst.transmission       = Clamp01(dst.transmission);
@@ -227,8 +226,8 @@ shaderio::GltfMetallicRoughness ToGpuMaterial(const MaterialAttributes& material
   dst.refractionIndex               = materialAttributes.refraction;
   dst.clearcoatFactor               = materialAttributes.clearcoat;
   dst.clearcoatRoughness            = materialAttributes.clearcoatRoughness;
-  dst.sheenFactor                   = materialAttributes.sheenRoughness;
-  dst.sheenTint                     = materialAttributes.sheenTint;
+  dst.sheenColorFactor              = materialAttributes.sheenColor;
+  dst.sheenRoughnessFactor          = materialAttributes.sheenRoughness;
   dst.baseColorTextureIndex         = baseColorTextureIndex;
   dst.metallicRoughnessTextureIndex = metallicRoughnessTextureIndex;
   dst.emissiveTextureIndex          = textureIndices.emissive;
@@ -698,8 +697,8 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
         gpuMaterial.refractionIndex                    = overrideDef.attributes.refraction;
         gpuMaterial.clearcoatFactor                    = overrideDef.attributes.clearcoat;
         gpuMaterial.clearcoatRoughness                 = overrideDef.attributes.clearcoatRoughness;
-        gpuMaterial.sheenFactor                        = overrideDef.attributes.sheenRoughness;
-        gpuMaterial.sheenTint                          = overrideDef.attributes.sheenTint;
+        gpuMaterial.sheenColorFactor                   = overrideDef.attributes.sheenColor;
+        gpuMaterial.sheenRoughnessFactor               = overrideDef.attributes.sheenRoughness;
       }
 
       if(overrideDef.materialSlot < 0 && fallbackMaterialIndex.has_value())
@@ -723,8 +722,8 @@ int SceneUploader::Upload(VkCommandBuffer cmd, const UploadInput& input, UploadS
         gpuMaterial.refractionIndex                    = overrideDef.attributes.refraction;
         gpuMaterial.clearcoatFactor                    = overrideDef.attributes.clearcoat;
         gpuMaterial.clearcoatRoughness                 = overrideDef.attributes.clearcoatRoughness;
-        gpuMaterial.sheenFactor                        = overrideDef.attributes.sheenRoughness;
-        gpuMaterial.sheenTint                          = overrideDef.attributes.sheenTint;
+        gpuMaterial.sheenColorFactor                   = overrideDef.attributes.sheenColor;
+        gpuMaterial.sheenRoughnessFactor               = overrideDef.attributes.sheenRoughness;
       }
     }
   };

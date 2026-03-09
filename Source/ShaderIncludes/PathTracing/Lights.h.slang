@@ -119,8 +119,14 @@ void AccumulateEmissiveDirectLight(inout PathPayload payload, SurfaceData surfac
     return;
   }
 
+  const float3 unoffsetToLight = sampledPosition - surface.worldPosition;
+  if(dot(unoffsetToLight, unoffsetToLight) <= 1.0e-8)
+  {
+    return;
+  }
+
   // All direct-light geometry, PDFs, and visibility tests must agree on the same offset origin to avoid self-occlusion.
-  const float3 shadowOrigin    = OffsetRay(surface.worldPosition, surface.geometricNormal);
+  const float3 shadowOrigin    = OffsetRay(surface.worldPosition, SelectOffsetNormal(surface.geometricNormal, unoffsetToLight));
   const float3 toLight         = sampledPosition - shadowOrigin;
   const float  distanceSquared = dot(toLight, toLight);
   if(distanceSquared <= 1.0e-8)
@@ -130,10 +136,9 @@ void AccumulateEmissiveDirectLight(inout PathPayload payload, SurfaceData surfac
 
   const float  distance    = sqrt(distanceSquared);
   const float3 lightDir    = toLight / distance;
-  const float  geometryCos = dot(surface.geometricNormal, lightDir);
   const GltfMetallicRoughness material = sceneInfo.materials[light.materialIndex];
   const float  lightCos                = EvaluateEmissiveTriangleCosine(material, light.geometricNormal, -lightDir);
-  if(geometryCos <= 0.0 || lightCos <= 0.0)
+  if(lightCos <= 0.0)
   {
     return;
   }

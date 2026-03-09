@@ -56,6 +56,7 @@ void rgenMain()
   payload.seed              = xxhash32(uint3(launchID, pushConst.rngFrameNumber));
   payload.depth             = 0;
   payload.mediumActive      = 0;
+  payload.lastEnvironmentNeeActive = 0;
   payload.hasLastBsdfSample = 0;
 
   TraceRay(topLevelAS, 0, 0xFF, 0, 0, 0, ray, payload);
@@ -81,8 +82,10 @@ void rmissMain(inout PathPayload payload)
   const float3        envColor  = SampleEnvironment(sceneInfo, WorldRayDirection());
 
   float misWeight = 1.0;
-  if(payload.hasLastBsdfSample != 0)
+  if(payload.hasLastBsdfSample != 0 && payload.lastEnvironmentNeeActive != 0)
   {
+    // Miss-side MIS only competes against the scene-wide explicit environment sampler. When a surface lets the
+    // BSDF continuation ray own environment transport, lastEnvironmentNeeActive is zero and this branch is skipped.
     const float lightPdf = EvaluateEnvironmentLightPdf(sceneInfo, payload.lastSurfaceNormal, WorldRayDirection());
     if(lightPdf > 0.0 && payload.lastBsdfPdf > 0.0)
     {
@@ -155,14 +158,14 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
   float3 bounceDir;
   float3 bsdfOverPdf;
   float  bsdfPdf = 0.0;
-  if(!SampleSurfaceBsdf(surface, viewDir, payload.seed, bounceDir, bsdfOverPdf, bsdfPdf))
+  bool   isTransmissionEvent = false;
+  if(!SampleSurfaceBsdf(surface, viewDir, payload.seed, bounceDir, bsdfOverPdf, bsdfPdf, isTransmissionEvent))
   {
     return;
   }
 
   const float geometricDot = dot(surface.geometricNormal, bounceDir);
-  const bool  isTransmissionBounce = surface.transmission > 0.001 && geometricDot < 0.0;
-  if(!isTransmissionBounce && geometricDot <= 0.0)
+  if(abs(geometricDot) <= 1.0e-6)
   {
     return;
   }
@@ -190,7 +193,7 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
   }
 
   payload.throughput        = nextThroughput;
-  if(isTransmissionBounce)
+  if(isTransmissionEvent)
   {
     if(surface.isFrontFace != 0 && HasVolumeAttenuation(surface))
     {
@@ -206,11 +209,23 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
     }
   }
   payload.lastSurfacePosition = surface.worldPosition;
-  payload.lastSurfaceNormal = surface.shadingNormal;
+  payload.lastSurfaceNormal =
+      (isTransmissionEvent && CanSampleEnvironmentTransmissionExitLight(surface)) ? -surface.shadingNormal : surface.shadingNormal;
   payload.lastBsdfPdf       = bsdfPdf;
+
+  bool environmentNeeActive = false;
+  if(isTransmissionEvent)
+  {
+    environmentNeeActive = CanSampleEnvironmentTransmissionExitLight(surface);
+  }
+  else
+  {
+    environmentNeeActive = CanSampleEnvironmentReflectionDirectLight(surface) && !ShouldBsdfOwnEnvironmentTransport(surface);
+  }
+  payload.lastEnvironmentNeeActive = environmentNeeActive ? 1u : 0u;
   payload.hasLastBsdfSample = 1;
 
-  const float3 originNormal = geometricDot >= 0.0 ? surface.geometricNormal : -surface.geometricNormal;
+  const float3 originNormal = SelectOffsetNormal(surface.geometricNormal, bounceDir);
 
   RayDesc bounceRay;
   bounceRay.Origin    = OffsetRay(surface.worldPosition, originNormal);

@@ -25,11 +25,12 @@ struct PathPayload
   float3 mediumAttenuation;    // Current medium extinction coefficient used between this hit and the next.
   float  mediumThickness;      // Minimum segment length for thin-volume absorption when geometry thickness is tiny.
   float3 lastSurfacePosition;  // Previous shading point used when evaluating finite-light MIS on emissive hits.
-  float3 lastSurfaceNormal;    // Previous surface normal used when evaluating environment MIS on escape rays.
+  float3 lastSurfaceNormal;    // Previous environment-light sampling normal used when evaluating miss-side environment MIS.
   float  lastBsdfPdf;          // BSDF PDF of the event that launched the current ray.
   uint   seed;                 // Per-path RNG state advanced in shaders only.
   uint   depth;                // Number of continuation rays already spawned by this path.
   uint   mediumActive;         // Non-zero while the next ray segment travels inside an absorbing dielectric.
+  uint   lastEnvironmentNeeActive;  // Non-zero when the previous hit actually evaluated environment NEE and miss-side MIS should compete against it.
   uint   hasLastBsdfSample;    // Non-zero when miss / emissive-hit code should apply MIS against the previous BSDF sample.
 };
 
@@ -62,8 +63,8 @@ struct SurfaceData
   float  refractionIndex;     // Index of refraction for transmissive lobes.
   float  clearcoat;           // Secondary dielectric top-coat strength.
   float  clearcoatRoughness;  // Perceptual roughness of the clearcoat lobe.
-  float  sheen;               // Sheen lobe strength / roughness-style control.
-  float  sheenTint;           // Sheen tint factor from white to base-color tint.
+  float3 sheenColor;          // RGB sheen reflectance resolved from KHR_materials_sheen.
+  float  sheenRoughness;      // Sheen roughness parameter used by the Charlie distribution.
   uint   isFrontFace;  // 1 when the incoming ray hit the front side of the surface
 };
 

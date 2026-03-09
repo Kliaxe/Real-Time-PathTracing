@@ -47,6 +47,17 @@ float ResolveTextureChannel(int textureIndex, float2 texCoord, int channel, floa
   return fallback;
 }
 
+float3 ResolveTextureColor(int textureIndex, float2 texCoord, float3 fallback)
+{
+  // Small helper for extension textures that modulate an RGB factor directly.
+  if(textureIndex < 0)
+  {
+    return fallback;
+  }
+
+  return fallback * textures[textureIndex].SampleLevel(texCoord, 0.0).xyz;
+}
+
 float ResolveTintMagnitude(int textureIndex, float2 texCoord, float fallback)
 {
   // Interprets a tint texture as a color magnitude control and collapses it back to a scalar tint amount.
@@ -203,7 +214,7 @@ bool TraceVisibilityFromOrigin(float3 rayOrigin, float3 direction, float maxDist
 bool TraceVisibility(float3 worldPosition, float3 geometricNormal, float3 direction, float maxDistance)
 {
   // Convenience wrapper for the common "start from surface point with proper offset" case.
-  return TraceVisibilityFromOrigin(OffsetRay(worldPosition, geometricNormal), direction, maxDistance);
+  return TraceVisibilityFromOrigin(OffsetRay(worldPosition, SelectOffsetNormal(geometricNormal, direction)), direction, maxDistance);
 }
 
 bool TraceVisibility(float3 worldPosition, float3 geometricNormal, float3 direction)
@@ -293,8 +304,10 @@ SurfaceData LoadSurfaceData(BuiltInTriangleIntersectionAttributes attr)
   const float  clearcoat         = clamp(ResolveTextureChannel(material.clearcoatTextureIndex, texCoord, 0, material.clearcoatFactor), 0.0, 1.0);
   const float  clearcoatRoughness =
       clamp(ResolveTextureChannel(material.clearcoatRoughnessTextureIndex, texCoord, 1, material.clearcoatRoughness), 0.045, 1.0);
-  const float sheen = clamp(ResolveTextureChannel(material.sheenRoughnessTextureIndex, texCoord, 3, material.sheenFactor), 0.0, 1.0);
-  const float sheenTint = clamp(ResolveTintMagnitude(material.sheenColorTextureIndex, texCoord, material.sheenTint), 0.0, 1.0);
+  const float3 sheenColor =
+      clamp(ResolveTextureColor(material.sheenColorTextureIndex, texCoord, material.sheenColorFactor), float3(0.0), float3(1.0));
+  const float sheenRoughness =
+      clamp(ResolveTextureChannel(material.sheenRoughnessTextureIndex, texCoord, 3, material.sheenRoughnessFactor), 0.0, 1.0);
 
   SurfaceData surface;
   // Every field below is the resolved shader-side contract consumed by Disney.h.slang and the direct-light samplers.
@@ -319,32 +332,51 @@ SurfaceData LoadSurfaceData(BuiltInTriangleIntersectionAttributes attr)
   surface.refractionIndex    = max(material.refractionIndex, 1.01);
   surface.clearcoat          = clearcoat;
   surface.clearcoatRoughness = clearcoatRoughness;
-  surface.sheen              = sheen;
-  surface.sheenTint          = sheenTint;
+  surface.sheenColor         = sheenColor;
+  surface.sheenRoughness     = sheenRoughness;
   surface.isFrontFace        = isFrontFace;
   return surface;
 }
 
+bool SampleEnvironmentLightDirection(GltfSceneInfo sceneInfo,
+                                     float3 receiverNormal,
+                                     inout uint seed,
+                                     out float3 lightDir,
+                                     out float3 radiance)
+{
+  radiance = float3(0.0);
+  lightDir = float3(0.0);
+
+  float baseLightPdf = 0.0;
+  return SampleEnvironmentBaseLight(sceneInfo, receiverNormal, seed, lightDir, radiance, baseLightPdf);
+}
+
 void AccumulateEnvironmentDirectLight(inout PathPayload payload, SurfaceData surface, GltfSceneInfo sceneInfo, float3 viewDir)
 {
-  // Direct environment lighting is skipped for transmissive hits because the continuation ray handles glass transport explicitly.
-  if(surface.transmission > 0.001)
+  // The infinite light uses two direct-light modes in this tracer:
+  //   1. opaque / reflective surfaces sample it directly unless the BSDF should own the transport
+  //   2. transmissive surfaces sample it only at the exit interface, where a straight connection to the environment is meaningful
+  bool   sampleReflectionNee = CanSampleEnvironmentReflectionDirectLight(surface);
+  bool   sampleTransmissionExitNee = CanSampleEnvironmentTransmissionExitLight(surface);
+  float3 receiverNormal      = surface.shadingNormal;
+
+  if(sampleTransmissionExitNee)
+  {
+    receiverNormal = -surface.shadingNormal;
+  }
+
+  if(!sampleReflectionNee && !sampleTransmissionExitNee)
+  {
+    return;
+  }
+  if(sampleReflectionNee && ShouldBsdfOwnEnvironmentTransport(surface))
   {
     return;
   }
 
-  float  lightPdf    = 0.0;
   float3 lightDir    = float3(0.0);
   float3 radiance    = float3(0.0);
-  if(!SampleEnvironmentLight(sceneInfo, surface.shadingNormal, payload.seed, lightDir, radiance, lightPdf))
-  {
-    return;
-  }
-
-  // The geometric normal gates visibility and hemisphere validity even if the shading normal was perturbed by a normal map.
-  float  geometryCos = dot(surface.geometricNormal, lightDir);
-
-  if(lightPdf <= 0.0 || geometryCos <= 0.0)
+  if(!SampleEnvironmentLightDirection(sceneInfo, receiverNormal, payload.seed, lightDir, radiance))
   {
     return;
   }
@@ -362,7 +394,13 @@ void AccumulateEnvironmentDirectLight(inout PathPayload payload, SurfaceData sur
     return;
   }
 
-  // MIS balances the explicit environment sample against the chance of the BSDF having sampled the same direction.
+  const float lightPdf = EvaluateEnvironmentLightPdf(sceneInfo, receiverNormal, lightDir);
+  if(lightPdf <= 0.0)
+  {
+    return;
+  }
+
+  // MIS balances the explicit environment sample against the chance of the path continuation BSDF having sampled the same direction.
   const float  misWeight = MisMixWeight(lightPdf, bsdfPdf);
 
   payload.radiance += payload.throughput * radiance * bsdf * (misWeight / lightPdf);

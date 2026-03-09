@@ -88,10 +88,10 @@ struct GltfMetallicRoughness
   float  attenuationDistance = 1.0e30f;      // Distance at which attenuation reaches attenuationColor
   float  volumeThickness     = 0.0f;         // Minimum thickness used for volumetric absorption
   float  refractionIndex    = 1.5f;          // Index of refraction used by the path tracer
-  float  clearcoatFactor    = 0.0f;          // Extra dielectric specular layer strength
-  float  clearcoatRoughness = 0.0f;          // Roughness of the clearcoat layer
-  float  sheenFactor        = 0.0f;          // Strength of the retro-reflective cloth-like lobe
-  float  sheenTint          = 0.0f;          // 0 = white sheen, 1 = tint toward base color
+  float  clearcoatFactor      = 0.0f;          // Extra dielectric specular layer strength
+  float  clearcoatRoughness   = 0.0f;          // Roughness of the clearcoat layer
+  float3 sheenColorFactor     = float3(0.0f); // RGB sheen reflectance from KHR_materials_sheen
+  float  sheenRoughnessFactor = 0.0f;          // Roughness of the sheen lobe
   int    baseColorTextureIndex = -1;         // Base color texture index (optional, sampled as sRGB)
   int    metallicRoughnessTextureIndex = -1; // glTF metallic-roughness texture (B = metallic, G = roughness)
   int    emissiveTextureIndex = -1;          // Emissive texture index (optional, sampled as sRGB)
@@ -102,8 +102,8 @@ struct GltfMetallicRoughness
   int    thicknessTextureIndex = -1;         // Volume thickness texture index
   int    clearcoatTextureIndex = -1;         // Clearcoat strength texture index
   int    clearcoatRoughnessTextureIndex = -1; // Clearcoat roughness texture index
-  int    sheenColorTextureIndex = -1;        // Sheen tint texture index (optional, sampled as sRGB)
-  int    sheenRoughnessTextureIndex = -1;    // Sheen roughness/strength texture index
+  int    sheenColorTextureIndex = -1;        // Sheen color texture index (optional, sampled as sRGB)
+  int    sheenRoughnessTextureIndex = -1;    // Sheen roughness texture index
   float  alphaCutoff                 = 0.5f; // Alpha cutoff (used when alphaMode == eMask)
   int    alphaMode                   = GltfAlphaMode::eOpaque;  // Opaque / Mask / Blend
   int    pad0                        = 0;    // Explicit padding to keep the shared layout stable

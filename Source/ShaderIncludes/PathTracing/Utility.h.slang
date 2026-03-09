@@ -31,6 +31,12 @@ float3 OffsetRay(float3 position, float3 geometricNormal)
                 abs(position.z) < kRayOriginFloor ? position.z + kRayOriginFloatEps * geometricNormal.z : offsetPosition.z);
 }
 
+float3 SelectOffsetNormal(float3 geometricNormal, float3 direction)
+{
+  // The shading frame may model a smoother surface than the coarse triangle, so the offset must follow the sampled ray side.
+  return dot(geometricNormal, direction) >= 0.0 ? geometricNormal : -geometricNormal;
+}
+
 float3x3 GetTangentSpace(float3 normal)
 {
   // Builds an orthonormal basis on demand when no authored tangent frame exists.
@@ -49,25 +55,25 @@ float3x3 GetTangentSpace(float3 normal, float3 tangent, float3 bitangent)
 float3 ToLocal(float3 normal, float3 direction)
 {
   // Converts a world-space vector into the implicit basis built from the provided normal.
-  return mul(transpose(GetTangentSpace(normal)), direction);
+  return mul(GetTangentSpace(normal), direction);
 }
 
 float3 ToLocal(float3 normal, float3 tangent, float3 bitangent, float3 direction)
 {
   // Converts a world-space vector into the explicit tangent frame used by anisotropic BRDF code.
-  return mul(transpose(GetTangentSpace(normal, tangent, bitangent)), direction);
+  return mul(GetTangentSpace(normal, tangent, bitangent), direction);
 }
 
 float3 ToWorld(float3 normal, float3 direction)
 {
   // Converts a local-frame vector back into world space.
-  return mul(GetTangentSpace(normal), direction);
+  return mul(transpose(GetTangentSpace(normal)), direction);
 }
 
 float3 ToWorld(float3 normal, float3 tangent, float3 bitangent, float3 direction)
 {
   // Converts a local-frame vector back into the caller-provided tangent frame.
-  return mul(GetTangentSpace(normal, tangent, bitangent), direction);
+  return mul(transpose(GetTangentSpace(normal, tangent, bitangent)), direction);
 }
 
 float Luminance(float3 rgb)

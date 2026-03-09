@@ -50,7 +50,7 @@ public:
   struct Settings
   {
     bool     accumulate = false;
-    uint32_t maxBounces = 3;
+    uint32_t maxBounces = 8;
   };
 
   explicit PathTracer(const CreateInfo& createInfo);

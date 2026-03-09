@@ -255,6 +255,13 @@ void Application::onUIRender()
             invalidatePathTracingHistory   = true;
           }
 
+          if(pathTracingSettings.maxBounces < 2)
+          {
+            ImGui::TextWrapped(
+                "Solid transmissive objects need at least 2 bounces to show through-lighting: one refraction to enter "
+                "the shape and one more to exit it.");
+          }
+
           ImGui::SameLine();
           if(ImGui::Button("Reset Accumulation"))
           {
