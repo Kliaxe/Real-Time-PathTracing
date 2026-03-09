@@ -1,77 +1,86 @@
 #ifndef PATH_TRACING_COMMON_H
 #define PATH_TRACING_COMMON_H
 
+#ifndef PATH_TRACING_CUSTOM_GLOBALS
 #include "ShaderIncludes/PathTracing/Globals.h.slang"
+#endif
 
-// -------------------------------------------------------------------------
-//    Constants
-// -------------------------------------------------------------------------
+static const float kRayTMax                    = 1.0e32;
+static const float kInvPi                      = 0.31830988618;
+static const float kRayOriginFloor             = 1.0 / 32.0;
+static const float kRayOriginFloatEps          = 1.0 / 65536.0;
+static const float kRayOriginIntScale          = 256.0;
 
-static const float kRayTMax               = 1.0e32;        // Practical "infinite" ray distance for scene traversal.
-static const float kInvPi                 = 0.31830988618; // Shared constant used by cosine-weighted and Lambert-like terms.
-static const float kRayOriginFloor        = 1.0 / 32.0;    // Small-position threshold for the floating-point ray offset path.
-static const float kRayOriginFloatEps     = 1.0 / 65536.0; // Scalar epsilon used when the integer bit trick is unstable near zero.
-static const float kRayOriginIntScale     = 256.0;         // Integer offset scale from the Ray Tracing Gems origin bias recipe.
-static const uint  kPathTraceFlagAccumulate = 0x1u;
-
-// -------------------------------------------------------------------------
-//    Path tracing payloads
-// -------------------------------------------------------------------------
+#ifndef PATH_TRACING_PAYLOAD_EXTRA_FIELDS
+#define PATH_TRACING_PAYLOAD_EXTRA_FIELDS
+#endif
 
 struct PathPayload
 {
-  float3 radiance;             // Running radiance sum for the whole path.
-  float3 throughput;           // Multiplicative weight carried from bounce to bounce.
-  float3 mediumAttenuation;    // Current medium extinction coefficient used between this hit and the next.
-  float  mediumThickness;      // Minimum segment length for thin-volume absorption when geometry thickness is tiny.
-  float3 lastSurfacePosition;  // Previous shading point used when evaluating finite-light MIS on emissive hits.
-  float3 lastSurfaceNormal;    // Previous environment-light sampling normal used when evaluating miss-side environment MIS.
-  float  lastDirectLightBsdfPdf;  // BSDF PDF of the previous event only for the lobe group that explicit direct lighting also estimates.
-  uint   seed;                 // Per-path RNG state advanced in shaders only.
-  uint   depth;                // Number of continuation rays already spawned by this path.
-  uint   mediumActive;         // Non-zero while the next ray segment travels inside an absorbing dielectric.
-  uint   lastEnvironmentNeeActive;  // Non-zero when the previous hit actually evaluated environment NEE and miss-side MIS should compete against it.
-  uint   hasLastBsdfSample;    // Non-zero when miss / emissive-hit code should apply MIS against the previous BSDF sample.
+  float3 radiance;
+  float3 throughput;
+  float3 mediumAttenuation;
+  float  mediumThickness;
+  float3 lastSurfacePosition;
+  float3 lastSurfaceNormal;
+  float  lastDirectLightBsdfPdf;
+  uint   seed;
+  uint   depth;
+  uint   mediumActive;
+  uint   lastEnvironmentNeeActive;
+  uint   hasLastBsdfSample;
+  PATH_TRACING_PAYLOAD_EXTRA_FIELDS
 };
 
 struct ShadowPayload
 {
-  uint visible;  // 1 when the shadow ray reaches the miss shader
+  uint visible;
 };
 
-// Resolved shading data at one triangle hit.
 struct SurfaceData
 {
-  float3 worldPosition;       // Hit position in world space.
-  float3 shadingNormal;       // Shading-frame normal after normal mapping and face-forwarding.
-  float3 geometricNormal;     // Geometric triangle normal used for offsets and hemisphere acceptance.
-  float3 tangent;             // World-space tangent for anisotropy and tangent-space normal mapping.
-  float3 bitangent;           // World-space bitangent paired with tangent / shadingNormal.
-  float2 texCoord;            // Interpolated primary UV set.
-  float3 albedo;              // Resolved base color after texture modulation.
-  float3 emission;            // Resolved emissive radiance after texture modulation.
-  float  metallic;            // Resolved metallic factor in [0, 1].
-  float  roughness;           // Resolved perceptual roughness in [0.045, 1].
-  float  specular;            // Resolved dielectric specular scale.
-  float  specularTint;        // Resolved tint amount for the dielectric lobe.
-  float  subsurface;          // Diffuse-to-subsurface interpolation amount.
-  float  anisotropy;          // Anisotropy strength used to shape the GGX alpha pair.
-  float3 attenuationColor;    // Volume attenuation color used by Beer-Lambert absorption.
-  float  transmission;        // Surface transmission strength in [0, 1].
-  float  attenuationDistance; // Distance at which attenuationColor is reached.
-  float  volumeThickness;     // Authoring thickness used for thin volume absorption.
-  float  refractionIndex;     // Index of refraction for transmissive lobes.
-  float  clearcoat;           // Secondary dielectric top-coat strength.
-  float  clearcoatRoughness;  // Perceptual roughness of the clearcoat lobe.
-  float3 sheenColor;          // RGB sheen reflectance resolved from KHR_materials_sheen.
-  float  sheenRoughness;      // Sheen roughness parameter used by the Charlie distribution.
-  uint   isFrontFace;  // 1 when the incoming ray hit the front side of the surface
+  float3 worldPosition;
+  float3 shadingNormal;
+  float3 geometricNormal;
+  float3 tangent;
+  float3 bitangent;
+  float2 texCoord;
+  float3 albedo;
+  float3 emission;
+  float  metallic;
+  float  roughness;
+  float  specular;
+  float  specularTint;
+  float  subsurface;
+  float  anisotropy;
+  float3 attenuationColor;
+  float  transmission;
+  float  attenuationDistance;
+  float  volumeThickness;
+  float  refractionIndex;
+  float  clearcoat;
+  float  clearcoatRoughness;
+  float3 sheenColor;
+  float  sheenRoughness;
+  uint   isFrontFace;
 };
 
 bool IsAccumulationEnabled()
 {
-  // The ray generation shader uses this to decide whether to blend with the history image.
-  return (pushConst.flags & kPathTraceFlagAccumulate) != 0;
+  return (pushConst.flags & uint(PathTraceFlags::ePathTraceFlagAccumulate)) != 0;
 }
 
+bool IsFinalRadianceAccumulationEnabled()
+{
+  return IsAccumulationEnabled();
+}
 #endif
+
+
+
+
+
+
+
+
+

@@ -12,3 +12,5 @@
 [[vk::binding(BindingPoints::eAccumulationImage)]] RWTexture2D<float4> accumulationImage;
 
 #endif
+
+

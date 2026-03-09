@@ -32,6 +32,14 @@ target_sources(RealTimePathTracing PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/Scene/SceneTypes.h"
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/PathTracer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/PathTracer.h"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/ReSTIR/Common/ReSTIRContext.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/ReSTIR/Common/ReSTIRContext.h"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/ReSTIR/Common/ReSTIRResources.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/ReSTIR/Common/ReSTIRResources.h"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/ReSTIR/Common/ReSTIRSettings.h"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/ReSTIR/PT/ReSTIRPTSettings.h"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/ReSTIR/PT/ReSTIRPTRenderer.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/ReSTIR/PT/ReSTIRPTRenderer.h"
 )
 
 if(BUILD_TESTING)

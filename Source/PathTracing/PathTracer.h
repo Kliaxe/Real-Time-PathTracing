@@ -1,10 +1,5 @@
 #pragma once
 
-// Role:
-// Owns the ray tracing pipeline path: descriptor set layout, pipeline layout,
-// ray tracing pipeline, shader binding table, accumulation history image, and
-// the per-frame trace dispatch.
-
 #include <cstdint>
 
 #include <glm/mat4x4.hpp>
@@ -62,12 +57,9 @@ public:
   Settings&       GetSettings();
   const Settings& GetSettings() const;
   uint32_t        GetAccumulatedFrameCount() const;
-  uint32_t        GetMaxBounceLimit() const;
   uint32_t        GetPipelineBounceLimit() const;
   void            InvalidateAccumulation();
 
-  // Expose the descriptor pack so Application can keep the texture binding in
-  // sync with the scene's texture array the same way the raster path already does.
   nvvk::DescriptorPack&       GetDescriptorPack();
   const nvvk::DescriptorPack& GetDescriptorPack() const;
 
@@ -91,15 +83,15 @@ private:
     VkExtent2D                  viewportSize{};
   };
 
-  void                  QueryRayTracingProperties();
-  void                  CreateDescriptorSetLayout();
-  void                  CreatePipelineLayout();
-  void                  CreateRayTracingPipeline();
-  void                  CreateShaderBindingTable();
-  void                  UpdateFrameDescriptors(const RenderInput& input);
-  void                  CreateOrResizeAccumulationImage(VkExtent2D size);
-  void                  DestroyAccumulationImage();
-  void                  ScheduleAccumulationImageDestroy(nvvk::Image image);
+  void QueryRayTracingProperties();
+  void CreateDescriptorSetLayout();
+  void CreatePipelineLayout();
+  void CreateRayTracingPipeline();
+  void CreateShaderBindingTable();
+  void UpdateFrameDescriptors(const RenderInput& input);
+  void CreateOrResizeAccumulationImage(VkExtent2D size);
+  void DestroyAccumulationImage();
+  void ScheduleAccumulationImageDestroy(nvvk::Image image);
   AccumulationSignature MakeAccumulationSignature(const RenderInput& input, VkExtent2D size) const;
 
   nvapp::Application*      m_App       = nullptr;
@@ -126,3 +118,12 @@ private:
 };
 
 }  // namespace nvsamples
+
+
+
+
+
+
+
+
+

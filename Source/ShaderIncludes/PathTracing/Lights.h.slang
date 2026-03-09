@@ -56,8 +56,8 @@ float EvaluateEmissiveTriangleSolidAnglePdf(GltfSceneInfo sceneInfo,
     return 0.0;
   }
 
-  const float3 toLight          = sampledPosition - receiverPosition;
-  const float  distanceSquared  = dot(toLight, toLight);
+  const float3 toLight         = sampledPosition - receiverPosition;
+  const float  distanceSquared = dot(toLight, toLight);
   if(distanceSquared <= 1.0e-8)
   {
     return 0.0;
@@ -134,10 +134,10 @@ void AccumulateEmissiveDirectLight(inout PathPayload payload, SurfaceData surfac
     return;
   }
 
-  const float  distance    = sqrt(distanceSquared);
-  const float3 lightDir    = toLight / distance;
-  const GltfMetallicRoughness material = sceneInfo.materials[light.materialIndex];
-  const float  lightCos                = EvaluateEmissiveTriangleCosine(material, light.geometricNormal, -lightDir);
+  const float  distance                 = sqrt(distanceSquared);
+  const float3 lightDir                 = toLight / distance;
+  const GltfMetallicRoughness material  = sceneInfo.materials[light.materialIndex];
+  const float  lightCos                 = EvaluateEmissiveTriangleCosine(material, light.geometricNormal, -lightDir);
   if(lightCos <= 0.0)
   {
     return;
@@ -169,3 +169,10 @@ void AccumulateEmissiveDirectLight(inout PathPayload payload, SurfaceData surfac
 }
 
 #endif
+
+
+
+
+
+
+

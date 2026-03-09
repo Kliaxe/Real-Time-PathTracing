@@ -109,6 +109,7 @@ void SceneRuntime::RebuildScene(VkQueue queue, const SceneUploader::UploadInput&
 {
   vkQueueWaitIdle(queue);
   Destroy();
+  InvalidateFrameHistory();
 
   // First pass: upload the scene buffers and textures.
   // This is still pure scene-data preparation. No ray tracing structures exist yet.
@@ -207,7 +208,19 @@ void SceneRuntime::UpdateTextureDescriptors(VkDevice device, nvvk::DescriptorPac
 void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
                                      const glm::vec3& cameraPosition, const VkExtent2D& viewportSize)
 {
-  m_SceneResource.sceneInfo.viewProjMatrix = projMatrix * viewMatrix;
+  const glm::mat4 currentViewProjMatrix = projMatrix * viewMatrix;
+
+  if(!m_HasFrameHistory)
+  {
+    m_PreviousViewProjMatrix         = currentViewProjMatrix;
+    m_PreviousPreviousViewProjMatrix = currentViewProjMatrix;
+    m_PreviousCameraPosition         = cameraPosition;
+    m_PreviousPreviousCameraPosition = cameraPosition;
+  }
+
+  m_SceneResource.sceneInfo.viewProjMatrix         = currentViewProjMatrix;
+  m_SceneResource.sceneInfo.prevViewProjMatrix     = m_PreviousViewProjMatrix;
+  m_SceneResource.sceneInfo.prevPrevViewProjMatrix = m_PreviousPreviousViewProjMatrix;
 
   // Historical note: the shared shader struct still calls this field
   // projInvMatrix, but both the raster sky/background path and the path tracer
@@ -215,6 +228,8 @@ void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewM
   m_SceneResource.sceneInfo.projInvMatrix  = glm::inverse(m_SceneResource.sceneInfo.viewProjMatrix);
   m_SceneResource.sceneInfo.viewInvMatrix  = glm::inverse(viewMatrix);
   m_SceneResource.sceneInfo.cameraPosition = cameraPosition;
+  m_SceneResource.sceneInfo.prevCameraPosition = m_PreviousCameraPosition;
+  m_SceneResource.sceneInfo.prevPrevCameraPosition = m_PreviousPreviousCameraPosition;
   m_SceneResource.sceneInfo.viewportSize   = glm::vec2(static_cast<float>(viewportSize.width), static_cast<float>(viewportSize.height));
   m_SceneResource.sceneInfo.instances      = (shaderio::GltfInstance*)m_SceneResource.bInstances.address;
   m_SceneResource.sceneInfo.meshes         = (shaderio::GltfMesh*)m_SceneResource.bMeshes.address;
@@ -268,6 +283,21 @@ void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewM
       .pBufferMemoryBarriers    = &afterUpdateBarrier,
   };
   vkCmdPipelineBarrier2(cmd, &afterUpdateDependency);
+
+  m_PreviousPreviousViewProjMatrix = m_PreviousViewProjMatrix;
+  m_PreviousViewProjMatrix         = currentViewProjMatrix;
+  m_PreviousPreviousCameraPosition = m_PreviousCameraPosition;
+  m_PreviousCameraPosition         = cameraPosition;
+  m_HasFrameHistory               = true;
+}
+
+void SceneRuntime::InvalidateFrameHistory()
+{
+  m_HasFrameHistory               = false;
+  m_PreviousViewProjMatrix        = glm::mat4(1.0f);
+  m_PreviousPreviousViewProjMatrix = glm::mat4(1.0f);
+  m_PreviousCameraPosition        = glm::vec3(0.0f);
+  m_PreviousPreviousCameraPosition = glm::vec3(0.0f);
 }
 
 nvsamples::GltfSceneResource& SceneRuntime::GetSceneResource()

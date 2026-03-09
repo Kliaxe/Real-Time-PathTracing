@@ -309,16 +309,19 @@ DisneyLobeSetup GetLobeSetup(DisneyMaterialData material, DisneyBrdfData brdf)
   // The probabilities are luminance-weighted so bright lobes get sampled more often even when their energy weight is similar.
   const float schlickWeight       = F_SchlickWeight(abs(brdf.NdotV));
   const float diffuseProbability  = setup.diffuseWeight * Luminance(material.albedo);
-  const float dielectricProbability =
-      setup.dielectricWeight * Luminance(lerp(material.specularColor, float3(1.0), schlickWeight));
+  const float dielectricProbability = setup.dielectricWeight * Luminance(lerp(material.specularColor, float3(1.0), schlickWeight));
   const float metalProbability    = setup.metalWeight * Luminance(lerp(material.albedo, float3(1.0), schlickWeight));
   const float glassProbability    = setup.glassWeight;
   const float sheenProbability    = setup.sheenWeight * Luminance(material.sheenColor);
   const float clearcoatProbability = setup.clearcoatWeight;
 
-  const float total = max(diffuseProbability + dielectricProbability + metalProbability + glassProbability + sheenProbability
-                              + clearcoatProbability,
-                          1.0e-5);
+  const float total = max(
+    diffuseProbability + 
+    dielectricProbability + 
+    metalProbability + 
+    glassProbability + 
+    sheenProbability + 
+    clearcoatProbability, 1.0e-5);
 
   setup.diffuseProbability    = diffuseProbability / total;
   setup.dielectricProbability = dielectricProbability / total;
@@ -358,10 +361,8 @@ float3 EvaluateMicrofacetReflection(DisneyMaterialData material, DisneyBrdfData 
   }
 
   const float D  = D_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.HdotX, brdf.HdotY, abs(brdf.NdotH));
-  const float G1V =
-      V_Smith_G1_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.VdotX, brdf.VdotY, abs(brdf.NdotV));
-  const float G1L =
-      V_Smith_G1_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.LdotX, brdf.LdotY, abs(brdf.NdotL));
+  const float G1V = V_Smith_G1_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.VdotX, brdf.VdotY, abs(brdf.NdotV));
+  const float G1L = V_Smith_G1_GGX_Anisotropic(material.alphaAnisotropicX, material.alphaAnisotropicY, brdf.LdotX, brdf.LdotY, abs(brdf.NdotL));
 
   pdf = D * G1V / max(4.0 * abs(brdf.NdotV), 1.0e-5);
 
@@ -608,7 +609,8 @@ bool SampleSurfaceBsdf(SurfaceData surface,
                        out float3 lightDir,
                        out float3 bsdfOverPdf,
                        out float directLightPdf,
-                       out bool isTransmissionEvent)
+                       out bool isTransmissionEvent,
+                       out uint sampledLobeKind)
 {
   // Samples proposal groups explicitly: broad cosine lobes, glossy reflection,
   // glass, and clearcoat. The return values are intentionally split:
@@ -622,6 +624,7 @@ bool SampleSurfaceBsdf(SurfaceData surface,
   bsdfOverPdf                      = float3(0.0);
   isTransmissionEvent               = false;
   directLightPdf                   = 0.0;
+  sampledLobeKind                  = 0u;
 
   const float broadProbability      = BroadGroupProbability(setup);
   const float reflectionProbability = ReflectionGroupProbability(setup);
@@ -645,6 +648,7 @@ bool SampleSurfaceBsdf(SurfaceData surface,
 
   if(sampleBroad)
   {
+    sampledLobeKind = 0u;
     // One cosine sample stands in for both diffuse and sheen. The BSDF
     // evaluation later resolves how much each sub-lobe contributes.
     float ignoredPdf = 0.0;
@@ -652,6 +656,7 @@ bool SampleSurfaceBsdf(SurfaceData surface,
   }
   else if(sampleReflection || sampleGlass)
   {
+    sampledLobeKind = sampleReflection ? 1u : 2u;
     // Glossy reflection and glass start from the same visible-GGX microfacet
     // sample. Glass then does a second Fresnel branch to decide reflection vs
     // refraction for that sampled microfacet.
@@ -690,6 +695,7 @@ bool SampleSurfaceBsdf(SurfaceData surface,
   }
   else
   {
+    sampledLobeKind = 3u;
     float3 halfLocal = ImportanceSampleGGX(material.clearcoatAlpha, xi);
     if(halfLocal.z < 0.0)
     {

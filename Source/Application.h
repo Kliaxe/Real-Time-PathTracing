@@ -25,6 +25,7 @@
 #include <glm/vec2.hpp>
 
 #include "PathTracing/PathTracer.h"
+#include "PathTracing/ReSTIR/PT/ReSTIRPTRenderer.h"
 #include "Scene/SceneAssetCatalog.h"
 #include "Scene/SceneResolver.h"
 #include "Scene/SceneRenderer.h"
@@ -43,6 +44,7 @@ class Application : public nvapp::IAppElement
   {
     eRasterizer = 0,
     ePathTracing,
+    ePathTracingReSTIRPT,
   };
 
   enum
@@ -79,7 +81,10 @@ private:
   void UpdateSceneBuffer(VkCommandBuffer cmd);
   void RasterScene(VkCommandBuffer cmd);
   void PathTraceScene(VkCommandBuffer cmd);
+  void ReSTIRPTScene(VkCommandBuffer cmd);
   void InvalidatePathTracingHistory();
+  bool IsPathTracerRenderMode() const;
+  bool IsReSTIRPTRenderMode() const;
 
 private:
   nvapp::Application*                    m_App = nullptr;  // Owning application
@@ -108,7 +113,8 @@ private:
   shaderio::TonemapperData               m_TonemapperData; // Tonemapper parameters
   glm::vec2                              m_MetallicRoughnessOverride = {-0.01f, -0.01f}; // UI overrides
   std::unique_ptr<nvsamples::SceneAssetCatalog> m_SceneAssetCatalog; // Asset discovery helper
-  std::unique_ptr<nvsamples::PathTracer>        m_PathTracer;        // Future ray tracing renderer
+  std::unique_ptr<nvsamples::PathTracer>        m_PathTracer;        // Ray tracing renderer
+  std::unique_ptr<nvsamples::ReSTIRPTRenderer>  m_ReSTIRPT;          // Reservoir-based path tracing renderer
   std::unique_ptr<nvsamples::SceneResolver>     m_SceneResolver;     // Scene selection resolver
   std::unique_ptr<nvsamples::SceneRenderer>     m_SceneRenderer;     // Raster scene renderer
   std::unique_ptr<nvsamples::SceneRuntime>      m_SceneRuntime;      // GPU scene runtime owner

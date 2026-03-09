@@ -295,19 +295,15 @@ SurfaceData LoadSurfaceData(BuiltInTriangleIntersectionAttributes attr)
 
   const float4 baseColor = ResolveBaseColor(material, texCoord);
 
-  const float2 metallicRoughness = ResolveMetallicRoughness(material, texCoord);
-  const float  specular          = clamp(ResolveTextureChannel(material.specularTextureIndex, texCoord, 3, material.specularFactor), 0.0, 1.0);
-  const float  specularTint      = clamp(ResolveTintMagnitude(material.specularColorTextureIndex, texCoord, material.specularTint), 0.0, 1.0);
-  const float  transmission      = clamp(ResolveTextureChannel(material.transmissionTextureIndex, texCoord, 0, material.transmissionFactor), 0.0, 1.0);
-  const float  volumeThickness =
-      max(ResolveTextureChannel(material.thicknessTextureIndex, texCoord, 1, material.volumeThickness), 0.0);
-  const float  clearcoat         = clamp(ResolveTextureChannel(material.clearcoatTextureIndex, texCoord, 0, material.clearcoatFactor), 0.0, 1.0);
-  const float  clearcoatRoughness =
-      clamp(ResolveTextureChannel(material.clearcoatRoughnessTextureIndex, texCoord, 1, material.clearcoatRoughness), 0.045, 1.0);
-  const float3 sheenColor =
-      clamp(ResolveTextureColor(material.sheenColorTextureIndex, texCoord, material.sheenColorFactor), float3(0.0), float3(1.0));
-  const float sheenRoughness =
-      clamp(ResolveTextureChannel(material.sheenRoughnessTextureIndex, texCoord, 3, material.sheenRoughnessFactor), 0.0, 1.0);
+  const float2 metallicRoughness  = ResolveMetallicRoughness(material, texCoord);
+  const float  specular           = clamp(ResolveTextureChannel(material.specularTextureIndex, texCoord, 3, material.specularFactor), 0.0, 1.0);
+  const float  specularTint       = clamp(ResolveTintMagnitude(material.specularColorTextureIndex, texCoord, material.specularTint), 0.0, 1.0);
+  const float  transmission       = clamp(ResolveTextureChannel(material.transmissionTextureIndex, texCoord, 0, material.transmissionFactor), 0.0, 1.0);
+  const float  volumeThickness    = max(ResolveTextureChannel(material.thicknessTextureIndex, texCoord, 1, material.volumeThickness), 0.0);
+  const float  clearcoat          = clamp(ResolveTextureChannel(material.clearcoatTextureIndex, texCoord, 0, material.clearcoatFactor), 0.0, 1.0);
+  const float  clearcoatRoughness = clamp(ResolveTextureChannel(material.clearcoatRoughnessTextureIndex, texCoord, 1, material.clearcoatRoughness), 0.045, 1.0);
+  const float3 sheenColor         = clamp(ResolveTextureColor(material.sheenColorTextureIndex, texCoord, material.sheenColorFactor), float3(0.0), float3(1.0));
+  const float sheenRoughness      = clamp(ResolveTextureChannel(material.sheenRoughnessTextureIndex, texCoord, 3, material.sheenRoughnessFactor), 0.0, 1.0);
 
   SurfaceData surface;
   // Every field below is the resolved shader-side contract consumed by Disney.h.slang and the direct-light samplers.

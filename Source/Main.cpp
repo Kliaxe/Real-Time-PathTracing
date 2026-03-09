@@ -59,6 +59,9 @@ int main(int argc, char** argv)
   VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
   };
+  VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+  };
   nvvk::ContextInitInfo vkSetup = {
       .instanceExtensions = {VK_EXT_DEBUG_UTILS_EXTENSION_NAME},
       .deviceExtensions =
@@ -69,6 +72,9 @@ int main(int argc, char** argv)
               // born with the capabilities our future path tracing module needs.
               {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, &accelerationStructureFeatures},
               {VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, &rayTracingPipelineFeatures},
+              // ReSTIR PT's compute resampling passes use inline visibility tests
+              // during candidate shifting, which requires the ray query feature.
+              {VK_KHR_RAY_QUERY_EXTENSION_NAME, &rayQueryFeatures},
               {VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME},
           },
   };

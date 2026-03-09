@@ -85,9 +85,9 @@ function(setup_thesis_app)
     #
 
     set(_ShaderOutputDir "${CMAKE_CURRENT_BINARY_DIR}/_autogen")
-    file(GLOB _ShaderGlslFiles "${THESIS_SHADER_DIR}/*.glsl")
-    file(GLOB _ShaderSlangFiles "${THESIS_SHADER_DIR}/*.slang")
-    file(GLOB _ShaderHeaderFiles "${THESIS_SHADER_DIR}/*.h" "${THESIS_SHADER_DIR}/*.h.slang")
+    file(GLOB_RECURSE _ShaderGlslFiles "${THESIS_SHADER_DIR}/*.glsl")
+    file(GLOB_RECURSE _ShaderSlangFiles "${THESIS_SHADER_DIR}/*.slang")
+    file(GLOB_RECURSE _ShaderHeaderFiles "${THESIS_SHADER_DIR}/*.h" "${THESIS_SHADER_DIR}/*.h.slang")
 
     # Standard nvshaders we rely on (tonemapping + simple sky)
     list(APPEND _ShaderSlangFiles

@@ -58,6 +58,7 @@ public:
   void UpdateTextureDescriptors(VkDevice device, nvvk::DescriptorPack& descPack, uint32_t maxTextureDescriptors) const;
   void UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewMatrix, const glm::mat4& projMatrix, const glm::vec3& cameraPosition,
                          const VkExtent2D& viewportSize);
+  void InvalidateFrameHistory();
 
   nvsamples::GltfSceneResource&       GetSceneResource();
   const nvsamples::GltfSceneResource& GetSceneResource() const;
@@ -87,6 +88,11 @@ private:
   std::vector<VkAccelerationStructureInstanceKHR> m_TlasInstances;
   nvvk::Buffer                                    m_TlasInstancesBuffer;
   nvvk::AccelerationStructure                     m_TopLevelAS;
+  bool                                            m_HasFrameHistory = false;
+  glm::mat4                                       m_PreviousViewProjMatrix{1.0f};
+  glm::mat4                                       m_PreviousPreviousViewProjMatrix{1.0f};
+  glm::vec3                                       m_PreviousCameraPosition{0.0f};
+  glm::vec3                                       m_PreviousPreviousCameraPosition{0.0f};
 };
 
 }  // namespace nvsamples

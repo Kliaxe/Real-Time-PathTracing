@@ -160,6 +160,11 @@ void Application::onAttach(nvapp::Application* app)
         .allocator             = &m_Allocator,
         .maxTextureDescriptors = kMaxTextureDescriptors,
     });
+    m_ReSTIRPT         = std::make_unique<nvsamples::ReSTIRPTRenderer>(nvsamples::ReSTIRPTRenderer::CreateInfo{
+        .app                   = m_App,
+        .allocator             = &m_Allocator,
+        .maxTextureDescriptors = kMaxTextureDescriptors,
+    });
     m_SceneRuntime      = std::make_unique<nvsamples::SceneRuntime>(nvsamples::SceneRuntime::CreateInfo{
         .app             = m_App,
         .allocator       = &m_Allocator,
@@ -167,6 +172,7 @@ void Application::onAttach(nvapp::Application* app)
         .samplerPool     = &m_SamplerPool,
     });
     m_PathTracer->Initialize();
+    m_ReSTIRPT->Initialize();
     DiscoverAssets();
     CreateScene(true);
     CreateGraphicsDescriptorSetLayout();
@@ -191,6 +197,7 @@ void Application::onDetach()
     vkDestroyShaderEXT(device, m_FragmentShader, nullptr);
 
     m_PathTracer->Destroy();
+    m_ReSTIRPT->Destroy();
     m_SceneRuntime->Destroy();
 
     m_GBuffers.deinit();
@@ -221,7 +228,7 @@ void Application::onUIRender()
       if(ImGui::CollapsingHeader("Renderer", ImGuiTreeNodeFlags_DefaultOpen))
       {
         int renderMode = static_cast<int>(m_RenderMode);
-        const char* renderModes[] = {"Rasterizer", "Path Tracing"};
+        const char* renderModes[] = {"Rasterizer", "Path Tracing", "Path Tracing ReSTIR PT"};
         if(ImGui::Combo("Mode", &renderMode, renderModes, IM_ARRAYSIZE(renderModes)))
         {
           m_RenderMode = static_cast<RenderMode>(renderMode);
@@ -232,49 +239,165 @@ void Application::onUIRender()
         {
           ImGui::TextWrapped("Rasterizer mode uses the existing graphics pipeline path.");
         }
-        else if(m_PathTracer == nullptr || !m_PathTracer->IsReady())
+        else if(m_RenderMode == RenderMode::ePathTracing)
         {
-          ImGui::TextWrapped("Path tracing mode is present in the UI, but the renderer is not ready yet.");
+          if(m_PathTracer == nullptr || !m_PathTracer->IsReady())
+          {
+            ImGui::TextWrapped("Path tracing mode is present in the UI, but the renderer is not ready yet.");
+          }
+          else
+          {
+            nvsamples::PathTracer::Settings& pathTracingSettings = m_PathTracer->GetSettings();
+            const uint32_t                   bounceLimit         = m_PathTracer->GetPipelineBounceLimit();
+
+            bool accumulate = pathTracingSettings.accumulate;
+            if(ImGui::Checkbox("Accumulate", &accumulate))
+            {
+              pathTracingSettings.accumulate = accumulate;
+              invalidatePathTracingHistory   = true;
+            }
+
+            int maxBounces = static_cast<int>(pathTracingSettings.maxBounces);
+            if(ImGui::SliderInt("Max Bounces", &maxBounces, 0, static_cast<int>(bounceLimit)))
+            {
+              pathTracingSettings.maxBounces = static_cast<uint32_t>(maxBounces);
+              invalidatePathTracingHistory   = true;
+            }
+
+            if(pathTracingSettings.maxBounces < 2)
+            {
+              ImGui::TextWrapped(
+                  "Solid transmissive objects need at least 2 bounces to show through-lighting: one refraction to enter "
+                  "the shape and one more to exit it.");
+            }
+
+            ImGui::SameLine();
+            if(ImGui::Button("Reset Accumulation"))
+            {
+              invalidatePathTracingHistory = true;
+            }
+
+            ImGui::Text("Accumulated Frames: %u", m_PathTracer->GetAccumulatedFrameCount());
+          }
+        }
+        else if(m_ReSTIRPT == nullptr || !m_ReSTIRPT->IsReady())
+        {
+          ImGui::TextWrapped("Path Tracing ReSTIR PT mode is present in the UI, but the renderer is not ready yet.");
         }
         else
         {
-          nvsamples::PathTracer::Settings& pathTracingSettings = m_PathTracer->GetSettings();
-          const uint32_t                   bounceLimit         = m_PathTracer->GetPipelineBounceLimit();
+          nvsamples::ReSTIRPTSettings& restirSettings = m_ReSTIRPT->GetSettings();
+          const uint32_t               bounceLimit    = m_ReSTIRPT->GetPipelineBounceLimit();
 
-          bool accumulate = pathTracingSettings.accumulate;
+          bool accumulate = restirSettings.common.accumulate;
           if(ImGui::Checkbox("Accumulate", &accumulate))
           {
-            pathTracingSettings.accumulate = accumulate;
-            invalidatePathTracingHistory   = true;
-          }
-
-          int maxBounces = static_cast<int>(pathTracingSettings.maxBounces);
-          if(ImGui::SliderInt("Max Bounces", &maxBounces, 0, static_cast<int>(bounceLimit)))
-          {
-            pathTracingSettings.maxBounces = static_cast<uint32_t>(maxBounces);
-            invalidatePathTracingHistory   = true;
-          }
-
-          if(pathTracingSettings.maxBounces < 2)
-          {
-            ImGui::TextWrapped(
-                "Solid transmissive objects need at least 2 bounces to show through-lighting: one refraction to enter "
-                "the shape and one more to exit it.");
-          }
-
-          ImGui::SameLine();
-          if(ImGui::Button("Reset Accumulation"))
-          {
+            restirSettings.common.accumulate = accumulate;
             invalidatePathTracingHistory = true;
           }
 
-          ImGui::Text("Accumulated Frames: %u", m_PathTracer->GetAccumulatedFrameCount());
+          int resamplingMode = static_cast<int>(restirSettings.common.resamplingMode);
+          const char* resamplingModes[] = {"None", "Temporal", "Spatial", "Temporal + Spatial"};
+          if(ImGui::Combo("Resampling", &resamplingMode, resamplingModes, IM_ARRAYSIZE(resamplingModes)))
+          {
+            restirSettings.common.resamplingMode = static_cast<nvsamples::ReSTIRResamplingMode>(resamplingMode);
+            invalidatePathTracingHistory         = true;
+          }
+
+          if(ImGui::TreeNodeEx("Baseline", ImGuiTreeNodeFlags_DefaultOpen))
+          {
+            int initialSampleCount = static_cast<int>(restirSettings.common.initialSampling.numInitialSamples);
+            if(ImGui::SliderInt("Initial Sample Count", &initialSampleCount, 1, 16))
+            {
+              restirSettings.common.initialSampling.numInitialSamples = static_cast<uint32_t>(initialSampleCount);
+              invalidatePathTracingHistory                            = true;
+            }
+
+            int maxBounceDepth = static_cast<int>(restirSettings.common.initialSampling.maxBounceDepth);
+            if(ImGui::SliderInt("Max Bounce Depth", &maxBounceDepth, 0, static_cast<int>(bounceLimit)))
+            {
+              restirSettings.common.initialSampling.maxBounceDepth = static_cast<uint32_t>(maxBounceDepth);
+              invalidatePathTracingHistory                         = true;
+            }
+
+            int maxHistoryLength = static_cast<int>(restirSettings.common.temporalResampling.maxHistoryLength);
+            if(ImGui::SliderInt("Max History Length", &maxHistoryLength, 1, 64))
+            {
+              restirSettings.common.temporalResampling.maxHistoryLength = static_cast<uint32_t>(maxHistoryLength);
+              invalidatePathTracingHistory                              = true;
+            }
+
+            invalidatePathTracingHistory |= ImGui::SliderFloat("Temporal Depth Threshold", &restirSettings.common.temporalResampling.depthThreshold,
+                                                               0.0f, 1.0f, "%.3f");
+            invalidatePathTracingHistory |= ImGui::SliderFloat("Temporal Normal Threshold", &restirSettings.common.temporalResampling.normalThreshold,
+                                                               0.0f, 1.0f, "%.2f");
+            invalidatePathTracingHistory |=
+                ImGui::SliderFloat("Spatial Radius", &restirSettings.common.spatialResampling.samplingRadius, 0.0f, 100.0f, "%.1f");
+            invalidatePathTracingHistory |= ImGui::SliderFloat("Spatial Depth Threshold", &restirSettings.common.spatialResampling.depthThreshold,
+                                                               0.0f, 1.0f, "%.3f");
+            invalidatePathTracingHistory |= ImGui::SliderFloat("Spatial Normal Threshold", &restirSettings.common.spatialResampling.normalThreshold,
+                                                               0.0f, 1.0f, "%.2f");
+
+            int numSpatialSamples = static_cast<int>(restirSettings.common.spatialResampling.numSpatialSamples);
+            if(ImGui::SliderInt("Spatial Sample Count", &numSpatialSamples, 1, 32))
+            {
+              restirSettings.common.spatialResampling.numSpatialSamples = static_cast<uint32_t>(numSpatialSamples);
+              invalidatePathTracingHistory                              = true;
+            }
+
+            invalidatePathTracingHistory |=
+                ImGui::SliderFloat("Roughness Threshold", &restirSettings.reconnection.roughnessThreshold, 0.0f, 1.0f, "%.2f");
+            invalidatePathTracingHistory |=
+                ImGui::SliderFloat("Distance Threshold", &restirSettings.reconnection.distanceThreshold, 0.0f, 20.0f, "%.2f");
+
+            if(restirSettings.common.initialSampling.maxBounceDepth < 2)
+            {
+              ImGui::TextWrapped(
+                  "Solid transmissive objects still need at least 2 bounces to show through-lighting: one refraction to enter and one more to exit.");
+            }
+
+            ImGui::TreePop();
+          }
+
+          if(ImGui::TreeNodeEx("Advanced"))
+          {
+            bool enableVisibilityValidation = restirSettings.common.enableVisibilityValidation;
+            if(ImGui::Checkbox("Enable Visibility Validation", &enableVisibilityValidation))
+            {
+              restirSettings.common.enableVisibilityValidation = enableVisibilityValidation;
+              invalidatePathTracingHistory                     = true;
+            }
+
+            int maxReservoirAge = static_cast<int>(restirSettings.common.temporalResampling.maxReservoirAge);
+            if(ImGui::SliderInt("Max Reservoir Age", &maxReservoirAge, 1, 64))
+            {
+              restirSettings.common.temporalResampling.maxReservoirAge = static_cast<uint32_t>(maxReservoirAge);
+              invalidatePathTracingHistory                             = true;
+            }
+
+            ImGui::TextWrapped("The thesis baseline uses fixed-threshold reconnection plus optional ray-query visibility validation.");
+            ImGui::TreePop();
+          }
+
+          if(ImGui::TreeNodeEx("Debug"))
+          {
+            int debugView = static_cast<int>(restirSettings.common.debugView);
+            const char* debugViews[] = {"Disabled", "Candidate Kind", "Target PDF", "Reservoir Weight", "Reservoir Age",
+                                        "Temporal Status", "Spatial Status", "Shift Jacobian", "Reuse Count"};
+            if(ImGui::Combo("Debug View", &debugView, debugViews, IM_ARRAYSIZE(debugViews)))
+            {
+              restirSettings.common.debugView = static_cast<shaderio::ReSTIRDebugView>(debugView);
+            }
+
+            ImGui::TreePop();
+          }
+
           ImGui::TextWrapped(
-              "Accumulation averages path traced samples across frames and automatically resets when the camera, "
-              "scene, HDRI, sky, viewport, or bounce budget changes.");
+              "The baseline path tracer remains the ground truth. This mode keeps a separate ReSTIR PT implementation so "
+              "we can compare reuse behavior and quality directly.");
+          ImGui::Text("Accumulated Frames: %u", m_ReSTIRPT->GetAccumulatedFrameCount());
         }
       }
-
       if(ImGui::CollapsingHeader("Camera"))
       {
         nvgui::CameraWidget(m_CameraManip);
@@ -341,7 +464,7 @@ void Application::onUIRender()
         bool useSky = (sceneInfo.useSky != 0);
         if(ImGui::Checkbox("Use Sky", &useSky))
         {
-          sceneInfo.useSky            = useSky ? 1 : 0;
+          sceneInfo.useSky             = useSky ? 1 : 0;
           invalidatePathTracingHistory = true;
         }
 
@@ -436,9 +559,13 @@ void Application::onRender(VkCommandBuffer cmd)
     }
 
     UpdateSceneBuffer(cmd);
-    if(m_RenderMode == RenderMode::ePathTracing && m_PathTracer != nullptr && m_PathTracer->IsReady())
+    if(IsPathTracerRenderMode() && m_PathTracer != nullptr && m_PathTracer->IsReady())
     {
       PathTraceScene(cmd);
+    }
+    else if(IsReSTIRPTRenderMode() && m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
+    {
+      ReSTIRPTScene(cmd);
     }
     else
     {
@@ -580,6 +707,10 @@ void Application::UpdateTextures()
     {
       m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_PathTracer->GetDescriptorPack(), kMaxTextureDescriptors);
     }
+    if(m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
+    {
+      m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_ReSTIRPT->GetDescriptorPack(), kMaxTextureDescriptors);
+    }
   }
 
 VkShaderModuleCreateInfo Application::CompileSlangShader(const std::filesystem::path& filename, const std::span<const uint32_t>& spirvFallback)
@@ -685,12 +816,39 @@ void Application::PathTraceScene(VkCommandBuffer cmd)
     });
   }
 
+void Application::ReSTIRPTScene(VkCommandBuffer cmd)
+  {
+    m_ReSTIRPT->Render(nvsamples::ReSTIRPTRenderer::RenderInput{
+        .cmd                = cmd,
+        .sceneResource      = &m_SceneRuntime->GetSceneResource(),
+        .sceneInfo          = &m_SceneRuntime->GetSceneInfo(),
+        .topLevelAS         = &m_SceneRuntime->GetTopLevelAccelerationStructure(),
+        .gBuffers           = &m_GBuffers,
+        .renderedImageIndex = eImgRendered,
+    });
+  }
+
 void Application::InvalidatePathTracingHistory()
   {
+    m_SceneRuntime->InvalidateFrameHistory();
     if(m_PathTracer != nullptr && m_PathTracer->IsReady())
     {
       m_PathTracer->InvalidateAccumulation();
     }
+    if(m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
+    {
+      m_ReSTIRPT->InvalidateHistory();
+    }
+  }
+
+bool Application::IsPathTracerRenderMode() const
+  {
+    return m_RenderMode == RenderMode::ePathTracing;
+  }
+
+bool Application::IsReSTIRPTRenderMode() const
+  {
+    return m_RenderMode == RenderMode::ePathTracingReSTIRPT;
   }
 // ---------------------------------------------------------------------------------------------------------------------
 // Application module API
@@ -702,6 +860,12 @@ std::shared_ptr<nvapp::IAppElement> CreateApplicationElement(const std::shared_p
 }
 
 }  // namespace nvsamples
+
+
+
+
+
+
 
 
 

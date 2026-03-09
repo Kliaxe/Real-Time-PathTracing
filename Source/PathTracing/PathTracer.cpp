@@ -1,11 +1,5 @@
 #include "PathTracer.h"
 
-// Role:
-// Holds the ray tracing pipeline objects and records the trace dispatch that
-// writes the HDR render target directly through the ray tracing pipeline.
-// It also owns the optional accumulation history image used to average path
-// traced samples across frames.
-
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -19,7 +13,6 @@
 
 #include "Common/Utils.hpp"
 
-// Pre-compiled path tracing shader.
 #include "_autogen/PathTracer.slang.h"
 
 namespace nvsamples
@@ -27,18 +20,18 @@ namespace nvsamples
 
 namespace
 {
-
-// Glass often needs multiple internal events before a path escapes a closed object.
-// A tiny recursion budget is enough for metals, but it biases solid dielectrics dark because many
-// transmission paths die inside the shape before they can ever see the environment.
-constexpr uint32_t kRequestedMaxBounces  = 8;
-constexpr VkFormat kAccumulationFormat   = VK_FORMAT_R32G32B32A32_SFLOAT;
+constexpr uint32_t kRequestedMaxBounces = 8;
+constexpr VkFormat kAccumulationFormat  = VK_FORMAT_R32G32B32A32_SFLOAT;
 
 VkShaderModuleCreateInfo GetPathTracingShaderCode()
 {
   return nvsamples::GetShaderModuleCreateInfo(std::span(PathTracer_slang));
 }
 
+bool IsFinalRadianceAccumulationEnabled(const PathTracer::Settings& settings)
+{
+  return settings.accumulate;
+}
 
 }  // namespace
 
@@ -88,11 +81,11 @@ void PathTracer::Destroy()
 
   m_DescPack.deinit();
 
-  m_RngFrameNumber          = 0;
-  m_MaxBounceLimit          = 0;
-  m_PipelineBounceLimit     = 0;
-  m_AccumulatedFrames       = 0;
-  m_AccumulationInvalidated = true;
+  m_RngFrameNumber           = 0;
+  m_MaxBounceLimit           = 0;
+  m_PipelineBounceLimit      = 0;
+  m_AccumulatedFrames        = 0;
+  m_AccumulationInvalidated  = true;
   m_HasAccumulationSignature = false;
 }
 
@@ -113,12 +106,7 @@ const PathTracer::Settings& PathTracer::GetSettings() const
 
 uint32_t PathTracer::GetAccumulatedFrameCount() const
 {
-  return m_Settings.accumulate ? m_AccumulatedFrames : 0;
-}
-
-uint32_t PathTracer::GetMaxBounceLimit() const
-{
-  return m_MaxBounceLimit;
+  return IsFinalRadianceAccumulationEnabled(m_Settings) ? m_AccumulatedFrames : 0;
 }
 
 uint32_t PathTracer::GetPipelineBounceLimit() const
@@ -128,8 +116,6 @@ uint32_t PathTracer::GetPipelineBounceLimit() const
 
 void PathTracer::InvalidateAccumulation()
 {
-  // We do not need to clear the history image explicitly. The first frame after
-  // invalidation overwrites every pixel because accumulatedFrames becomes zero.
   m_AccumulatedFrames        = 0;
   m_AccumulationInvalidated  = true;
   m_HasAccumulationSignature = false;
@@ -162,20 +148,15 @@ void PathTracer::Render(const RenderInput& input)
   CreateOrResizeAccumulationImage(size);
 
   const AccumulationSignature currentSignature = MakeAccumulationSignature(input, size);
-  if(m_AccumulationInvalidated || !m_HasAccumulationSignature
-     || std::memcmp(&currentSignature, &m_LastAccumulationSignature, sizeof(AccumulationSignature)) != 0)
+  const bool historyInvalidated = m_AccumulationInvalidated || !m_HasAccumulationSignature
+                                  || std::memcmp(&currentSignature, &m_LastAccumulationSignature, sizeof(AccumulationSignature)) != 0;
+  if(historyInvalidated)
   {
     m_AccumulatedFrames = 0;
   }
 
   UpdateFrameDescriptors(input);
 
-  // Make the updated scene buffer contents visible to the ray tracing stages.
-  nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
-
-  // The accumulation image persists across frames, so it may start in UNDEFINED
-  // when first created or after a resize. Transition it to GENERAL before the
-  // ray generation shader starts reading/writing it.
   if(m_AccumulationImage.descriptor.imageLayout != VK_IMAGE_LAYOUT_GENERAL)
   {
     const VkImageMemoryBarrier2 accumulationTransition{
@@ -187,25 +168,14 @@ void PathTracer::Render(const RenderInput& input)
         .oldLayout     = m_AccumulationImage.descriptor.imageLayout,
         .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
         .image         = m_AccumulationImage.image,
-        .subresourceRange = {
-            .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel   = 0,
-            .levelCount     = 1,
-            .baseArrayLayer = 0,
-            .layerCount     = 1,
-        },
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
     };
     const VkDependencyInfo accumulationDependency{
-        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers    = &accumulationTransition,
-    };
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &accumulationTransition};
     vkCmdPipelineBarrier2(input.cmd, &accumulationDependency);
     m_AccumulationImage.descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
   }
 
-  // The output image is recreated and managed by GBuffer, but we still need to
-  // make it writable by the ray tracing pipeline before dispatch.
   const VkImageMemoryBarrier2 outputBarrier{
       .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
       .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
@@ -215,91 +185,54 @@ void PathTracer::Render(const RenderInput& input)
       .oldLayout     = VK_IMAGE_LAYOUT_GENERAL,
       .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
       .image         = input.gBuffers->getColorImage(input.renderedImageIndex),
-      .subresourceRange = {
-          .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-          .baseMipLevel   = 0,
-          .levelCount     = 1,
-          .baseArrayLayer = 0,
-          .layerCount     = 1,
-      },
+      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
   };
   const VkDependencyInfo outputDependency{
-      .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .imageMemoryBarrierCount = 1,
-      .pImageMemoryBarriers    = &outputBarrier,
-  };
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &outputBarrier};
   vkCmdPipelineBarrier2(input.cmd, &outputDependency);
 
   vkCmdBindPipeline(input.cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_Pipeline);
   const uint32_t frameSetIndex = std::min(m_App->getFrameCycleIndex(), uint32_t(m_DescPack.getSets().size() - 1));
-  vkCmdBindDescriptorSets(input.cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_PipelineLayout, 0, 1,
-                          m_DescPack.getSetPtr(frameSetIndex), 0, nullptr);
+  vkCmdBindDescriptorSets(input.cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_PipelineLayout, 0, 1, m_DescPack.getSetPtr(frameSetIndex), 0,
+                          nullptr);
 
-  const uint32_t clampedMaxBounces = std::min(m_Settings.maxBounces, m_MaxBounceLimit);
-  const uint32_t pipelineSafeMaxBounces = std::min(clampedMaxBounces, m_PipelineBounceLimit);
+  const uint32_t clampedMaxBounces        = std::min(m_Settings.maxBounces, m_MaxBounceLimit);
+  const uint32_t pipelineSafeMaxBounces   = std::min(clampedMaxBounces, m_PipelineBounceLimit);
+  const bool     finalAccumulationEnabled = IsFinalRadianceAccumulationEnabled(m_Settings);
+  uint32_t       pathTraceFlags           = 0;
+  if(finalAccumulationEnabled)
+  {
+    pathTraceFlags |= shaderio::ePathTraceFlagAccumulate;
+  }
+
   const shaderio::PathTracePushConstant pushConstant{
       .sceneInfoAddress  = (shaderio::GltfSceneInfo*)input.sceneResource->bSceneInfo.address,
       .rngFrameNumber    = m_RngFrameNumber++,
-      .accumulatedFrames = m_Settings.accumulate ? m_AccumulatedFrames : 0,
+      .accumulatedFrames = finalAccumulationEnabled ? m_AccumulatedFrames : 0,
       .maxBounces        = pipelineSafeMaxBounces,
-      .flags             = m_Settings.accumulate ? shaderio::ePathTraceFlagAccumulate : 0u,
+      .flags             = pathTraceFlags,
   };
   vkCmdPushConstants(input.cmd, m_PipelineLayout,
                      VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
                          | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
-                     0,
-                     sizeof(shaderio::PathTracePushConstant), &pushConstant);
+                     0, sizeof(shaderio::PathTracePushConstant), &pushConstant);
 
   vkCmdTraceRaysKHR(input.cmd, &m_SbtRegions.raygen, &m_SbtRegions.miss, &m_SbtRegions.hit, &m_SbtRegions.callable, size.width,
                     size.height, 1);
 
-  // Preserve the updated accumulation image contents for the next path traced
-  // frame. This is the history dependency that makes multi-frame averaging work.
-  const VkImageMemoryBarrier2 accumulationHistoryBarrier{
-      .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-      .srcStageMask  = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-      .dstStageMask  = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-      .oldLayout     = VK_IMAGE_LAYOUT_GENERAL,
-      .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
-      .image         = m_AccumulationImage.image,
-      .subresourceRange = {
-          .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-          .baseMipLevel   = 0,
-          .levelCount     = 1,
-          .baseArrayLayer = 0,
-          .layerCount     = 1,
-      },
-  };
-  const VkDependencyInfo accumulationHistoryDependency{
-      .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .imageMemoryBarrierCount = 1,
-      .pImageMemoryBarriers    = &accumulationHistoryBarrier,
-  };
-  vkCmdPipelineBarrier2(input.cmd, &accumulationHistoryDependency);
-
-  // Tonemapping runs immediately afterward as a compute pass, so we make the ray
-  // tracing shader writes visible to compute reads here.
   nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
-  m_LastAccumulationSignature  = currentSignature;
-  m_HasAccumulationSignature   = true;
-  m_AccumulationInvalidated    = false;
-  m_AccumulatedFrames          = m_Settings.accumulate ? (m_AccumulatedFrames + 1) : 0;
+  m_LastAccumulationSignature = currentSignature;
+  m_HasAccumulationSignature  = true;
+  m_AccumulationInvalidated   = false;
+  m_AccumulatedFrames         = finalAccumulationEnabled ? (m_AccumulatedFrames + 1) : 0;
 }
 
 void PathTracer::QueryRayTracingProperties()
 {
-  VkPhysicalDeviceProperties2 props{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-      .pNext = &m_RtProperties,
-  };
+  VkPhysicalDeviceProperties2 props{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &m_RtProperties};
   vkGetPhysicalDeviceProperties2(m_Allocator->getPhysicalDevice(), &props);
 
-  // Every extra bounce after the primary hit requires one more recursive TraceRay.
-  // That means the shader-side bounce budget must stay below the pipeline's
-  // maximum recursion depth minus the initial primary ray.
   m_MaxBounceLimit      = (m_RtProperties.maxRayRecursionDepth > 0) ? (m_RtProperties.maxRayRecursionDepth - 1) : 0;
   m_PipelineBounceLimit = std::min(kRequestedMaxBounces, m_MaxBounceLimit);
   m_Settings.maxBounces = m_PipelineBounceLimit;
@@ -307,31 +240,21 @@ void PathTracer::QueryRayTracingProperties()
 
 void PathTracer::CreateDescriptorSetLayout()
 {
-  const VkShaderStageFlags rayTracingStages =
-      VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
-      | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+  const VkShaderStageFlags rayTracingStages = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR
+                                              | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
 
   nvvk::DescriptorBindings bindings;
-  bindings.addBinding({.binding         = shaderio::BindingPoints::eTextures,
-                       .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                       .descriptorCount = m_MaxTextureDescriptors,
-                       .stageFlags      = rayTracingStages},
+  bindings.addBinding({.binding = shaderio::BindingPoints::eTextures, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                       .descriptorCount = m_MaxTextureDescriptors, .stageFlags = rayTracingStages},
                       VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
                           | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
   bindings.addBinding(shaderio::BindingPoints::eTlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, rayTracingStages);
   bindings.addBinding(shaderio::BindingPoints::eOutputImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
-  bindings.addBinding(shaderio::BindingPoints::eAccumulationImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
-                      VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+  bindings.addBinding(shaderio::BindingPoints::eAccumulationImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
 
-  // Allocate one descriptor set per frame-in-flight. This avoids rewriting a
-  // descriptor set that may still be referenced by an older submitted command
-  // buffer, which is exactly the hazard the validation error reported.
   const uint32_t frameSetCount = std::max(1u, m_App->getFrameCycleSize());
   NVVK_CHECK(m_DescPack.init(bindings, m_Allocator->getDevice(), frameSetCount, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
                              VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT));
-  NVVK_DBG_NAME(m_DescPack.getLayout());
-  NVVK_DBG_NAME(m_DescPack.getPool());
-  NVVK_DBG_NAME(m_DescPack.getSet(0));
 }
 
 void PathTracer::CreatePipelineLayout()
@@ -344,12 +267,11 @@ void PathTracer::CreatePipelineLayout()
   };
 
   NVVK_CHECK(nvvk::createPipelineLayout(m_Allocator->getDevice(), &m_PipelineLayout, {m_DescPack.getLayout()}, {pushConstantRange}));
-  NVVK_DBG_NAME(m_PipelineLayout);
 }
 
 void PathTracer::CreateRayTracingPipeline()
 {
-  VkDevice device = m_Allocator->getDevice();
+  VkDevice device                      = m_Allocator->getDevice();
   VkShaderModuleCreateInfo shaderCode = GetPathTracingShaderCode();
 
   enum StageIndices
@@ -360,33 +282,28 @@ void PathTracer::CreateRayTracingPipeline()
     eAnyHit,
     eShadowAnyHit,
     eClosestHit,
-    eShaderGroupCount,
+    eStageCount,
   };
 
-  std::array<VkPipelineShaderStageCreateInfo, eShaderGroupCount> stages{};
+  std::array<VkPipelineShaderStageCreateInfo, eStageCount> stages{};
   for(VkPipelineShaderStageCreateInfo& stage : stages)
   {
     stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stage.pNext = &shaderCode;
   }
 
-  stages[eRaygen].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-  stages[eRaygen].pName = "rgenMain";
-
-  stages[eMiss].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
-  stages[eMiss].pName = "rmissMain";
-
-  stages[eShadowMiss].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
-  stages[eShadowMiss].pName = "shadowMissMain";
-
-  stages[eAnyHit].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-  stages[eAnyHit].pName = "rahitMain";
-
+  stages[eRaygen].stage       = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+  stages[eRaygen].pName       = "rgenMain";
+  stages[eMiss].stage         = VK_SHADER_STAGE_MISS_BIT_KHR;
+  stages[eMiss].pName         = "rmissMain";
+  stages[eShadowMiss].stage   = VK_SHADER_STAGE_MISS_BIT_KHR;
+  stages[eShadowMiss].pName   = "shadowMissMain";
+  stages[eAnyHit].stage       = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+  stages[eAnyHit].pName       = "rahitMain";
   stages[eShadowAnyHit].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
   stages[eShadowAnyHit].pName = "shadowAnyHitMain";
-
-  stages[eClosestHit].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-  stages[eClosestHit].pName = "rchitMain";
+  stages[eClosestHit].stage   = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+  stages[eClosestHit].pName   = "rchitMain";
 
   VkRayTracingShaderGroupCreateInfoKHR group{VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR};
   group.anyHitShader       = VK_SHADER_UNUSED_KHR;
@@ -422,7 +339,6 @@ void PathTracer::CreateRayTracingPipeline()
   shaderGroups.push_back(group);
 
   const uint32_t recursionDepth = std::max(1u, m_PipelineBounceLimit + 1);
-
   VkRayTracingPipelineCreateInfoKHR pipelineInfo{
       .sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
       .stageCount                   = static_cast<uint32_t>(stages.size()),
@@ -434,11 +350,9 @@ void PathTracer::CreateRayTracingPipeline()
   };
 
   NVVK_CHECK(vkCreateRayTracingPipelinesKHR(device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_Pipeline));
-  NVVK_DBG_NAME(m_Pipeline);
 
   m_SbtGenerator.init(device, m_RtProperties);
   const size_t sbtBufferSize = m_SbtGenerator.calculateSBTBufferSize(m_Pipeline, pipelineInfo);
-
   NVVK_CHECK(m_Allocator->createBuffer(m_SbtBuffer, sbtBufferSize,
                                        VK_BUFFER_USAGE_2_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT,
                                        VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
@@ -449,7 +363,7 @@ void PathTracer::CreateRayTracingPipeline()
 void PathTracer::CreateShaderBindingTable()
 {
   NVVK_CHECK(m_SbtGenerator.populateSBTBuffer(m_SbtBuffer.address, m_SbtBuffer.bufferSize, m_SbtBuffer.mapping));
-  m_SbtRegions = m_SbtGenerator.getSBTRegions();
+  m_SbtRegions = m_SbtGenerator.getSBTRegions(0);
 }
 
 void PathTracer::UpdateFrameDescriptors(const RenderInput& input)
@@ -459,9 +373,6 @@ void PathTracer::UpdateFrameDescriptors(const RenderInput& input)
   nvvk::WriteSetContainer write;
   write.reserve(3);
 
-  // Only touch the descriptor set that belongs to the frame we are currently
-  // recording. Older in-flight frames keep their own descriptor contents until
-  // the frame ring comes back around to them.
   write.append(m_DescPack.makeWrite(shaderio::BindingPoints::eTlas, frameSetIndex), *input.topLevelAS);
 
   VkDescriptorImageInfo outputImageInfo = input.gBuffers->getDescriptorImageInfo(input.renderedImageIndex);
@@ -489,40 +400,26 @@ void PathTracer::CreateOrResizeAccumulationImage(VkExtent2D size)
     m_AccumulationImage = {};
   }
 
-  VkImageCreateInfo imageInfo{
-      .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-      .imageType     = VK_IMAGE_TYPE_2D,
-      .format        = kAccumulationFormat,
-      .extent        = {.width = size.width, .height = size.height, .depth = 1},
-      .mipLevels     = 1,
-      .arrayLayers   = 1,
-      .samples       = VK_SAMPLE_COUNT_1_BIT,
-      .tiling        = VK_IMAGE_TILING_OPTIMAL,
-      .usage         = VK_IMAGE_USAGE_STORAGE_BIT,
-      .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
-      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-  };
-  VkImageViewCreateInfo viewInfo{
-      .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-      .viewType = VK_IMAGE_VIEW_TYPE_2D,
-      .format   = imageInfo.format,
-      .subresourceRange = {
-          .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
-          .baseMipLevel   = 0,
-          .levelCount     = 1,
-          .baseArrayLayer = 0,
-          .layerCount     = 1,
-      },
-  };
+  VkImageCreateInfo imageInfo{.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                              .imageType = VK_IMAGE_TYPE_2D,
+                              .format = kAccumulationFormat,
+                              .extent = {.width = size.width, .height = size.height, .depth = 1},
+                              .mipLevels = 1,
+                              .arrayLayers = 1,
+                              .samples = VK_SAMPLE_COUNT_1_BIT,
+                              .tiling = VK_IMAGE_TILING_OPTIMAL,
+                              .usage = VK_IMAGE_USAGE_STORAGE_BIT,
+                              .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                              .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+  VkImageViewCreateInfo viewInfo{.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                 .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                 .format = imageInfo.format,
+                                 .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1,
+                                                      .baseArrayLayer = 0, .layerCount = 1}};
 
   NVVK_CHECK(m_Allocator->createImage(m_AccumulationImage, imageInfo, viewInfo));
   m_AccumulationImage.descriptor.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   m_AccumulationImage.descriptor.sampler     = VK_NULL_HANDLE;
-  NVVK_DBG_NAME(m_AccumulationImage.image);
-  NVVK_DBG_NAME(m_AccumulationImage.descriptor.imageView);
-
-  // A size change means the previous history no longer corresponds to the new
-  // viewport. Reset the accumulation count and let the next frame rebuild it.
   InvalidateAccumulation();
 }
 
@@ -539,9 +436,6 @@ void PathTracer::ScheduleAccumulationImageDestroy(nvvk::Image image)
     return;
   }
 
-  // Old accumulation images may still be referenced by frames already in
-  // flight. Defer the destruction until the application says the frame ring has
-  // moved far enough that those submissions are complete.
   nvvk::ResourceAllocator* allocator = m_Allocator;
   m_App->submitResourceFree([allocator, image]() mutable {
     if(allocator != nullptr)
@@ -554,19 +448,18 @@ void PathTracer::ScheduleAccumulationImageDestroy(nvvk::Image image)
 PathTracer::AccumulationSignature PathTracer::MakeAccumulationSignature(const RenderInput& input, VkExtent2D size) const
 {
   AccumulationSignature signature{};
-  signature.viewProjMatrix         = input.sceneInfo->viewProjMatrix;
-  signature.projInvMatrix          = input.sceneInfo->projInvMatrix;
-  signature.viewInvMatrix          = input.sceneInfo->viewInvMatrix;
-  signature.cameraPosition         = input.sceneInfo->cameraPosition;
-  signature.useSky                 = input.sceneInfo->useSky;
-  signature.useHdrEnv              = input.sceneInfo->useHdrEnv;
+  signature.viewProjMatrix          = input.sceneInfo->viewProjMatrix;
+  signature.projInvMatrix           = input.sceneInfo->projInvMatrix;
+  signature.viewInvMatrix           = input.sceneInfo->viewInvMatrix;
+  signature.cameraPosition          = input.sceneInfo->cameraPosition;
+  signature.useSky                  = input.sceneInfo->useSky;
+  signature.useHdrEnv               = input.sceneInfo->useHdrEnv;
   signature.environmentTextureIndex = input.sceneInfo->environmentTextureIndex;
-  signature.backgroundColor        = input.sceneInfo->backgroundColor;
-  signature.skySimpleParam         = input.sceneInfo->skySimpleParam;
-  signature.topLevelAsAddress      = input.topLevelAS->address;
-  signature.viewportSize           = size;
+  signature.backgroundColor         = input.sceneInfo->backgroundColor;
+  signature.skySimpleParam          = input.sceneInfo->skySimpleParam;
+  signature.topLevelAsAddress       = input.topLevelAS->address;
+  signature.viewportSize            = size;
   return signature;
 }
 
 }  // namespace nvsamples
-
