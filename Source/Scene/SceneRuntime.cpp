@@ -243,7 +243,8 @@ void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewM
   m_SceneResource.sceneInfo.environmentHeight     = m_SceneResource.environmentHeight;
 
   const VkPipelineStageFlags2 shaderReadStages =
-      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR
+      | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
 
   // Use an explicit barrier here instead of the convenience helper. The helper
   // infers acceleration-structure read access for ray tracing stages, but this

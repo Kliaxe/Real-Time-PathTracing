@@ -23,6 +23,7 @@
 #include "Common/IoGltf.h"
 #include "ReSTIR/Common/ReSTIRParameters.h"
 #include "ReSTIR/DI/ReSTIRDIParameters.h"
+#include "ReSTIR/GI/ReSTIRGIParameters.h"
 
 NAMESPACE_SHADERIO_BEGIN()
 
@@ -61,6 +62,19 @@ enum ReSTIRDIBindingPoints
   eReSTIRDIPreviousSurfaceBuffer = 6,
   eReSTIRDINeighborOffsetBuffer = 7,
   eReSTIRDIParamsBuffer        = 8,
+};
+
+enum ReSTIRGIBindingPoints
+{
+  eReSTIRGITextures             = 0,
+  eReSTIRGITlas                 = 1,
+  eReSTIRGIOutputImage          = 2,
+  eReSTIRGIAccumulationImage    = 3,
+  eReSTIRGIReservoirBuffer      = 4,
+  eReSTIRGICurrentSurfaceBuffer = 5,
+  eReSTIRGIPreviousSurfaceBuffer = 6,
+  eReSTIRGINeighborOffsetBuffer = 7,
+  eReSTIRGIParamsBuffer         = 8,
 };
 
 struct TutoPushConstant
@@ -130,6 +144,12 @@ enum ReSTIRDebugView
   eReSTIRDebugViewSpatialStatus = 6u,
   eReSTIRDebugViewShiftJacobian = 7u,
   eReSTIRDebugViewReuseCount = 8u,
+};
+
+enum ReSTIRGISampleKind
+{
+  eReSTIRGISampleKindSurface = 0u,
+  eReSTIRGISampleKindEnvironment = 1u,
 };
 
 enum ReSTIRShiftStatus
@@ -219,6 +239,24 @@ struct ReSTIRDIPushConstant
   uint           continuationMaxBounces;
 };
 
+struct ReSTIRGIParameters
+{
+  ReSTIRRuntimeParameters              runtimeParams;
+  ReSTIRReservoirBufferParameters      reservoirBufferParams;
+  ReSTIRGIBufferIndices                bufferIndices;
+  ReSTIRGITemporalResamplingParameters temporalResampling;
+  ReSTIRGISpatialResamplingParameters  spatialResampling;
+  ReSTIRGIShadingParameters            shading;
+};
+
+struct ReSTIRGIPushConstant
+{
+  GltfSceneInfo* sceneInfoAddress;
+  uint           accumulatedFrames;
+  uint           flags;
+  uint           continuationMaxBounces;
+};
+
 struct ReSTIRDISurface
 {
   float3 worldPosition;
@@ -288,6 +326,52 @@ struct ReSTIRPTPrimarySurface
   float  pad1;
 };
 
+struct ReSTIRGIPrimarySurface
+{
+  float3 worldPosition;
+  float  linearDepth;
+  float3 shadingNormal;
+  float  roughness;
+  float3 geometricNormal;
+  float  metallic;
+  float3 tangent;
+  float  specular;
+  float3 bitangent;
+  float  specularTint;
+  float3 albedo;
+  float  transmission;
+  float3 emission;
+  float  attenuationDistance;
+  float3 attenuationColor;
+  float  volumeThickness;
+  float3 sheenColor;
+  float  refractionIndex;
+  float  clearcoat;
+  float  clearcoatRoughness;
+  float  sheenRoughness;
+  float  subsurface;
+  float  anisotropy;
+  uint   materialIndex;
+  uint   isFrontFace;
+  uint   valid;
+  uint   pad0;
+  uint   pad1;
+  float3 baseRadiance;
+  float  pad2;
+};
+
+struct ReSTIRGIReservoir
+{
+  float3 samplePosition;
+  float  weightSum;
+  float3 sampleNormal;
+  uint   M;
+  float3 sampleRadiance;
+  uint   age;
+  float3 sampleDirection;
+  uint   sampleKind;
+};
+
 struct ReSTIRPTReservoir
 {
   float3 cachedIncidentRadiance;
@@ -327,6 +411,10 @@ struct ReSTIRDebugPixel
 CHECK_STRUCT_ALIGNMENT(ReSTIRDISurface)
 CHECK_STRUCT_ALIGNMENT(ReSTIRDIParameters)
 CHECK_STRUCT_ALIGNMENT(ReSTIRDIPushConstant)
+CHECK_STRUCT_ALIGNMENT(ReSTIRGIPrimarySurface)
+CHECK_STRUCT_ALIGNMENT(ReSTIRGIReservoir)
+CHECK_STRUCT_ALIGNMENT(ReSTIRGIParameters)
+CHECK_STRUCT_ALIGNMENT(ReSTIRGIPushConstant)
 
 NAMESPACE_SHADERIO_END()
 

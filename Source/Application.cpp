@@ -172,6 +172,43 @@ bool DrawReSTIRTemporalControls(ReSTIRDITemporalResamplingParameters& settings)
   return changed;
 }
 
+bool DrawReSTIRTemporalControls(ReSTIRGITemporalResamplingParameters& settings)
+{
+  bool changed = false;
+
+  int maxHistoryLength = static_cast<int>(settings.maxHistoryLength);
+  if(ImGui::SliderInt("Max History Length", &maxHistoryLength, 1, 64))
+  {
+    settings.maxHistoryLength = static_cast<uint32_t>(maxHistoryLength);
+    changed                   = true;
+  }
+
+  int maxReservoirAge = static_cast<int>(settings.maxReservoirAge);
+  if(ImGui::SliderInt("Max Reservoir Age", &maxReservoirAge, 1, 64))
+  {
+    settings.maxReservoirAge = static_cast<uint32_t>(maxReservoirAge);
+    changed                  = true;
+  }
+
+  bool enableFallbackSampling = (settings.enableFallbackSampling != 0u);
+  if(ImGui::Checkbox("Fallback Sampling", &enableFallbackSampling))
+  {
+    settings.enableFallbackSampling = enableFallbackSampling ? 1u : 0u;
+    changed                         = true;
+  }
+
+  bool enablePermutationSampling = (settings.enablePermutationSampling != 0u);
+  if(ImGui::Checkbox("Permutation Sampling", &enablePermutationSampling))
+  {
+    settings.enablePermutationSampling = enablePermutationSampling ? 1u : 0u;
+    changed                            = true;
+  }
+
+  changed |= ImGui::SliderFloat("Temporal Depth Threshold", &settings.depthThreshold, 0.0f, 1.0f, "%.3f");
+  changed |= ImGui::SliderFloat("Temporal Normal Threshold", &settings.normalThreshold, 0.0f, 1.0f, "%.2f");
+  return changed;
+}
+
 bool DrawReSTIRSpatialControls(shaderio::ReSTIRSpatialResamplingParameters& settings, float maxRadius)
 {
   bool changed = false;
@@ -206,6 +243,23 @@ bool DrawReSTIRSpatialControls(ReSTIRDISpatialResamplingParameters& settings, fl
   return changed;
 }
 
+bool DrawReSTIRSpatialControls(ReSTIRGISpatialResamplingParameters& settings, float maxRadius)
+{
+  bool changed = false;
+
+  int sampleCount = static_cast<int>(settings.numSamples);
+  if(ImGui::SliderInt("Spatial Sample Count", &sampleCount, 1, 32))
+  {
+    settings.numSamples = static_cast<uint32_t>(sampleCount);
+    changed             = true;
+  }
+
+  changed |= ImGui::SliderFloat("Spatial Radius", &settings.samplingRadius, 0.0f, maxRadius, "%.1f");
+  changed |= ImGui::SliderFloat("Spatial Depth Threshold", &settings.depthThreshold, 0.0f, 1.0f, "%.3f");
+  changed |= ImGui::SliderFloat("Spatial Normal Threshold", &settings.normalThreshold, 0.0f, 1.0f, "%.2f");
+  return changed;
+}
+
 bool DrawReSTIRResamplingSection(const char* treeLabel, shaderio::ReSTIRTemporalResamplingParameters& temporalSettings,
                                  shaderio::ReSTIRSpatialResamplingParameters& spatialSettings, float maxRadius)
 {
@@ -223,6 +277,21 @@ bool DrawReSTIRResamplingSection(const char* treeLabel, shaderio::ReSTIRTemporal
 
 bool DrawReSTIRResamplingSection(const char* treeLabel, ReSTIRDITemporalResamplingParameters& temporalSettings,
                                  ReSTIRDISpatialResamplingParameters& spatialSettings, float maxRadius)
+{
+  if(!ImGui::TreeNodeEx(treeLabel))
+  {
+    return false;
+  }
+
+  bool changed = false;
+  changed |= DrawReSTIRTemporalControls(temporalSettings);
+  changed |= DrawReSTIRSpatialControls(spatialSettings, maxRadius);
+  ImGui::TreePop();
+  return changed;
+}
+
+bool DrawReSTIRResamplingSection(const char* treeLabel, ReSTIRGITemporalResamplingParameters& temporalSettings,
+                                 ReSTIRGISpatialResamplingParameters& spatialSettings, float maxRadius)
 {
   if(!ImGui::TreeNodeEx(treeLabel))
   {
@@ -320,6 +389,11 @@ void Application::onAttach(nvapp::Application* app)
         .allocator             = &m_Allocator,
         .maxTextureDescriptors = kMaxTextureDescriptors,
     });
+    m_ReSTIRGI         = std::make_unique<nvsamples::ReSTIRGIRenderer>(nvsamples::ReSTIRGIRenderer::CreateInfo{
+        .app                   = m_App,
+        .allocator             = &m_Allocator,
+        .maxTextureDescriptors = kMaxTextureDescriptors,
+    });
     m_ReSTIRPT         = std::make_unique<nvsamples::ReSTIRPTRenderer>(nvsamples::ReSTIRPTRenderer::CreateInfo{
         .app                   = m_App,
         .allocator             = &m_Allocator,
@@ -333,6 +407,7 @@ void Application::onAttach(nvapp::Application* app)
     });
     m_PathTracer->Initialize();
     m_ReSTIRDI->Initialize();
+    m_ReSTIRGI->Initialize();
     m_ReSTIRPT->Initialize();
     DiscoverAssets();
     CreateScene(true);
@@ -359,6 +434,7 @@ void Application::onDetach()
 
     m_PathTracer->Destroy();
     m_ReSTIRDI->Destroy();
+    m_ReSTIRGI->Destroy();
     m_ReSTIRPT->Destroy();
     m_SceneRuntime->Destroy();
 
@@ -390,7 +466,8 @@ void Application::onUIRender()
       if(ImGui::CollapsingHeader("Renderer", ImGuiTreeNodeFlags_DefaultOpen))
       {
         int renderMode = static_cast<int>(m_RenderMode);
-        const char* renderModes[] = {"Rasterizer", "Path Tracing", "Path Tracing ReSTIR DI", "Path Tracing ReSTIR PT"};
+        const char* renderModes[] = {"Rasterizer", "Path Tracing", "Path Tracing ReSTIR DI", "Path Tracing ReSTIR GI",
+                                     "Path Tracing ReSTIR PT"};
         if(ImGui::Combo("Mode", &renderMode, renderModes, IM_ARRAYSIZE(renderModes)))
         {
           m_RenderMode = static_cast<RenderMode>(renderMode);
@@ -536,97 +613,149 @@ void Application::onUIRender()
 
             DrawReSTIRMethodFooter(
                 "This DI mode uses ReSTIR direct-light reservoirs and a path-traced continuation for reflections and indirect transport.",
-                m_ReSTIRDI->GetAccumulatedFrameCount());
+              m_ReSTIRDI->GetAccumulatedFrameCount());
           }
         }
-        else if(m_ReSTIRPT == nullptr || !m_ReSTIRPT->IsReady())
+        else if(m_RenderMode == RenderMode::ePathTracingReSTIRGI)
         {
-          ImGui::TextWrapped("Path Tracing ReSTIR PT mode is present in the UI, but the renderer is not ready yet.");
+          if(m_ReSTIRGI == nullptr || !m_ReSTIRGI->IsReady())
+          {
+            ImGui::TextWrapped("Path Tracing ReSTIR GI mode is present in the UI, but the renderer is not ready yet.");
+          }
+          else
+          {
+            nvsamples::ReSTIRGISettings& restirGiSettings = m_ReSTIRGI->GetSettings();
+
+            invalidatePathTracingHistory |= DrawReSTIRCommonControls(restirGiSettings.common, "Resampling##ReSTIRGI_Mode");
+            invalidatePathTracingHistory |= DrawReSTIRResamplingSection("Resampling##ReSTIRGI_Settings",
+                                                                        restirGiSettings.temporalResampling,
+                                                                        restirGiSettings.spatialResampling, 128.0f);
+
+            if(ImGui::TreeNodeEx("Final Shading", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+              bool enableFinalVisibility = (restirGiSettings.shading.enableFinalVisibility != 0u);
+              if(ImGui::Checkbox("Enable Final Visibility", &enableFinalVisibility))
+              {
+                restirGiSettings.shading.enableFinalVisibility = enableFinalVisibility ? 1u : 0u;
+                invalidatePathTracingHistory                   = true;
+              }
+
+              ImGui::TextDisabled("GI reuses one secondary indirect sample and optionally rechecks its visibility at the primary surface.");
+              ImGui::TreePop();
+            }
+
+            if(ImGui::TreeNodeEx("Continuation"))
+            {
+              const uint32_t bounceLimit = m_ReSTIRGI->GetPipelineBounceLimit();
+              if(DrawBounceLimitControl("Continuation Max Bounces", restirGiSettings.continuationMaxBounces, bounceLimit))
+              {
+                invalidatePathTracingHistory = true;
+              }
+
+              ImGui::TextDisabled("Indirect lighting comes from GI reservoirs, while the continuation path covers glossy reflections and further transport.");
+              ImGui::TreePop();
+            }
+
+            DrawReSTIRMethodFooter(
+                "This GI mode keeps direct lighting in the primary base radiance, reuses one indirect sample through temporal and spatial resampling, and adds a path-traced continuation for glossy reflections and further transport.",
+                m_ReSTIRGI->GetAccumulatedFrameCount());
+          }
+        }
+        else if(m_RenderMode == RenderMode::ePathTracingReSTIRPT)
+        {
+          if(m_ReSTIRPT == nullptr || !m_ReSTIRPT->IsReady())
+          {
+            ImGui::TextWrapped("Path Tracing ReSTIR PT mode is present in the UI, but the renderer is not ready yet.");
+          }
+          else
+          {
+            nvsamples::ReSTIRPTSettings& restirSettings = m_ReSTIRPT->GetSettings();
+            const uint32_t               bounceLimit    = m_ReSTIRPT->GetPipelineBounceLimit();
+
+            invalidatePathTracingHistory |= DrawReSTIRCommonControls(restirSettings.common, "Resampling");
+            invalidatePathTracingHistory |= DrawReSTIRResamplingSection("Resampling##ReSTIRPT_Settings",
+                                                                        restirSettings.common.temporalResampling,
+                                                                        restirSettings.common.spatialResampling, 100.0f);
+
+            if(ImGui::TreeNodeEx("Baseline", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+              int initialSampleCount = static_cast<int>(restirSettings.common.initialSampling.numInitialSamples);
+              if(ImGui::SliderInt("Initial Sample Count", &initialSampleCount, 1, 16))
+              {
+                restirSettings.common.initialSampling.numInitialSamples = static_cast<uint32_t>(initialSampleCount);
+                invalidatePathTracingHistory                            = true;
+              }
+
+              if(DrawBounceLimitControl("Max Bounce Depth", restirSettings.common.initialSampling.maxBounceDepth, bounceLimit))
+              {
+                invalidatePathTracingHistory                         = true;
+              }
+
+              invalidatePathTracingHistory |=
+                  ImGui::SliderFloat("Roughness Threshold", &restirSettings.reconnection.roughnessThreshold, 0.0f, 1.0f, "%.2f");
+              invalidatePathTracingHistory |=
+                  ImGui::SliderFloat("Distance Threshold", &restirSettings.reconnection.distanceThreshold, 0.0f, 20.0f, "%.2f");
+
+              DrawTransmissionBounceHint(restirSettings.common.initialSampling.maxBounceDepth);
+
+              ImGui::TreePop();
+            }
+
+            if(ImGui::TreeNodeEx("Advanced"))
+            {
+              bool enableVisibilityValidation = restirSettings.common.enableVisibilityValidation;
+              if(ImGui::Checkbox("Enable Visibility Validation", &enableVisibilityValidation))
+              {
+                restirSettings.common.enableVisibilityValidation = enableVisibilityValidation;
+                invalidatePathTracingHistory                     = true;
+              }
+
+              int maxReservoirAge = static_cast<int>(restirSettings.common.temporalResampling.maxReservoirAge);
+              if(ImGui::SliderInt("Max Reservoir Age", &maxReservoirAge, 1, 64))
+              {
+                restirSettings.common.temporalResampling.maxReservoirAge = static_cast<uint32_t>(maxReservoirAge);
+                invalidatePathTracingHistory                             = true;
+              }
+
+              bool enablePermutationSampling = restirSettings.common.temporalResampling.enablePermutationSampling != 0;
+              if(ImGui::Checkbox("Enable Temporal Permutation Sampling", &enablePermutationSampling))
+              {
+                restirSettings.common.temporalResampling.enablePermutationSampling = enablePermutationSampling ? 1u : 0u;
+                invalidatePathTracingHistory                                       = true;
+              }
+
+              bool enableFallbackSampling = restirSettings.common.temporalResampling.enableFallbackSampling != 0;
+              if(ImGui::Checkbox("Enable Temporal Fallback Sample", &enableFallbackSampling))
+              {
+                restirSettings.common.temporalResampling.enableFallbackSampling = enableFallbackSampling ? 1u : 0u;
+                invalidatePathTracingHistory                                    = true;
+              }
+
+              ImGui::TextWrapped("The thesis baseline uses fixed-threshold reconnection plus optional ray-query visibility validation.");
+              ImGui::TreePop();
+            }
+
+            if(ImGui::TreeNodeEx("Debug"))
+            {
+              int debugView = static_cast<int>(restirSettings.common.debugView);
+              const char* debugViews[] = {"Disabled", "Candidate Kind", "Target PDF", "Reservoir Weight", "Reservoir Age",
+                                          "Temporal Status", "Spatial Status", "Shift Jacobian", "Reuse Count"};
+              if(ImGui::Combo("Debug View", &debugView, debugViews, IM_ARRAYSIZE(debugViews)))
+              {
+                restirSettings.common.debugView = static_cast<shaderio::ReSTIRDebugView>(debugView);
+              }
+
+              ImGui::TreePop();
+            }
+
+            DrawReSTIRMethodFooter(
+                "The baseline path tracer remains the ground truth. This mode keeps a separate ReSTIR PT implementation so we can compare reuse behavior and quality directly.",
+                m_ReSTIRPT->GetAccumulatedFrameCount());
+          }
         }
         else
         {
-          nvsamples::ReSTIRPTSettings& restirSettings = m_ReSTIRPT->GetSettings();
-          const uint32_t               bounceLimit    = m_ReSTIRPT->GetPipelineBounceLimit();
-
-          invalidatePathTracingHistory |= DrawReSTIRCommonControls(restirSettings.common, "Resampling");
-          invalidatePathTracingHistory |= DrawReSTIRResamplingSection("Resampling##ReSTIRPT_Settings",
-                                                                      restirSettings.common.temporalResampling,
-                                                                      restirSettings.common.spatialResampling, 100.0f);
-
-          if(ImGui::TreeNodeEx("Baseline", ImGuiTreeNodeFlags_DefaultOpen))
-          {
-            int initialSampleCount = static_cast<int>(restirSettings.common.initialSampling.numInitialSamples);
-            if(ImGui::SliderInt("Initial Sample Count", &initialSampleCount, 1, 16))
-            {
-              restirSettings.common.initialSampling.numInitialSamples = static_cast<uint32_t>(initialSampleCount);
-              invalidatePathTracingHistory                            = true;
-            }
-
-            if(DrawBounceLimitControl("Max Bounce Depth", restirSettings.common.initialSampling.maxBounceDepth, bounceLimit))
-            {
-              invalidatePathTracingHistory                         = true;
-            }
-
-            invalidatePathTracingHistory |=
-                ImGui::SliderFloat("Roughness Threshold", &restirSettings.reconnection.roughnessThreshold, 0.0f, 1.0f, "%.2f");
-            invalidatePathTracingHistory |=
-                ImGui::SliderFloat("Distance Threshold", &restirSettings.reconnection.distanceThreshold, 0.0f, 20.0f, "%.2f");
-
-            DrawTransmissionBounceHint(restirSettings.common.initialSampling.maxBounceDepth);
-
-            ImGui::TreePop();
-          }
-
-          if(ImGui::TreeNodeEx("Advanced"))
-          {
-            bool enableVisibilityValidation = restirSettings.common.enableVisibilityValidation;
-            if(ImGui::Checkbox("Enable Visibility Validation", &enableVisibilityValidation))
-            {
-              restirSettings.common.enableVisibilityValidation = enableVisibilityValidation;
-              invalidatePathTracingHistory                     = true;
-            }
-
-            int maxReservoirAge = static_cast<int>(restirSettings.common.temporalResampling.maxReservoirAge);
-            if(ImGui::SliderInt("Max Reservoir Age", &maxReservoirAge, 1, 64))
-            {
-              restirSettings.common.temporalResampling.maxReservoirAge = static_cast<uint32_t>(maxReservoirAge);
-              invalidatePathTracingHistory                             = true;
-            }
-
-            bool enablePermutationSampling = restirSettings.common.temporalResampling.enablePermutationSampling != 0;
-            if(ImGui::Checkbox("Enable Temporal Permutation Sampling", &enablePermutationSampling))
-            {
-              restirSettings.common.temporalResampling.enablePermutationSampling = enablePermutationSampling ? 1u : 0u;
-              invalidatePathTracingHistory                                       = true;
-            }
-
-            bool enableFallbackSampling = restirSettings.common.temporalResampling.enableFallbackSampling != 0;
-            if(ImGui::Checkbox("Enable Temporal Fallback Sample", &enableFallbackSampling))
-            {
-              restirSettings.common.temporalResampling.enableFallbackSampling = enableFallbackSampling ? 1u : 0u;
-              invalidatePathTracingHistory                                    = true;
-            }
-
-            ImGui::TextWrapped("The thesis baseline uses fixed-threshold reconnection plus optional ray-query visibility validation.");
-            ImGui::TreePop();
-          }
-
-          if(ImGui::TreeNodeEx("Debug"))
-          {
-            int debugView = static_cast<int>(restirSettings.common.debugView);
-            const char* debugViews[] = {"Disabled", "Candidate Kind", "Target PDF", "Reservoir Weight", "Reservoir Age",
-                                        "Temporal Status", "Spatial Status", "Shift Jacobian", "Reuse Count"};
-            if(ImGui::Combo("Debug View", &debugView, debugViews, IM_ARRAYSIZE(debugViews)))
-            {
-              restirSettings.common.debugView = static_cast<shaderio::ReSTIRDebugView>(debugView);
-            }
-
-            ImGui::TreePop();
-          }
-
-          DrawReSTIRMethodFooter(
-              "The baseline path tracer remains the ground truth. This mode keeps a separate ReSTIR PT implementation so we can compare reuse behavior and quality directly.",
-              m_ReSTIRPT->GetAccumulatedFrameCount());
+          ImGui::TextWrapped("Unknown renderer mode.");
         }
       }
       if(ImGui::CollapsingHeader("Camera"))
@@ -810,6 +939,10 @@ void Application::onRender(VkCommandBuffer cmd)
     {
       ReSTIRDIScene(cmd);
     }
+    else if(IsReSTIRGIRenderMode() && m_ReSTIRGI != nullptr && m_ReSTIRGI->IsReady())
+    {
+      ReSTIRGIScene(cmd);
+    }
     else if(IsReSTIRPTRenderMode() && m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
     {
       ReSTIRPTScene(cmd);
@@ -958,6 +1091,10 @@ void Application::UpdateTextures()
     {
       m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_ReSTIRDI->GetDescriptorPack(), kMaxTextureDescriptors);
     }
+    if(m_ReSTIRGI != nullptr && m_ReSTIRGI->IsReady())
+    {
+      m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_ReSTIRGI->GetDescriptorPack(), kMaxTextureDescriptors);
+    }
     if(m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
     {
       m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_ReSTIRPT->GetDescriptorPack(), kMaxTextureDescriptors);
@@ -1079,6 +1216,18 @@ void Application::ReSTIRPTScene(VkCommandBuffer cmd)
     });
   }
 
+void Application::ReSTIRGIScene(VkCommandBuffer cmd)
+  {
+    m_ReSTIRGI->Render(nvsamples::ReSTIRGIRenderer::RenderInput{
+        .cmd                = cmd,
+        .sceneResource      = &m_SceneRuntime->GetSceneResource(),
+        .sceneInfo          = &m_SceneRuntime->GetSceneInfo(),
+        .topLevelAS         = &m_SceneRuntime->GetTopLevelAccelerationStructure(),
+        .gBuffers           = &m_GBuffers,
+        .renderedImageIndex = eImgRendered,
+    });
+  }
+
 void Application::ReSTIRDIScene(VkCommandBuffer cmd)
   {
     m_ReSTIRDI->Render(nvsamples::ReSTIRDIRenderer::RenderInput{
@@ -1102,6 +1251,10 @@ void Application::InvalidatePathTracingHistory()
     {
       m_ReSTIRDI->InvalidateHistory();
     }
+    if(m_ReSTIRGI != nullptr && m_ReSTIRGI->IsReady())
+    {
+      m_ReSTIRGI->InvalidateHistory();
+    }
     if(m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
     {
       m_ReSTIRPT->InvalidateHistory();
@@ -1116,6 +1269,11 @@ bool Application::IsPathTracerRenderMode() const
 bool Application::IsReSTIRDIRenderMode() const
   {
     return m_RenderMode == RenderMode::ePathTracingReSTIRDI;
+  }
+
+bool Application::IsReSTIRGIRenderMode() const
+  {
+    return m_RenderMode == RenderMode::ePathTracingReSTIRGI;
   }
 
 bool Application::IsReSTIRPTRenderMode() const

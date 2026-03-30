@@ -26,6 +26,7 @@
 
 #include "PathTracing/PathTracer.h"
 #include "PathTracing/ReSTIR/DI/ReSTIRDIRenderer.h"
+#include "PathTracing/ReSTIR/GI/ReSTIRGIRenderer.h"
 #include "PathTracing/ReSTIR/PT/ReSTIRPTRenderer.h"
 #include "Scene/SceneAssetCatalog.h"
 #include "Scene/SceneResolver.h"
@@ -46,6 +47,7 @@ class Application : public nvapp::IAppElement
     eRasterizer = 0,
     ePathTracing,
     ePathTracingReSTIRDI,
+    ePathTracingReSTIRGI,
     ePathTracingReSTIRPT,
   };
 
@@ -84,10 +86,12 @@ private:
   void RasterScene(VkCommandBuffer cmd);
   void PathTraceScene(VkCommandBuffer cmd);
   void ReSTIRDIScene(VkCommandBuffer cmd);
+  void ReSTIRGIScene(VkCommandBuffer cmd);
   void ReSTIRPTScene(VkCommandBuffer cmd);
   void InvalidatePathTracingHistory();
   bool IsPathTracerRenderMode() const;
   bool IsReSTIRDIRenderMode() const;
+  bool IsReSTIRGIRenderMode() const;
   bool IsReSTIRPTRenderMode() const;
 
 private:
@@ -119,6 +123,7 @@ private:
   std::unique_ptr<nvsamples::SceneAssetCatalog> m_SceneAssetCatalog; // Asset discovery helper
   std::unique_ptr<nvsamples::PathTracer>        m_PathTracer;        // Ray tracing renderer
   std::unique_ptr<nvsamples::ReSTIRDIRenderer>  m_ReSTIRDI;          // Reservoir-based direct illumination renderer
+  std::unique_ptr<nvsamples::ReSTIRGIRenderer>  m_ReSTIRGI;          // Reservoir-based indirect illumination renderer
   std::unique_ptr<nvsamples::ReSTIRPTRenderer>  m_ReSTIRPT;          // Reservoir-based path tracing renderer
   std::unique_ptr<nvsamples::SceneResolver>     m_SceneResolver;     // Scene selection resolver
   std::unique_ptr<nvsamples::SceneRenderer>     m_SceneRenderer;     // Raster scene renderer

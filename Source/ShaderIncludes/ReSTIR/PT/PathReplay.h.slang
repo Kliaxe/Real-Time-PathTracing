@@ -3,6 +3,7 @@
 
 #include "ShaderIncludes/ReSTIR/PT/Reservoir.h.slang"
 #include "ShaderIncludes/PathTracing/Continuation.h.slang"
+#include "ShaderIncludes/PathTracing/DirectLighting.h.slang"
 
 void AccumulateReSTIRPTMissRadiance(inout PathPayload payload)
 {
@@ -11,29 +12,7 @@ void AccumulateReSTIRPTMissRadiance(inout PathPayload payload)
 
 float3 ComputePrimaryBaseRadiance(SurfaceData surface, float3 viewDir, inout uint seed)
 {
-  // The primary surface stores direct/base lighting separately so final replay
-  // only reconstructs the continuation behind the selected candidate.
-  PathPayload lightingPayload;
-  lightingPayload = (PathPayload)0;
-  lightingPayload.radiance                 = surface.emission;
-  lightingPayload.throughput               = float3(1.0);
-  lightingPayload.mediumAttenuation        = float3(0.0);
-  lightingPayload.mediumThickness          = 0.0;
-  lightingPayload.lastSurfacePosition      = surface.worldPosition;
-  lightingPayload.lastSurfaceNormal        = surface.shadingNormal;
-  lightingPayload.lastDirectLightBsdfPdf   = 0.0;
-  lightingPayload.seed                     = seed;
-  lightingPayload.depth                    = 0;
-  lightingPayload.mediumActive             = 0;
-  lightingPayload.lastEnvironmentNeeActive = 0;
-  lightingPayload.hasLastBsdfSample        = 0;
-
-  const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
-  AccumulateEnvironmentDirectLight(lightingPayload, surface, sceneInfo, viewDir);
-  AccumulateEmissiveDirectLight(lightingPayload, surface, sceneInfo, viewDir);
-  seed = lightingPayload.seed;
-
-  return lightingPayload.radiance;
+  return ComputeSurfaceBaseRadiance(surface, viewDir, seed);
 }
 
 bool InitializeReplayPayload(out PathPayload payload, ReSTIRPTPrimarySurface primarySurface, ReSTIRPTReservoir reservoir, out float3 worldDirection)
