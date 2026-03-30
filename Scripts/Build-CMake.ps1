@@ -5,7 +5,8 @@ Builds this project from an existing CMake build directory (MSVC + CMake).
 .DESCRIPTION
 This script:
 - Finds Visual Studio (via vswhere or fallback) and enters the MSVC dev environment.
-- Runs only `cmake --build` against an existing Build/ folder.
+- Prefers the matching CMake build preset (same path VS Code CMake Tools uses).
+- Falls back to `cmake --build <Build/...>` when `-Name` is passed explicitly.
 
 Use Setup-CMake.ps1 when you need configure/generate or dependency setup.
 
@@ -16,7 +17,13 @@ Use Setup-CMake.ps1 when you need configure/generate or dependency setup.
 .\Scripts\Build-CMake.ps1 -Config Release
 
 .EXAMPLE
+.\\Scripts\\Build-CMake.ps1 -Target RealTimePathTracing -FirstFailureOnly -StopStaleBuildProcesses
+
+.EXAMPLE
 .\Scripts\Build-CMake.ps1 -Name x64 -BuildArgs "--target RealTimePathTracing"
+
+.EXAMPLE
+.\Scripts\Build-CMake.ps1 -AllowConcurrentBuildProcesses -BuildArgs "--verbose"
 #>
 
 [CmdletBinding()]
@@ -25,37 +32,92 @@ param
     [ValidateSet('Debug', 'Release', 'RelWithDebInfo', 'MinSizeRel')]
     [string]$Config = 'Debug',
 
-    [string]$Name = 'x64',
+    [string]$Name = '',
+
+    [string]$Preset = '',
 
     [string]$VsWherePath = '',
     [string]$VsInstallPath = '',
     [string]$VsDevCmdPath = '',
 
-    [string]$BuildArgs = ''
+    [string]$BuildArgs = '',
+
+    [string]$Target = '',
+
+    [switch]$StopStaleBuildProcesses,
+    [switch]$AllowConcurrentBuildProcesses,
+    [switch]$RefreshCMakeApiReply,
+    [switch]$FirstFailureOnly,
+
+    [switch]$DryRun
 )
 
 $RepoRoot  = Resolve-Path (Join-Path $PSScriptRoot '..')
-$BuildRoot = Join-Path $RepoRoot "Build\$Name"
 
-if (-not (Test-Path -LiteralPath $BuildRoot))
+$PresetFile         = Join-Path $RepoRoot 'CMakePresets.json'
+$DefaultPresetName  = "x64-$Config"
+$UsePresetBuild     = $false
+$ResolvedBuildRoot  = $null
+$ResolvedGenerator  = ''
+
+function Get-GeneratorFromCache
 {
-    throw "Build folder not found: $BuildRoot`nRun .\Scripts\Setup-CMake.ps1 first."
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BuildRoot
+    )
+
+    $CacheFile = Join-Path $BuildRoot 'CMakeCache.txt'
+    if (-not (Test-Path -LiteralPath $CacheFile))
+    {
+        return ''
+    }
+
+    $GeneratorLine = Get-Content -LiteralPath $CacheFile | Where-Object { $_ -like 'CMAKE_GENERATOR:INTERNAL=*' } | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($GeneratorLine))
+    {
+        return ''
+    }
+
+    return ($GeneratorLine -split '=', 2)[1].Trim()
 }
 
-# Determine generator from CMake cache if available.
-$Generator = ''
-$CacheFile = Join-Path $BuildRoot 'CMakeCache.txt'
-if (Test-Path -LiteralPath $CacheFile)
+if ([string]::IsNullOrWhiteSpace($Preset))
 {
-    $GeneratorLine = Get-Content -LiteralPath $CacheFile | Where-Object { $_ -like 'CMAKE_GENERATOR:*=' } | Select-Object -First 1
-    if (-not [string]::IsNullOrWhiteSpace($GeneratorLine))
+    $Preset = $DefaultPresetName
+}
+
+if ([string]::IsNullOrWhiteSpace($Name) -and (Test-Path -LiteralPath $PresetFile))
+{
+    $PresetJson = Get-Content -LiteralPath $PresetFile -Raw | ConvertFrom-Json
+    $HasBuildPreset = @($PresetJson.buildPresets | Where-Object { $_.name -eq $Preset }).Count -gt 0
+    if ($HasBuildPreset)
     {
-        $Generator = ($GeneratorLine -split '=', 2)[1].Trim()
+        $UsePresetBuild    = $true
+        $ResolvedBuildRoot = Join-Path $RepoRoot "Build\$Preset"
+        $ResolvedGenerator = Get-GeneratorFromCache -BuildRoot $ResolvedBuildRoot
     }
 }
-if ([string]::IsNullOrWhiteSpace($Generator))
+
+if (-not $UsePresetBuild)
 {
-    $Generator = 'Ninja Multi-Config'
+    if ([string]::IsNullOrWhiteSpace($Name))
+    {
+        $Name = $DefaultPresetName
+    }
+
+    $ResolvedBuildRoot = Join-Path $RepoRoot "Build\$Name"
+
+    if (-not (Test-Path -LiteralPath $ResolvedBuildRoot))
+    {
+        throw "Build folder not found: $ResolvedBuildRoot`nRun .\Scripts\Setup-CMake.ps1 first."
+    }
+
+    $ResolvedGenerator = Get-GeneratorFromCache -BuildRoot $ResolvedBuildRoot
+    if ([string]::IsNullOrWhiteSpace($ResolvedGenerator))
+    {
+        $ResolvedGenerator = 'Ninja'
+    }
 }
 
 $ResolvedVsDevCmdPath = $null
@@ -161,16 +223,93 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue))
     throw "CMake not found in PATH. Install CMake 3.22+ and restart your terminal."
 }
 
-$BuildCmd =
-@(
-    'cmake'
-    '--build', "`"$BuildRoot`""
-    '--parallel'
-)
-
-if ($Generator -ne 'Ninja')
+try
 {
-    $BuildCmd += @('--config', $Config)
+    $ExistingBuildProcesses = @(Get-Process -Name cmake, ninja, cl, link -ErrorAction Stop)
+}
+catch
+{
+    $ExistingBuildProcesses = @()
+}
+
+if ($ExistingBuildProcesses.Count -gt 0)
+{
+    if ($StopStaleBuildProcesses)
+    {
+        Write-Host "Stopping existing build-related processes:"
+        $ExistingBuildProcesses | ForEach-Object {
+            Write-Host "  $($_.ProcessName) [$($_.Id)]"
+            Stop-Process -Id $_.Id -Force
+        }
+    }
+    elseif ($AllowConcurrentBuildProcesses)
+    {
+        Write-Warning "Continuing even though build-related processes are already running:"
+        $ExistingBuildProcesses | ForEach-Object {
+            Write-Warning "  $($_.ProcessName) [$($_.Id)]"
+        }
+    }
+    else
+    {
+        $ProcessList =
+            ($ExistingBuildProcesses |
+                ForEach-Object { "$($_.ProcessName) [$($_.Id)]" }) -join ', '
+
+        throw "Existing cmake/ninja/cl/link processes are already running: $ProcessList`nUse -StopStaleBuildProcesses to clear interrupted builds, or -AllowConcurrentBuildProcesses if you intentionally want overlap."
+    }
+}
+
+if ($RefreshCMakeApiReply)
+{
+    $ReplyDir = Join-Path $ResolvedBuildRoot '.cmake\api\v1\reply'
+    if (Test-Path -LiteralPath $ReplyDir)
+    {
+        Write-Host "Clearing CMake API reply cache: $ReplyDir"
+        Remove-Item -LiteralPath $ReplyDir -Recurse -Force
+    }
+
+    if ($UsePresetBuild)
+    {
+        $RefreshCmd = @('cmake', '--preset', $Preset)
+    }
+    else
+    {
+        $RefreshCmd = @('cmake', '-S', "`"$RepoRoot`"", '-B', "`"$ResolvedBuildRoot`"")
+    }
+}
+
+if ($UsePresetBuild)
+{
+    $BuildCmd =
+    @(
+        'cmake'
+        '--build'
+        '--preset', $Preset
+    )
+}
+else
+{
+    $BuildCmd =
+    @(
+        'cmake'
+        '--build', "`"$ResolvedBuildRoot`""
+        '--parallel'
+    )
+
+    if ($ResolvedGenerator -ne 'Ninja')
+    {
+        $BuildCmd += @('--config', $Config)
+    }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($Target))
+{
+    $BuildCmd += @('--target', $Target)
+}
+
+if ($FirstFailureOnly)
+{
+    $BuildCmd += @('--parallel', '1')
 }
 
 if (-not [string]::IsNullOrWhiteSpace($BuildArgs))
@@ -178,14 +317,43 @@ if (-not [string]::IsNullOrWhiteSpace($BuildArgs))
     $BuildCmd += $BuildArgs
 }
 
+if ($DryRun)
+{
+    $BuildCmd += @('--', '-n')
+}
+elseif ($FirstFailureOnly -and $ResolvedGenerator -eq 'Ninja')
+{
+    $BuildCmd += @('--', '-k', '1')
+}
+
 Write-Host ""
 Write-Host "RepoRoot:  $RepoRoot"
-Write-Host "BuildRoot: $BuildRoot"
-Write-Host "Generator: $Generator"
 Write-Host "Config:    $Config"
+if ($UsePresetBuild)
+{
+    Write-Host "Mode:      preset"
+    Write-Host "Preset:    $Preset"
+    Write-Host "BuildRoot: $ResolvedBuildRoot"
+}
+else
+{
+    Write-Host "Mode:      legacy"
+    Write-Host "BuildRoot: $ResolvedBuildRoot"
+    Write-Host "Generator: $ResolvedGenerator"
+}
+Write-Host "DryRun:    $DryRun"
+Write-Host "Target:    $Target"
+Write-Host "Generator: $ResolvedGenerator"
+Write-Host "FirstFail: $FirstFailureOnly"
 Write-Host ""
 
-$CmdLine = "`"$ResolvedVsDevCmdPath`" -no_logo -arch=amd64 -host_arch=amd64 && " + ($BuildCmd -join ' ')
+$CmdChain = @("`"$ResolvedVsDevCmdPath`" -no_logo -arch=amd64 -host_arch=amd64")
+if ($RefreshCMakeApiReply)
+{
+    $CmdChain += ($RefreshCmd -join ' ')
+}
+$CmdChain += ($BuildCmd -join ' ')
+$CmdLine = $CmdChain -join ' && '
 
 Write-Host "Running:"
 Write-Host "  $CmdLine"

@@ -94,6 +94,161 @@
 
 namespace nvsamples
 {
+namespace
+{
+
+bool DrawReSTIRCommonControls(ReSTIRMethodSettings& settings, const char* resamplingLabel)
+{
+  bool changed = false;
+
+  bool accumulate = settings.accumulate;
+  if(ImGui::Checkbox("Accumulate", &accumulate))
+  {
+    settings.accumulate = accumulate;
+    changed             = true;
+  }
+
+  int resamplingMode = static_cast<int>(settings.resamplingMode);
+  const char* resamplingModes[] = {"None", "Temporal", "Spatial", "Temporal + Spatial"};
+  if(ImGui::Combo(resamplingLabel, &resamplingMode, resamplingModes, IM_ARRAYSIZE(resamplingModes)))
+  {
+    settings.resamplingMode = static_cast<nvsamples::ReSTIRResamplingMode>(resamplingMode);
+    changed                 = true;
+  }
+
+  return changed;
+}
+
+bool DrawBounceLimitControl(const char* label, uint32_t& settingValue, uint32_t bounceLimit)
+{
+  int value = static_cast<int>(settingValue);
+  if(!ImGui::SliderInt(label, &value, 0, static_cast<int>(bounceLimit)))
+  {
+    return false;
+  }
+
+  settingValue = static_cast<uint32_t>(value);
+  return true;
+}
+
+void DrawTransmissionBounceHint(uint32_t bounceCount)
+{
+  if(bounceCount < 2)
+  {
+    ImGui::TextWrapped(
+        "Solid transmissive objects need at least 2 bounces to show through-lighting: one refraction to enter the shape and one more to exit it.");
+  }
+}
+
+bool DrawReSTIRTemporalControls(shaderio::ReSTIRTemporalResamplingParameters& settings)
+{
+  bool changed = false;
+
+  int maxHistoryLength = static_cast<int>(settings.maxHistoryLength);
+  if(ImGui::SliderInt("Max History Length", &maxHistoryLength, 1, 64))
+  {
+    settings.maxHistoryLength = static_cast<uint32_t>(maxHistoryLength);
+    changed                   = true;
+  }
+
+  changed |= ImGui::SliderFloat("Temporal Depth Threshold", &settings.depthThreshold, 0.0f, 1.0f, "%.3f");
+  changed |= ImGui::SliderFloat("Temporal Normal Threshold", &settings.normalThreshold, 0.0f, 1.0f, "%.2f");
+  return changed;
+}
+
+bool DrawReSTIRTemporalControls(ReSTIRDITemporalResamplingParameters& settings)
+{
+  bool changed = false;
+
+  int maxHistoryLength = static_cast<int>(settings.maxHistoryLength);
+  if(ImGui::SliderInt("Max History Length", &maxHistoryLength, 1, 64))
+  {
+    settings.maxHistoryLength = static_cast<uint32_t>(maxHistoryLength);
+    changed                   = true;
+  }
+
+  changed |= ImGui::SliderFloat("Temporal Depth Threshold", &settings.depthThreshold, 0.0f, 1.0f, "%.3f");
+  changed |= ImGui::SliderFloat("Temporal Normal Threshold", &settings.normalThreshold, 0.0f, 1.0f, "%.2f");
+  return changed;
+}
+
+bool DrawReSTIRSpatialControls(shaderio::ReSTIRSpatialResamplingParameters& settings, float maxRadius)
+{
+  bool changed = false;
+
+  int sampleCount = static_cast<int>(settings.numSpatialSamples);
+  if(ImGui::SliderInt("Spatial Sample Count", &sampleCount, 1, 32))
+  {
+    settings.numSpatialSamples = static_cast<uint32_t>(sampleCount);
+    changed                    = true;
+  }
+
+  changed |= ImGui::SliderFloat("Spatial Radius", &settings.samplingRadius, 0.0f, maxRadius, "%.1f");
+  changed |= ImGui::SliderFloat("Spatial Depth Threshold", &settings.depthThreshold, 0.0f, 1.0f, "%.3f");
+  changed |= ImGui::SliderFloat("Spatial Normal Threshold", &settings.normalThreshold, 0.0f, 1.0f, "%.2f");
+  return changed;
+}
+
+bool DrawReSTIRSpatialControls(ReSTIRDISpatialResamplingParameters& settings, float maxRadius)
+{
+  bool changed = false;
+
+  int sampleCount = static_cast<int>(settings.numSamples);
+  if(ImGui::SliderInt("Spatial Sample Count", &sampleCount, 1, 32))
+  {
+    settings.numSamples = static_cast<uint32_t>(sampleCount);
+    changed             = true;
+  }
+
+  changed |= ImGui::SliderFloat("Spatial Radius", &settings.samplingRadius, 0.0f, maxRadius, "%.1f");
+  changed |= ImGui::SliderFloat("Spatial Depth Threshold", &settings.depthThreshold, 0.0f, 1.0f, "%.3f");
+  changed |= ImGui::SliderFloat("Spatial Normal Threshold", &settings.normalThreshold, 0.0f, 1.0f, "%.2f");
+  return changed;
+}
+
+bool DrawReSTIRResamplingSection(const char* treeLabel, shaderio::ReSTIRTemporalResamplingParameters& temporalSettings,
+                                 shaderio::ReSTIRSpatialResamplingParameters& spatialSettings, float maxRadius)
+{
+  if(!ImGui::TreeNodeEx(treeLabel))
+  {
+    return false;
+  }
+
+  bool changed = false;
+  changed |= DrawReSTIRTemporalControls(temporalSettings);
+  changed |= DrawReSTIRSpatialControls(spatialSettings, maxRadius);
+  ImGui::TreePop();
+  return changed;
+}
+
+bool DrawReSTIRResamplingSection(const char* treeLabel, ReSTIRDITemporalResamplingParameters& temporalSettings,
+                                 ReSTIRDISpatialResamplingParameters& spatialSettings, float maxRadius)
+{
+  if(!ImGui::TreeNodeEx(treeLabel))
+  {
+    return false;
+  }
+
+  bool changed = false;
+  changed |= DrawReSTIRTemporalControls(temporalSettings);
+  changed |= DrawReSTIRSpatialControls(spatialSettings, maxRadius);
+  ImGui::TreePop();
+  return changed;
+}
+
+void DrawReSTIRAccumulationStatus(uint32_t accumulatedFrames)
+{
+  ImGui::Text("Accumulated Frames: %u", accumulatedFrames);
+}
+
+void DrawReSTIRMethodFooter(const char* description, uint32_t accumulatedFrames)
+{
+  ImGui::TextWrapped("%s", description);
+  DrawReSTIRAccumulationStatus(accumulatedFrames);
+}
+
+}  // namespace
+
 Application::Application(const std::shared_ptr<nvutils::CameraManipulator>& cameraManip)
   {
     if(cameraManip)
@@ -160,6 +315,11 @@ void Application::onAttach(nvapp::Application* app)
         .allocator             = &m_Allocator,
         .maxTextureDescriptors = kMaxTextureDescriptors,
     });
+    m_ReSTIRDI         = std::make_unique<nvsamples::ReSTIRDIRenderer>(nvsamples::ReSTIRDIRenderer::CreateInfo{
+        .app                   = m_App,
+        .allocator             = &m_Allocator,
+        .maxTextureDescriptors = kMaxTextureDescriptors,
+    });
     m_ReSTIRPT         = std::make_unique<nvsamples::ReSTIRPTRenderer>(nvsamples::ReSTIRPTRenderer::CreateInfo{
         .app                   = m_App,
         .allocator             = &m_Allocator,
@@ -172,6 +332,7 @@ void Application::onAttach(nvapp::Application* app)
         .samplerPool     = &m_SamplerPool,
     });
     m_PathTracer->Initialize();
+    m_ReSTIRDI->Initialize();
     m_ReSTIRPT->Initialize();
     DiscoverAssets();
     CreateScene(true);
@@ -197,6 +358,7 @@ void Application::onDetach()
     vkDestroyShaderEXT(device, m_FragmentShader, nullptr);
 
     m_PathTracer->Destroy();
+    m_ReSTIRDI->Destroy();
     m_ReSTIRPT->Destroy();
     m_SceneRuntime->Destroy();
 
@@ -228,7 +390,7 @@ void Application::onUIRender()
       if(ImGui::CollapsingHeader("Renderer", ImGuiTreeNodeFlags_DefaultOpen))
       {
         int renderMode = static_cast<int>(m_RenderMode);
-        const char* renderModes[] = {"Rasterizer", "Path Tracing", "Path Tracing ReSTIR PT"};
+        const char* renderModes[] = {"Rasterizer", "Path Tracing", "Path Tracing ReSTIR DI", "Path Tracing ReSTIR PT"};
         if(ImGui::Combo("Mode", &renderMode, renderModes, IM_ARRAYSIZE(renderModes)))
         {
           m_RenderMode = static_cast<RenderMode>(renderMode);
@@ -257,19 +419,12 @@ void Application::onUIRender()
               invalidatePathTracingHistory   = true;
             }
 
-            int maxBounces = static_cast<int>(pathTracingSettings.maxBounces);
-            if(ImGui::SliderInt("Max Bounces", &maxBounces, 0, static_cast<int>(bounceLimit)))
+            if(DrawBounceLimitControl("Max Bounces", pathTracingSettings.maxBounces, bounceLimit))
             {
-              pathTracingSettings.maxBounces = static_cast<uint32_t>(maxBounces);
               invalidatePathTracingHistory   = true;
             }
 
-            if(pathTracingSettings.maxBounces < 2)
-            {
-              ImGui::TextWrapped(
-                  "Solid transmissive objects need at least 2 bounces to show through-lighting: one refraction to enter "
-                  "the shape and one more to exit it.");
-            }
+            DrawTransmissionBounceHint(pathTracingSettings.maxBounces);
 
             ImGui::SameLine();
             if(ImGui::Button("Reset Accumulation"))
@@ -278,6 +433,110 @@ void Application::onUIRender()
             }
 
             ImGui::Text("Accumulated Frames: %u", m_PathTracer->GetAccumulatedFrameCount());
+          }
+        }
+        else if(m_RenderMode == RenderMode::ePathTracingReSTIRDI)
+        {
+          if(m_ReSTIRDI == nullptr || !m_ReSTIRDI->IsReady())
+          {
+            ImGui::TextWrapped("Path Tracing ReSTIR DI mode is present in the UI, but the renderer is not ready yet.");
+          }
+          else
+          {
+            nvsamples::ReSTIRDISettings& restirDiSettings = m_ReSTIRDI->GetSettings();
+
+            invalidatePathTracingHistory |= DrawReSTIRCommonControls(restirDiSettings.common, "Resampling##ReSTIRDI_Mode");
+            invalidatePathTracingHistory |= DrawReSTIRResamplingSection("Resampling##ReSTIRDI_Settings",
+                                                                        restirDiSettings.temporalResampling,
+                                                                        restirDiSettings.spatialResampling, 128.0f);
+
+            if(ImGui::TreeNodeEx("Initial Sampling", ImGuiTreeNodeFlags_DefaultOpen))
+            {
+              int localLightSamples = static_cast<int>(restirDiSettings.initialSampling.numLocalLightSamples);
+              if(ImGui::SliderInt("Emissive Light Samples", &localLightSamples, 0, 32))
+              {
+                restirDiSettings.initialSampling.numLocalLightSamples = static_cast<uint32_t>(localLightSamples);
+                invalidatePathTracingHistory                           = true;
+              }
+
+              if(restirDiSettings.initialSampling.numInfiniteLightSamples != 0)
+              {
+                restirDiSettings.initialSampling.numInfiniteLightSamples = 0;
+                invalidatePathTracingHistory                             = true;
+              }
+
+              int environmentSamples = static_cast<int>(restirDiSettings.initialSampling.numEnvironmentSamples);
+              if(ImGui::SliderInt("Environment Samples", &environmentSamples, 0, 8))
+              {
+                restirDiSettings.initialSampling.numEnvironmentSamples = static_cast<uint32_t>(environmentSamples);
+                invalidatePathTracingHistory                           = true;
+              }
+
+              int brdfSamples = static_cast<int>(restirDiSettings.initialSampling.numBrdfSamples);
+              if(ImGui::SliderInt("BRDF Samples", &brdfSamples, 0, 8))
+              {
+                restirDiSettings.initialSampling.numBrdfSamples = static_cast<uint32_t>(brdfSamples);
+                invalidatePathTracingHistory                     = true;
+              }
+
+              bool enableInitialVisibility = (restirDiSettings.initialSampling.enableInitialVisibility != 0);
+              if(ImGui::Checkbox("Initial Visibility", &enableInitialVisibility))
+              {
+                restirDiSettings.initialSampling.enableInitialVisibility = enableInitialVisibility ? 1u : 0u;
+                invalidatePathTracingHistory                              = true;
+              }
+
+              ImGui::TextDisabled("Initial candidates come from emissive triangles, the environment, and BRDF-guided rays.");
+
+              ImGui::TreePop();
+            }
+
+            if(ImGui::TreeNodeEx("Final Visibility"))
+            {
+              bool enableFinalVisibility = (restirDiSettings.shading.enableFinalVisibility != 0);
+              if(ImGui::Checkbox("Enable Final Visibility", &enableFinalVisibility))
+              {
+                restirDiSettings.shading.enableFinalVisibility = enableFinalVisibility ? 1u : 0u;
+                invalidatePathTracingHistory                   = true;
+              }
+
+              ImGui::BeginDisabled(!enableFinalVisibility);
+              bool reuseFinalVisibility = (restirDiSettings.shading.reuseFinalVisibility != 0);
+              if(ImGui::Checkbox("Reuse Final Visibility", &reuseFinalVisibility))
+              {
+                restirDiSettings.shading.reuseFinalVisibility = reuseFinalVisibility ? 1u : 0u;
+                invalidatePathTracingHistory                  = true;
+              }
+
+              int finalVisibilityMaxAge = static_cast<int>(restirDiSettings.shading.finalVisibilityMaxAge);
+              if(ImGui::SliderInt("Final Visibility Max Age", &finalVisibilityMaxAge, 0, 16))
+              {
+                restirDiSettings.shading.finalVisibilityMaxAge = static_cast<uint32_t>(finalVisibilityMaxAge);
+                invalidatePathTracingHistory                   = true;
+              }
+
+              invalidatePathTracingHistory |=
+                  ImGui::SliderFloat("Final Visibility Max Distance", &restirDiSettings.shading.finalVisibilityMaxDistance, 0.0f, 64.0f, "%.2f");
+              ImGui::EndDisabled();
+
+              ImGui::TreePop();
+            }
+
+            if(ImGui::TreeNodeEx("Continuation"))
+            {
+              const uint32_t bounceLimit = m_ReSTIRDI->GetPipelineBounceLimit();
+              if(DrawBounceLimitControl("Continuation Max Bounces", restirDiSettings.continuationMaxBounces, bounceLimit))
+              {
+                invalidatePathTracingHistory            = true;
+              }
+
+              ImGui::TextDisabled("Direct lighting comes from DI reservoirs, while the continuation path covers reflections and indirect transport.");
+              ImGui::TreePop();
+            }
+
+            DrawReSTIRMethodFooter(
+                "This DI mode uses ReSTIR direct-light reservoirs and a path-traced continuation for reflections and indirect transport.",
+                m_ReSTIRDI->GetAccumulatedFrameCount());
           }
         }
         else if(m_ReSTIRPT == nullptr || !m_ReSTIRPT->IsReady())
@@ -289,20 +548,10 @@ void Application::onUIRender()
           nvsamples::ReSTIRPTSettings& restirSettings = m_ReSTIRPT->GetSettings();
           const uint32_t               bounceLimit    = m_ReSTIRPT->GetPipelineBounceLimit();
 
-          bool accumulate = restirSettings.common.accumulate;
-          if(ImGui::Checkbox("Accumulate", &accumulate))
-          {
-            restirSettings.common.accumulate = accumulate;
-            invalidatePathTracingHistory = true;
-          }
-
-          int resamplingMode = static_cast<int>(restirSettings.common.resamplingMode);
-          const char* resamplingModes[] = {"None", "Temporal", "Spatial", "Temporal + Spatial"};
-          if(ImGui::Combo("Resampling", &resamplingMode, resamplingModes, IM_ARRAYSIZE(resamplingModes)))
-          {
-            restirSettings.common.resamplingMode = static_cast<nvsamples::ReSTIRResamplingMode>(resamplingMode);
-            invalidatePathTracingHistory         = true;
-          }
+          invalidatePathTracingHistory |= DrawReSTIRCommonControls(restirSettings.common, "Resampling");
+          invalidatePathTracingHistory |= DrawReSTIRResamplingSection("Resampling##ReSTIRPT_Settings",
+                                                                      restirSettings.common.temporalResampling,
+                                                                      restirSettings.common.spatialResampling, 100.0f);
 
           if(ImGui::TreeNodeEx("Baseline", ImGuiTreeNodeFlags_DefaultOpen))
           {
@@ -313,36 +562,9 @@ void Application::onUIRender()
               invalidatePathTracingHistory                            = true;
             }
 
-            int maxBounceDepth = static_cast<int>(restirSettings.common.initialSampling.maxBounceDepth);
-            if(ImGui::SliderInt("Max Bounce Depth", &maxBounceDepth, 0, static_cast<int>(bounceLimit)))
+            if(DrawBounceLimitControl("Max Bounce Depth", restirSettings.common.initialSampling.maxBounceDepth, bounceLimit))
             {
-              restirSettings.common.initialSampling.maxBounceDepth = static_cast<uint32_t>(maxBounceDepth);
               invalidatePathTracingHistory                         = true;
-            }
-
-            int maxHistoryLength = static_cast<int>(restirSettings.common.temporalResampling.maxHistoryLength);
-            if(ImGui::SliderInt("Max History Length", &maxHistoryLength, 1, 64))
-            {
-              restirSettings.common.temporalResampling.maxHistoryLength = static_cast<uint32_t>(maxHistoryLength);
-              invalidatePathTracingHistory                              = true;
-            }
-
-            invalidatePathTracingHistory |= ImGui::SliderFloat("Temporal Depth Threshold", &restirSettings.common.temporalResampling.depthThreshold,
-                                                               0.0f, 1.0f, "%.3f");
-            invalidatePathTracingHistory |= ImGui::SliderFloat("Temporal Normal Threshold", &restirSettings.common.temporalResampling.normalThreshold,
-                                                               0.0f, 1.0f, "%.2f");
-            invalidatePathTracingHistory |=
-                ImGui::SliderFloat("Spatial Radius", &restirSettings.common.spatialResampling.samplingRadius, 0.0f, 100.0f, "%.1f");
-            invalidatePathTracingHistory |= ImGui::SliderFloat("Spatial Depth Threshold", &restirSettings.common.spatialResampling.depthThreshold,
-                                                               0.0f, 1.0f, "%.3f");
-            invalidatePathTracingHistory |= ImGui::SliderFloat("Spatial Normal Threshold", &restirSettings.common.spatialResampling.normalThreshold,
-                                                               0.0f, 1.0f, "%.2f");
-
-            int numSpatialSamples = static_cast<int>(restirSettings.common.spatialResampling.numSpatialSamples);
-            if(ImGui::SliderInt("Spatial Sample Count", &numSpatialSamples, 1, 32))
-            {
-              restirSettings.common.spatialResampling.numSpatialSamples = static_cast<uint32_t>(numSpatialSamples);
-              invalidatePathTracingHistory                              = true;
             }
 
             invalidatePathTracingHistory |=
@@ -350,11 +572,7 @@ void Application::onUIRender()
             invalidatePathTracingHistory |=
                 ImGui::SliderFloat("Distance Threshold", &restirSettings.reconnection.distanceThreshold, 0.0f, 20.0f, "%.2f");
 
-            if(restirSettings.common.initialSampling.maxBounceDepth < 2)
-            {
-              ImGui::TextWrapped(
-                  "Solid transmissive objects still need at least 2 bounces to show through-lighting: one refraction to enter and one more to exit.");
-            }
+            DrawTransmissionBounceHint(restirSettings.common.initialSampling.maxBounceDepth);
 
             ImGui::TreePop();
           }
@@ -392,10 +610,9 @@ void Application::onUIRender()
             ImGui::TreePop();
           }
 
-          ImGui::TextWrapped(
-              "The baseline path tracer remains the ground truth. This mode keeps a separate ReSTIR PT implementation so "
-              "we can compare reuse behavior and quality directly.");
-          ImGui::Text("Accumulated Frames: %u", m_ReSTIRPT->GetAccumulatedFrameCount());
+          DrawReSTIRMethodFooter(
+              "The baseline path tracer remains the ground truth. This mode keeps a separate ReSTIR PT implementation so we can compare reuse behavior and quality directly.",
+              m_ReSTIRPT->GetAccumulatedFrameCount());
         }
       }
       if(ImGui::CollapsingHeader("Camera"))
@@ -407,12 +624,16 @@ void Application::onUIRender()
       {
         if(!m_SceneDefinitions.empty())
         {
-          if(ImGui::BeginCombo("Scene", m_SceneDefinitions[m_SelectedSceneIndex].label.c_str()))
+          const char* activeSceneLabel =
+              m_SceneDefinitions[m_SelectedSceneIndex].label.empty() ? "<unnamed scene>" : m_SceneDefinitions[m_SelectedSceneIndex].label.c_str();
+          if(ImGui::BeginCombo("Scene", activeSceneLabel))
           {
             for(size_t i = 0; i < m_SceneDefinitions.size(); ++i)
             {
+              ImGui::PushID(static_cast<int>(i));
               const bool selected = (m_SelectedSceneIndex == i);
-              if(ImGui::Selectable(m_SceneDefinitions[i].label.c_str(), selected))
+              const char* sceneLabel = m_SceneDefinitions[i].label.empty() ? "<unnamed scene>" : m_SceneDefinitions[i].label.c_str();
+              if(ImGui::Selectable(sceneLabel, selected))
               {
                 m_SelectedSceneIndex   = i;
                 m_SceneReloadRequested = true;
@@ -421,6 +642,7 @@ void Application::onUIRender()
               {
                 ImGui::SetItemDefaultFocus();
               }
+              ImGui::PopID();
             }
             ImGui::EndCombo();
           }
@@ -432,12 +654,16 @@ void Application::onUIRender()
 
         if(!m_HdriAssets.empty())
         {
-          if(ImGui::BeginCombo("HDRI", m_HdriAssets[m_SelectedHdriIndex].label.c_str()))
+          const char* activeHdriLabel =
+              m_HdriAssets[m_SelectedHdriIndex].label.empty() ? "<unnamed HDRI>" : m_HdriAssets[m_SelectedHdriIndex].label.c_str();
+          if(ImGui::BeginCombo("HDRI", activeHdriLabel))
           {
             for(size_t i = 0; i < m_HdriAssets.size(); ++i)
             {
+              ImGui::PushID(static_cast<int>(i));
               const bool selected = (m_SelectedHdriIndex == i);
-              if(ImGui::Selectable(m_HdriAssets[i].label.c_str(), selected))
+              const char* hdriLabel = m_HdriAssets[i].label.empty() ? "<unnamed HDRI>" : m_HdriAssets[i].label.c_str();
+              if(ImGui::Selectable(hdriLabel, selected))
               {
                 m_SelectedHdriIndex    = i;
                 m_HdriReloadRequested  = true;
@@ -446,6 +672,7 @@ void Application::onUIRender()
               {
                 ImGui::SetItemDefaultFocus();
               }
+              ImGui::PopID();
             }
             ImGui::EndCombo();
           }
@@ -476,7 +703,9 @@ void Application::onUIRender()
           }
           else
           {
-            ImGui::Text("Active HDRI: %s", m_HdriAssets[m_SelectedHdriIndex].label.c_str());
+            const char* activeHdriLabel =
+                m_HdriAssets[m_SelectedHdriIndex].label.empty() ? "<unnamed HDRI>" : m_HdriAssets[m_SelectedHdriIndex].label.c_str();
+            ImGui::Text("Active HDRI: %s", activeHdriLabel);
           }
         }
         else if(sceneInfo.useSky != 0)
@@ -562,6 +791,10 @@ void Application::onRender(VkCommandBuffer cmd)
     if(IsPathTracerRenderMode() && m_PathTracer != nullptr && m_PathTracer->IsReady())
     {
       PathTraceScene(cmd);
+    }
+    else if(IsReSTIRDIRenderMode() && m_ReSTIRDI != nullptr && m_ReSTIRDI->IsReady())
+    {
+      ReSTIRDIScene(cmd);
     }
     else if(IsReSTIRPTRenderMode() && m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
     {
@@ -707,6 +940,10 @@ void Application::UpdateTextures()
     {
       m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_PathTracer->GetDescriptorPack(), kMaxTextureDescriptors);
     }
+    if(m_ReSTIRDI != nullptr && m_ReSTIRDI->IsReady())
+    {
+      m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_ReSTIRDI->GetDescriptorPack(), kMaxTextureDescriptors);
+    }
     if(m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
     {
       m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_ReSTIRPT->GetDescriptorPack(), kMaxTextureDescriptors);
@@ -828,12 +1065,28 @@ void Application::ReSTIRPTScene(VkCommandBuffer cmd)
     });
   }
 
+void Application::ReSTIRDIScene(VkCommandBuffer cmd)
+  {
+    m_ReSTIRDI->Render(nvsamples::ReSTIRDIRenderer::RenderInput{
+        .cmd                = cmd,
+        .sceneResource      = &m_SceneRuntime->GetSceneResource(),
+        .sceneInfo          = &m_SceneRuntime->GetSceneInfo(),
+        .topLevelAS         = &m_SceneRuntime->GetTopLevelAccelerationStructure(),
+        .gBuffers           = &m_GBuffers,
+        .renderedImageIndex = eImgRendered,
+    });
+  }
+
 void Application::InvalidatePathTracingHistory()
   {
     m_SceneRuntime->InvalidateFrameHistory();
     if(m_PathTracer != nullptr && m_PathTracer->IsReady())
     {
       m_PathTracer->InvalidateAccumulation();
+    }
+    if(m_ReSTIRDI != nullptr && m_ReSTIRDI->IsReady())
+    {
+      m_ReSTIRDI->InvalidateHistory();
     }
     if(m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
     {
@@ -844,6 +1097,11 @@ void Application::InvalidatePathTracingHistory()
 bool Application::IsPathTracerRenderMode() const
   {
     return m_RenderMode == RenderMode::ePathTracing;
+  }
+
+bool Application::IsReSTIRDIRenderMode() const
+  {
+    return m_RenderMode == RenderMode::ePathTracingReSTIRDI;
   }
 
 bool Application::IsReSTIRPTRenderMode() const

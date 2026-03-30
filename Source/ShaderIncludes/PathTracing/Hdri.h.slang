@@ -87,12 +87,22 @@ float EvaluateEnvironmentLightPdf(GltfSceneInfo sceneInfo, float3 receiverNormal
   return EvaluateEnvironmentBaseLightPdf(sceneInfo, receiverNormal, direction);
 }
 
-bool SampleEnvironmentBaseLight(GltfSceneInfo sceneInfo,
-                                float3 receiverNormal,
-                                inout uint seed,
-                                out float3 lightDir,
-                                out float3 radiance,
-                                out float lightPdf)
+float2 ExpandEnvironmentJitterFromScalar(float sampleValue)
+{
+  // DI reservoirs expose two uniform samples. HDRI texel selection needs one
+  // sample for the CDF and a 2D jitter within the chosen texel, so expand the
+  // second scalar into a stable decorrelated pair.
+  const float2 jitter = frac(float2(sampleValue * 0.7548776662466927 + 0.5, sampleValue * 0.5698402909980532 + 0.25));
+  return jitter;
+}
+
+bool SampleEnvironmentBaseLightFromRandoms(GltfSceneInfo sceneInfo,
+                                           float3 receiverNormal,
+                                           float sampleSelector,
+                                           float2 sampleJitter,
+                                           out float3 lightDir,
+                                           out float3 radiance,
+                                           out float lightPdf)
 {
   radiance = float3(0.0);
   lightPdf = 0.0;
@@ -100,12 +110,11 @@ bool SampleEnvironmentBaseLight(GltfSceneInfo sceneInfo,
   if(sceneInfo.useHdrEnv != 0 && sceneInfo.environmentTextureIndex >= 0 && sceneInfo.environmentWidth > 0
      && sceneInfo.environmentHeight > 0)
   {
-    // The CPU builds a flat texel CDF, so shader sampling is just "pick texel from CDF, then jitter inside the texel".
-    const uint  texelCount = sceneInfo.environmentWidth * sceneInfo.environmentHeight;
-    const uint  index      = BinarySearchCdf(sceneInfo.environmentCdf, texelCount, NextRandom(seed));
-    const uint  x          = index % sceneInfo.environmentWidth;
-    const uint  y          = index / sceneInfo.environmentWidth;
-    const float2 uv        = (float2(float(x) + NextRandom(seed), float(y) + NextRandom(seed)))
+    const uint   texelCount = sceneInfo.environmentWidth * sceneInfo.environmentHeight;
+    const uint   index      = BinarySearchCdf(sceneInfo.environmentCdf, texelCount, sampleSelector);
+    const uint   x          = index % sceneInfo.environmentWidth;
+    const uint   y          = index / sceneInfo.environmentWidth;
+    const float2 uv         = (float2(float(x), float(y)) + frac(sampleJitter))
                       / float2(float(sceneInfo.environmentWidth), float(sceneInfo.environmentHeight));
 
     lightDir  = LatLongUvToDir(uv);
@@ -114,10 +123,20 @@ bool SampleEnvironmentBaseLight(GltfSceneInfo sceneInfo,
     return lightPdf > 0.0 && SafeMax3(radiance) > 0.0;
   }
 
-  // The fallback path keeps direct-environment lighting alive even when no HDRI importance data exists.
-  lightDir = SampleCosineHemisphereDirection(receiverNormal, seed, lightPdf);
+  lightDir = SampleCosineHemisphereDirection(receiverNormal, frac(sampleJitter), lightPdf);
   radiance = SampleEnvironment(sceneInfo, lightDir);
   return lightPdf > 0.0 && SafeMax3(radiance) > 0.0;
+}
+
+bool SampleEnvironmentBaseLight(GltfSceneInfo sceneInfo,
+                                float3 receiverNormal,
+                                inout uint seed,
+                                out float3 lightDir,
+                                out float3 radiance,
+                                out float lightPdf)
+{
+  return SampleEnvironmentBaseLightFromRandoms(sceneInfo, receiverNormal, NextRandom(seed), float2(NextRandom(seed), NextRandom(seed)),
+                                               lightDir, radiance, lightPdf);
 }
 
 #endif

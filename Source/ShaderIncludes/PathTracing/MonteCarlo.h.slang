@@ -30,11 +30,9 @@ float PdfCosineHemisphere(float3 normal, float3 direction)
   return clampedDot(normalize(normal), normalize(direction)) * kInvPi;
 }
 
-// Generates a cosine-weighted direction around the given shading normal.
-float3 SampleCosineHemisphereDirection(float3 normal, inout uint seed, out float pdf)
+float3 SampleCosineHemisphereDirection(float3 normal, float2 xi, out float pdf)
 {
   // Diffuse and sheen use the same cosine-weighted proposal because both are broad reflection lobes.
-  const float2 xi       = float2(NextRandom(seed), NextRandom(seed));
   const float3 localDir = cosineSampleHemisphere(xi.x, xi.y);
 
   float3 tangent;
@@ -44,6 +42,12 @@ float3 SampleCosineHemisphereDirection(float3 normal, inout uint seed, out float
   const float3 worldDir = normalize(tangent * localDir.x + bitangent * localDir.y + normal * localDir.z);
   pdf                   = PdfCosineHemisphere(normal, worldDir);
   return worldDir;
+}
+
+// Generates a cosine-weighted direction around the given shading normal.
+float3 SampleCosineHemisphereDirection(float3 normal, inout uint seed, out float pdf)
+{
+  return SampleCosineHemisphereDirection(normal, float2(NextRandom(seed), NextRandom(seed)), pdf);
 }
 
 float3 ImportanceSampleGGX(float alpha, float2 xi)

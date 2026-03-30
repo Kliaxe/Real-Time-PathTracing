@@ -9,8 +9,8 @@ This script:
 - Builds (and optionally installs) with Ninja.
 
 Notes:
-- Default generator is Ninja Multi-Config so outputs land in Binaries/<Config>/.
-- You can switch to single-config Ninja if you prefer, but then you must keep separate build dirs per config.
+- Default generator is single-config Ninja to match CMakePresets.json and VS Code CMake Tools.
+- Use Ninja Multi-Config only when you explicitly want the legacy Build/x64 layout.
 
 .EXAMPLE
 .\Scripts\Setup-CMake.ps1
@@ -23,6 +23,12 @@ Notes:
 
 .EXAMPLE
 .\Scripts\Setup-CMake.ps1 -CleanBuildDir -Config Debug -Build -Install
+
+.EXAMPLE
+.\Scripts\Setup-CMake.ps1 -Config Debug -Build -Target RealTimePathTracing -FirstFailureOnly -StopStaleBuildProcesses
+
+.EXAMPLE
+.\Scripts\Setup-CMake.ps1 -AllowConcurrentBuildProcesses -BuildArgs "--verbose"
 #>
 
 [CmdletBinding()]
@@ -32,7 +38,7 @@ param
     [string]$Config = 'Debug', # Build configuration (used for multi-config build/install)
 
     [ValidateSet('Ninja Multi-Config', 'Ninja')]
-    [string]$Generator = 'Ninja Multi-Config', # Preferred generator to preserve Binaries/<Config> layout
+    [string]$Generator = 'Ninja', # Preferred generator to match presets and VS Code
 
     [string]$Name = '', # Optional build folder name under Build/
 
@@ -47,7 +53,12 @@ param
 
     [string]$CMakeArgs = '',       # Extra args passed to "cmake -S -B ..."
     [string]$BuildArgs = '',       # Extra args passed to "cmake --build ..."
-    [string]$InstallArgs = ''      # Extra args passed to "cmake --install ..."
+    [string]$InstallArgs = '',     # Extra args passed to "cmake --install ..."
+    [string]$Target = '',
+
+    [switch]$StopStaleBuildProcesses,
+    [switch]$AllowConcurrentBuildProcesses,
+    [switch]$FirstFailureOnly
 )
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -192,6 +203,42 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue))
     throw "CMake not found in PATH. Install CMake 3.22+ and restart your terminal."
 }
 
+try
+{
+    $ExistingBuildProcesses = @(Get-Process -Name cmake, ninja, cl, link -ErrorAction Stop)
+}
+catch
+{
+    $ExistingBuildProcesses = @()
+}
+
+if ($ExistingBuildProcesses.Count -gt 0)
+{
+    if ($StopStaleBuildProcesses)
+    {
+        Write-Host "Stopping existing build-related processes:"
+        $ExistingBuildProcesses | ForEach-Object {
+            Write-Host "  $($_.ProcessName) [$($_.Id)]"
+            Stop-Process -Id $_.Id -Force
+        }
+    }
+    elseif ($AllowConcurrentBuildProcesses)
+    {
+        Write-Warning "Continuing even though build-related processes are already running:"
+        $ExistingBuildProcesses | ForEach-Object {
+            Write-Warning "  $($_.ProcessName) [$($_.Id)]"
+        }
+    }
+    else
+    {
+        $ProcessList =
+            ($ExistingBuildProcesses |
+                ForEach-Object { "$($_.ProcessName) [$($_.Id)]" }) -join ', '
+
+        throw "Existing cmake/ninja/cl/link processes are already running: $ProcessList`nUse -StopStaleBuildProcesses to clear interrupted builds, or -AllowConcurrentBuildProcesses if you intentionally want overlap."
+    }
+}
+
 if ($CleanBuildDir -and (Test-Path -LiteralPath $BuildRoot))
 {
     Write-Host "Deleting build folder: $BuildRoot"
@@ -236,9 +283,24 @@ if ($Generator -ne 'Ninja')
     $BuildCmd += @('--config', $Config) # Multi-config build type is chosen at build time
 }
 
+if (-not [string]::IsNullOrWhiteSpace($Target))
+{
+    $BuildCmd += @('--target', $Target)
+}
+
+if ($FirstFailureOnly)
+{
+    $BuildCmd += @('--parallel', '1')
+}
+
 if (-not [string]::IsNullOrWhiteSpace($BuildArgs))
 {
     $BuildCmd += $BuildArgs
+}
+
+if ($FirstFailureOnly -and $Generator -eq 'Ninja')
+{
+    $BuildCmd += @('--', '-k', '1')
 }
 
 # Install arguments.
@@ -268,6 +330,8 @@ Write-Host "BuildRoot:   $BuildRoot"
 Write-Host "InstallRoot: $InstallRoot"
 Write-Host "Generator:   $Generator"
 Write-Host "Config:      $Config"
+Write-Host "Target:      $Target"
+Write-Host "FirstFail:   $FirstFailureOnly"
 Write-Host ""
 
 # Join commands for cmd.exe chaining.

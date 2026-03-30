@@ -16,6 +16,12 @@ enum class ReSTIRResamplingMode : uint32_t
   eTemporalAndSpatial,
 };
 
+struct ReSTIRMethodSettings
+{
+  bool                 accumulate     = false;
+  ReSTIRResamplingMode resamplingMode = ReSTIRResamplingMode::eTemporalAndSpatial;
+};
+
 inline shaderio::ReSTIRInitialSamplingParameters GetDefaultReSTIRInitialSamplingParameters()
 {
   // The baseline starts with one candidate per pixel so later methods can
@@ -49,14 +55,8 @@ inline shaderio::ReSTIRSpatialResamplingParameters GetDefaultReSTIRSpatialResamp
   };
 }
 
-struct ReSTIRSettings
+struct ReSTIRSettings : ReSTIRMethodSettings
 {
-  // Final-image accumulation after replay. Reservoir history is tracked
-  // separately, so debugging can disable accumulation without disabling reuse.
-  bool                                       accumulate                 = false;
-  // Selects which reuse passes run between initial candidate generation and
-  // final replay.
-  ReSTIRResamplingMode                       resamplingMode             = ReSTIRResamplingMode::eTemporalAndSpatial;
   // Shared baseline knobs used by all future ReSTIR-family methods.
   shaderio::ReSTIRInitialSamplingParameters  initialSampling            = GetDefaultReSTIRInitialSamplingParameters();
   shaderio::ReSTIRTemporalResamplingParameters temporalResampling       = GetDefaultReSTIRTemporalResamplingParameters();

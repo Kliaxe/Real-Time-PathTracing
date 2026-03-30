@@ -77,6 +77,7 @@ function(setup_thesis_app)
     target_include_directories(${THESIS_TARGET} PRIVATE
         "${CMAKE_BINARY_DIR}"
         "${CMAKE_SOURCE_DIR}"
+        "${CMAKE_SOURCE_DIR}/Source/ShaderIncludes"
         "${THESIS_SOURCE_DIR}"
     )
 

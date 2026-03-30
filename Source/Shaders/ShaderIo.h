@@ -21,6 +21,8 @@
 #define SHADERIO_H
 
 #include "Common/IoGltf.h"
+#include "ReSTIR/Common/ReSTIRParameters.h"
+#include "ReSTIR/DI/ReSTIRDIParameters.h"
 
 NAMESPACE_SHADERIO_BEGIN()
 
@@ -46,6 +48,19 @@ enum ReSTIRBindingPoints
   eReSTIRPreviousSurfaceBuffer         = 9,
   eReSTIRNeighborOffsetBuffer          = 10,
   eReSTIRDebugBuffer                   = 11,
+};
+
+enum ReSTIRDIBindingPoints
+{
+  eReSTIRDITextures            = 0,
+  eReSTIRDITlas                = 1,
+  eReSTIRDIOuputImage          = 2,
+  eReSTIRDIAccumulationImage   = 3,
+  eReSTIRDILightReservoirBuffer = 4,
+  eReSTIRDICurrentSurfaceBuffer = 5,
+  eReSTIRDIPreviousSurfaceBuffer = 6,
+  eReSTIRDINeighborOffsetBuffer = 7,
+  eReSTIRDIParamsBuffer        = 8,
 };
 
 struct TutoPushConstant
@@ -79,6 +94,14 @@ enum ReSTIRFlags
   eReSTIRFlagInitialWriteToHistory = 0x10u,
   eReSTIRFlagTemporalWriteToScratch = 0x20u,
   eReSTIRFlagSpatialReadFromScratch = 0x40u,
+};
+
+enum ReSTIRDIPassType
+{
+  eReSTIRDIPassTypeInitialSampling = 0u,
+  eReSTIRDIPassTypeTemporal        = 1u,
+  eReSTIRDIPassTypeSpatial         = 2u,
+  eReSTIRDIPassTypeFinalShading    = 3u,
 };
 
 enum ReSTIRPTCandidateKind
@@ -177,6 +200,61 @@ struct ReSTIRPTPushConstant
   uint           pad0;
 };
 
+struct ReSTIRDIParameters
+{
+  ReSTIRRuntimeParameters                runtimeParams;
+  ReSTIRReservoirBufferParameters        reservoirBufferParams;
+  ReSTIRDIBufferIndices                  bufferIndices;
+  ReSTIRDIInitialSamplingParameters      initialSampling;
+  ReSTIRDITemporalResamplingParameters   temporalResampling;
+  ReSTIRDISpatialResamplingParameters    spatialResampling;
+  ReSTIRDIShadingParameters              shading;
+};
+
+struct ReSTIRDIPushConstant
+{
+  GltfSceneInfo* sceneInfoAddress;
+  uint           accumulatedFrames;
+  uint           flags;
+  uint           continuationMaxBounces;
+};
+
+struct ReSTIRDISurface
+{
+  float3 worldPosition;
+  float  linearDepth;
+  float3 shadingNormal;
+  float  roughness;
+  float3 geometricNormal;
+  float  metallic;
+  float3 tangent;
+  float  specular;
+  float3 bitangent;
+  float  specularTint;
+  float3 albedo;
+  float  transmission;
+  float3 emission;
+  float  attenuationDistance;
+  float3 attenuationColor;
+  float  volumeThickness;
+  float3 sheenColor;
+  float  refractionIndex;
+  float  clearcoat;
+  float  clearcoatRoughness;
+  float  sheenRoughness;
+  float  subsurface;
+  float  anisotropy;
+  uint   materialIndex;
+  uint   instanceIndex;
+  uint   primitiveIndex;
+  uint   isFrontFace;
+  uint   valid;
+  uint   pad2;
+  uint   pad3;
+  uint   pad4;
+  uint   pad5;
+};
+
 struct ReSTIRPTPrimarySurface
 {
   float3 worldPosition;
@@ -245,6 +323,10 @@ struct ReSTIRDebugPixel
   uint  temporalStatus;
   uint  spatialStatus;
 };
+
+CHECK_STRUCT_ALIGNMENT(ReSTIRDISurface)
+CHECK_STRUCT_ALIGNMENT(ReSTIRDIParameters)
+CHECK_STRUCT_ALIGNMENT(ReSTIRDIPushConstant)
 
 NAMESPACE_SHADERIO_END()
 
