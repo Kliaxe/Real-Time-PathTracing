@@ -166,9 +166,9 @@ struct ReSTIRTemporalResamplingParameters
   float normalThreshold;
   uint  maxHistoryLength;
   uint  maxReservoirAge;
-  uint  pad0;
-  uint  pad1;
-  uint  pad2;
+  uint  enablePermutationSampling;
+  uint  enableFallbackSampling;
+  uint  uniformRandomNumber;
 };
 
 struct ReSTIRSpatialResamplingParameters

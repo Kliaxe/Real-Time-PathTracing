@@ -593,6 +593,20 @@ void Application::onUIRender()
               invalidatePathTracingHistory                             = true;
             }
 
+            bool enablePermutationSampling = restirSettings.common.temporalResampling.enablePermutationSampling != 0;
+            if(ImGui::Checkbox("Enable Temporal Permutation Sampling", &enablePermutationSampling))
+            {
+              restirSettings.common.temporalResampling.enablePermutationSampling = enablePermutationSampling ? 1u : 0u;
+              invalidatePathTracingHistory                                       = true;
+            }
+
+            bool enableFallbackSampling = restirSettings.common.temporalResampling.enableFallbackSampling != 0;
+            if(ImGui::Checkbox("Enable Temporal Fallback Sample", &enableFallbackSampling))
+            {
+              restirSettings.common.temporalResampling.enableFallbackSampling = enableFallbackSampling ? 1u : 0u;
+              invalidatePathTracingHistory                                    = true;
+            }
+
             ImGui::TextWrapped("The thesis baseline uses fixed-threshold reconnection plus optional ray-query visibility validation.");
             ImGui::TreePop();
           }

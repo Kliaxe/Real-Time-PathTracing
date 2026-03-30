@@ -1,5 +1,41 @@
 #include "ShaderIncludes/ReSTIR/PT/Reservoir.h.slang"
 
+bool TryLoadSpatialNeighbor(uint2 viewportSize,
+                            uint2 pixelPosition,
+                            uint offsetRotation,
+                            uint sampleIndex,
+                            ReSTIRPTPrimarySurface centerSurface,
+                            out ReSTIRPTPrimarySurface neighborSurface,
+                            out ReSTIRPTReservoir neighborReservoir)
+{
+  neighborSurface   = EmptyPrimarySurface();
+  neighborReservoir = EmptyReservoir();
+
+  if(pushConst.neighborOffsetCount == 0u)
+  {
+    return false;
+  }
+
+  const uint   offsetIndex   = (sampleIndex + offsetRotation) % pushConst.neighborOffsetCount;
+  const float2 scaledOffset  = neighborOffsetBuffer[offsetIndex].offset * pushConst.spatialResampling.samplingRadius;
+  const int2   neighborPixel = int2(pixelPosition) + int2(round(scaledOffset));
+  if(!IsInsideViewport(neighborPixel, viewportSize))
+  {
+    return false;
+  }
+
+  const uint neighborPixelIndex = FlattenPixelIndex(uint2(neighborPixel), viewportSize);
+  neighborSurface               = currentSurfaceBuffer[neighborPixelIndex];
+  neighborReservoir             = LoadSpatialInputReservoir(neighborPixelIndex);
+  const float spatialDepthThreshold = max(centerSurface.linearDepth * pushConst.spatialResampling.depthThreshold, 1.0e-4);
+
+  return IsValidPrimarySurface(neighborSurface) && IsValidReservoir(neighborReservoir)
+         && neighborSurface.materialIndex == centerSurface.materialIndex
+         && abs(neighborSurface.linearDepth - centerSurface.linearDepth) <= spatialDepthThreshold
+         && dot(neighborSurface.shadingNormal, centerSurface.shadingNormal) >= pushConst.spatialResampling.normalThreshold
+         && neighborReservoir.age <= pushConst.temporalResampling.maxReservoirAge;
+}
+
 [numthreads(8, 8, 1)]
 void main(uint2 globalIndex : SV_DispatchThreadID)
 {
@@ -34,6 +70,10 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
 
   uint rng = HashUint((pushConst.rngFrameNumber + 17u) ^ pixelIndex);
   ReSTIRPTReservoir combinedReservoir = EmptyReservoir();
+  int selectedNeighborIndex           = -1;
+  float selectedJacobian              = centerJacobian;
+  uint selectedInverseStatus          = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
+  const uint offsetRotation           = pushConst.neighborOffsetCount > 0u ? (rng % pushConst.neighborOffsetCount) : 0u;
   // Spatial reuse always starts from the center pixel's own reservoir, then
   // tries to improve it with a small neighbor set.
   CombineReservoir(combinedReservoir, centerReservoir, centerReservoir.weight * max(centerReservoir.M, 1.0), max(centerReservoir.M, 1.0),
@@ -42,26 +82,9 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
   const uint sampleCount = min(pushConst.spatialResampling.numSpatialSamples, pushConst.neighborOffsetCount);
   for(uint sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
   {
-    // The precomputed offset pattern is rotated per pixel so nearby pixels do
-    // not always pick the same neighbors in the same order.
-    const uint  offsetIndex   = (sampleIndex + (rng % max(pushConst.neighborOffsetCount, 1u))) % max(pushConst.neighborOffsetCount, 1u);
-    const float2 scaledOffset = neighborOffsetBuffer[offsetIndex].offset * pushConst.spatialResampling.samplingRadius;
-    const int2  neighborPixel = int2(globalIndex) + int2(round(scaledOffset));
-    if(!IsInsideViewport(neighborPixel, viewportSize))
-    {
-      continue;
-    }
-
-    const uint neighborPixelIndex = FlattenPixelIndex(uint2(neighborPixel), viewportSize);
-    const ReSTIRPTPrimarySurface neighborSurface = currentSurfaceBuffer[neighborPixelIndex];
-    ReSTIRPTReservoir            neighborReservoir = LoadSpatialInputReservoir(neighborPixelIndex);
-    const float spatialDepthThreshold = max(centerSurface.linearDepth * pushConst.spatialResampling.depthThreshold, 1.0e-4);
-
-    if(!IsValidPrimarySurface(neighborSurface) || !IsValidReservoir(neighborReservoir)
-       || neighborSurface.materialIndex != centerSurface.materialIndex
-       || abs(neighborSurface.linearDepth - centerSurface.linearDepth) > spatialDepthThreshold
-       || dot(neighborSurface.shadingNormal, centerSurface.shadingNormal) < pushConst.spatialResampling.normalThreshold
-       || neighborReservoir.age > pushConst.temporalResampling.maxHistoryLength)
+    ReSTIRPTPrimarySurface neighborSurface = EmptyPrimarySurface();
+    ReSTIRPTReservoir      neighborReservoir = EmptyReservoir();
+    if(!TryLoadSpatialNeighbor(viewportSize, globalIndex, offsetRotation, sampleIndex, centerSurface, neighborSurface, neighborReservoir))
     {
       continue;
     }
@@ -77,12 +100,43 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
 
     // Once shifted and re-scored for the center receiver, the neighbor becomes
     // an ordinary RIS candidate.
-    CombineReservoir(combinedReservoir, neighborReservoir, neighborReservoir.weight * neighborReservoir.M, neighborReservoir.M,
-                     RandomFloat(rng), neighborReservoir.age > 0u);
-    centerJacobian = neighborJacobian;
+    if(CombineReservoir(combinedReservoir, neighborReservoir, neighborReservoir.weight * neighborReservoir.M, neighborReservoir.M,
+                        RandomFloat(rng), neighborReservoir.age > 0u))
+    {
+      selectedNeighborIndex = int(sampleIndex);
+      selectedJacobian      = neighborJacobian;
+    }
   }
 
+  float normalizationNumerator   = combinedReservoir.targetPdf;
+  float normalizationDenominator = combinedReservoir.targetPdf * max(centerReservoir.M, 1.0);
+
+  for(uint sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
+  {
+    ReSTIRPTPrimarySurface neighborSurface = EmptyPrimarySurface();
+    ReSTIRPTReservoir      neighborReservoir = EmptyReservoir();
+    if(!TryLoadSpatialNeighbor(viewportSize, globalIndex, offsetRotation, sampleIndex, centerSurface, neighborSurface, neighborReservoir))
+    {
+      continue;
+    }
+
+    float inverseJacobian = 1.0;
+    uint  inverseStatus   = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
+    ReSTIRPTReservoir selectedAtNeighbor =
+        ShiftReservoirToSurface(combinedReservoir, centerSurface, neighborSurface, sceneInfo.cameraPosition, inverseJacobian, inverseStatus);
+    const float neighborTargetPdf = IsValidReservoir(selectedAtNeighbor) ? selectedAtNeighbor.targetPdf : 0.0;
+    if(selectedNeighborIndex == int(sampleIndex))
+    {
+      normalizationNumerator = neighborTargetPdf;
+      selectedInverseStatus  = inverseStatus;
+    }
+    normalizationDenominator += neighborTargetPdf * neighborReservoir.M;
+  }
+
+  ApplyReservoirBiasCorrectionScale(combinedReservoir, normalizationNumerator, normalizationDenominator);
+
+  const uint finalStatus = (selectedNeighborIndex >= 0 && combinedReservoir.valid == 0u) ? selectedInverseStatus
+                                                                                          : uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
   currentHistoryReservoirBuffer[pixelIndex] = combinedReservoir;
-  WriteDebugPixel(pixelIndex, combinedReservoir, centerJacobian, combinedReservoir.M, debugBuffer[pixelIndex].temporalStatus,
-                  uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted));
+  WriteDebugPixel(pixelIndex, combinedReservoir, selectedJacobian, combinedReservoir.M, debugBuffer[pixelIndex].temporalStatus, finalStatus);
 }

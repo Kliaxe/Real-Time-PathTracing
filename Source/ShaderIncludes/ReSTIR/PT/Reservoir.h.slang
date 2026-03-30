@@ -73,4 +73,16 @@ float3 ResolveReservoirContribution(ReSTIRPTPrimarySurface surface, ReSTIRPTRese
   return SanitizeRadiance(radiance * reservoir.weight);
 }
 
+void ApplyReservoirBiasCorrectionScale(inout ReSTIRPTReservoir reservoir, float normalizationNumerator, float normalizationDenominator)
+{
+  if(!IsValidReservoir(reservoir) || !(normalizationNumerator > 0.0) || !(normalizationDenominator > 0.0))
+  {
+    reservoir.weight = 0.0;
+    reservoir.valid  = 0u;
+    return;
+  }
+
+  reservoir.weight *= (normalizationNumerator * reservoir.M) / normalizationDenominator;
+}
+
 #endif

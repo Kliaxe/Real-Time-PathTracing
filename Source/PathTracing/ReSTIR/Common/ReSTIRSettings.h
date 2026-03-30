@@ -37,10 +37,13 @@ inline shaderio::ReSTIRTemporalResamplingParameters GetDefaultReSTIRTemporalResa
   // Conservative defaults keep the baseline readable and stable for
   // side-by-side comparisons.
   return shaderio::ReSTIRTemporalResamplingParameters{
-      .depthThreshold  = 0.1f,
-      .normalThreshold = 0.6f,
-      .maxHistoryLength = 8u,
-      .maxReservoirAge  = 30u,
+      .depthThreshold           = 0.1f,
+      .normalThreshold          = 0.6f,
+      .maxHistoryLength         = 8u,
+      .maxReservoirAge          = 30u,
+      .enablePermutationSampling = 1u,
+      .enableFallbackSampling    = 1u,
+      .uniformRandomNumber       = 0u,
   };
 }
 

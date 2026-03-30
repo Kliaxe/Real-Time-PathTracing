@@ -1,4 +1,105 @@
 #include "ShaderIncludes/ReSTIR/PT/Reservoir.h.slang"
+#include "ReSTIR/Common/Utils/ReservoirAddressing.hlsli"
+
+int2 CalculateTemporalSampleOffset(int sampleIndex, int radius)
+{
+  sampleIndex &= 7;
+
+  const int mask2 = (sampleIndex >> 1) & 0x01;
+  const int mask4 = 1 - ((sampleIndex >> 2) & 0x01);
+  const int tmp0  = -1 + 2 * (sampleIndex & 0x01);
+  const int tmp1  = 1 - 2 * mask2;
+  const int tmp2  = mask4 | mask2;
+  const int tmp3  = mask4 | (1 - mask2);
+
+  return int2(tmp0, tmp0 * tmp1) * int2(tmp2, tmp3) * radius;
+}
+
+bool IsValidTemporalNeighborSurface(ReSTIRPTPrimarySurface currentSurface,
+                                    ReSTIRPTPrimarySurface previousSurface,
+                                    float expectedPreviousDepth,
+                                    float depthThreshold)
+{
+  return IsValidPrimarySurface(previousSurface) && previousSurface.materialIndex == currentSurface.materialIndex
+         && abs(previousSurface.linearDepth - expectedPreviousDepth) <= depthThreshold
+         && dot(previousSurface.shadingNormal, currentSurface.shadingNormal) >= pushConst.temporalResampling.normalThreshold;
+}
+
+bool FindTemporalHistoryCandidate(uint2 viewportSize,
+                                  uint2 pixelPosition,
+                                  uint pixelIndex,
+                                  ReSTIRPTPrimarySurface currentSurface,
+                                  float expectedPreviousDepth,
+                                  out ReSTIRPTPrimarySurface previousSurface,
+                                  out ReSTIRPTReservoir previousReservoir,
+                                  out uint rejectStatus)
+{
+  previousSurface    = EmptyPrimarySurface();
+  previousReservoir  = EmptyReservoir();
+  rejectStatus       = uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface);
+
+  const float3 reprojectedPixel = ReprojectWorldPositionToPixel(currentSurface.worldPosition, pushConst.sceneInfoAddress[0]);
+  const int2   previousPixel    = int2(round(reprojectedPixel.xy));
+  const float  depthThreshold   = max(expectedPreviousDepth * pushConst.temporalResampling.depthThreshold, 1.0e-4);
+  const int    radius           = 1;
+  const int    temporalSampleCount = 5;
+  const bool   enableFallbackSampling = pushConst.temporalResampling.enableFallbackSampling != 0;
+  const bool   enablePermutationSampling = pushConst.temporalResampling.enablePermutationSampling != 0;
+  const int    sampleCount         = temporalSampleCount + (enableFallbackSampling ? 1 : 0);
+  const uint   startSeed           = HashUint(pushConst.temporalResampling.uniformRandomNumber ^ pixelIndex);
+  const int    temporalSampleStartIdx = int(startSeed & 7u);
+
+  for(int sampleIdx = 0; sampleIdx < sampleCount; ++sampleIdx)
+  {
+    const bool useFallback = enableFallbackSampling && sampleIdx == temporalSampleCount;
+
+    int2 candidatePixel = previousPixel;
+    if(useFallback)
+    {
+      candidatePixel = int2(pixelPosition);
+    }
+    else if(sampleIdx > 0)
+    {
+      candidatePixel += CalculateTemporalSampleOffset(temporalSampleStartIdx + sampleIdx, radius);
+    }
+
+    if((enablePermutationSampling && sampleIdx == 0) || useFallback)
+    {
+      ApplyPermutationSampling(candidatePixel, pushConst.temporalResampling.uniformRandomNumber);
+    }
+
+    if(!IsInsideViewport(candidatePixel, viewportSize))
+    {
+      continue;
+    }
+
+    const uint candidatePixelIndex = FlattenPixelIndex(uint2(candidatePixel), viewportSize);
+    const ReSTIRPTPrimarySurface candidateSurface = previousSurfaceBuffer[candidatePixelIndex];
+    if(!IsValidTemporalNeighborSurface(currentSurface, candidateSurface, expectedPreviousDepth, depthThreshold))
+    {
+      continue;
+    }
+
+    ReSTIRPTReservoir candidateReservoir = previousHistoryReservoirBuffer[candidatePixelIndex];
+    if(!IsValidReservoir(candidateReservoir))
+    {
+      continue;
+    }
+
+    if(candidateReservoir.age >= pushConst.temporalResampling.maxReservoirAge)
+    {
+      rejectStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedHistoryAge);
+      continue;
+    }
+
+    previousSurface    = candidateSurface;
+    previousReservoir  = candidateReservoir;
+    rejectStatus       = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
+    return true;
+  }
+
+  return false;
+}
 
 [numthreads(8, 8, 1)]
 void main(uint2 globalIndex : SV_DispatchThreadID)
@@ -44,33 +145,13 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
     return;
   }
 
-  const float3 reprojectedPixel = ReprojectWorldPositionToPixel(currentSurface.worldPosition, sceneInfo);
-  const int2   previousPixel    = int2(round(reprojectedPixel.xy));
-  if(!IsInsideViewport(previousPixel, viewportSize))
-  {
-    StoreTemporalOutput(pixelIndex, currentReservoir);
-    WriteDebugPixel(pixelIndex, currentReservoir, currentJacobian, currentReservoir.valid != 0u ? 1.0 : 0.0,
-                    uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface), debugBuffer[pixelIndex].spatialStatus);
-    return;
-  }
-
-  const uint previousPixelIndex = FlattenPixelIndex(uint2(previousPixel), viewportSize);
-  const ReSTIRPTPrimarySurface previousSurface   = previousSurfaceBuffer[previousPixelIndex];
-  ReSTIRPTReservoir            previousReservoir = previousHistoryReservoirBuffer[previousPixelIndex];
-  // Depth is compared in camera-space distance form because the surface buffer
-  // stores a scalar linear depth for reuse validation.
   const float expectedPreviousDepth = length(currentSurface.worldPosition - sceneInfo.prevCameraPosition);
-  const float depthThreshold        = max(expectedPreviousDepth * pushConst.temporalResampling.depthThreshold, 1.0e-4);
-
-  if(!IsValidPrimarySurface(previousSurface) || !IsValidReservoir(previousReservoir)
-     || previousSurface.materialIndex != currentSurface.materialIndex
-     || abs(previousSurface.linearDepth - expectedPreviousDepth) > depthThreshold
-     || dot(previousSurface.shadingNormal, currentSurface.shadingNormal) < pushConst.temporalResampling.normalThreshold
-     || previousReservoir.age >= pushConst.temporalResampling.maxReservoirAge)
+  ReSTIRPTPrimarySurface previousSurface = EmptyPrimarySurface();
+  ReSTIRPTReservoir previousReservoir = EmptyReservoir();
+  uint rejectStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface);
+  if(!FindTemporalHistoryCandidate(viewportSize, globalIndex, pixelIndex, currentSurface, expectedPreviousDepth, previousSurface,
+                                   previousReservoir, rejectStatus))
   {
-    const uint rejectStatus = previousReservoir.age >= pushConst.temporalResampling.maxReservoirAge
-                                  ? uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedHistoryAge)
-                                  : uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface);
     StoreTemporalOutput(pixelIndex, currentReservoir);
     WriteDebugPixel(pixelIndex, currentReservoir, currentJacobian, currentReservoir.valid != 0u ? 1.0 : 0.0, rejectStatus,
                     debugBuffer[pixelIndex].spatialStatus);
@@ -91,15 +172,34 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
 
   uint rng = HashUint(pushConst.rngFrameNumber ^ pixelIndex);
   ReSTIRPTReservoir combinedReservoir = EmptyReservoir();
+  bool selectedPreviousSample = false;
   // RIS first inserts the current-frame candidate, then one history candidate
   // whose effective sample count is capped by the max history length.
   CombineReservoir(combinedReservoir, currentReservoir, currentReservoir.weight * max(currentReservoir.M, 1.0), max(currentReservoir.M, 1.0),
                    RandomFloat(rng), false);
 
   const float historyM = min(previousReservoir.M, float(pushConst.temporalResampling.maxHistoryLength));
-  CombineReservoir(combinedReservoir, previousReservoir, previousReservoir.weight * historyM, historyM, RandomFloat(rng), true);
+  previousReservoir.M = historyM;
+  selectedPreviousSample =
+      CombineReservoir(combinedReservoir, previousReservoir, previousReservoir.weight * historyM, historyM, RandomFloat(rng), true);
 
+  float normalizationNumerator   = combinedReservoir.targetPdf;
+  float normalizationDenominator = combinedReservoir.targetPdf * max(currentReservoir.M, 1.0);
+
+  float inverseJacobian = 1.0;
+  uint  inverseStatus   = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
+  ReSTIRPTReservoir selectedAtPrevious =
+      ShiftReservoirToSurface(combinedReservoir, currentSurface, previousSurface, sceneInfo.prevCameraPosition, inverseJacobian, inverseStatus);
+  const float temporalTargetPdf = IsValidReservoir(selectedAtPrevious) ? selectedAtPrevious.targetPdf : 0.0;
+  if(selectedPreviousSample)
+  {
+    normalizationNumerator = temporalTargetPdf;
+  }
+  normalizationDenominator += temporalTargetPdf * historyM;
+  ApplyReservoirBiasCorrectionScale(combinedReservoir, normalizationNumerator, normalizationDenominator);
+
+  const uint finalStatus = (selectedPreviousSample && combinedReservoir.valid == 0u) ? inverseStatus
+                                                                                      : uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
   StoreTemporalOutput(pixelIndex, combinedReservoir);
-  WriteDebugPixel(pixelIndex, combinedReservoir, previousJacobian, combinedReservoir.M,
-                  uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted), debugBuffer[pixelIndex].spatialStatus);
+  WriteDebugPixel(pixelIndex, combinedReservoir, previousJacobian, combinedReservoir.M, finalStatus, debugBuffer[pixelIndex].spatialStatus);
 }

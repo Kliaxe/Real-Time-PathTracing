@@ -12,6 +12,7 @@
 #include <nvvk/debug_util.hpp>
 
 #include "Common/Utils.hpp"
+#include "ReSTIR/Common/ReSTIRUtils.h"
 
 #include "_autogen/ReSTIRPTFinalShading.slang.h"
 #include "_autogen/ReSTIRPTGenerateInitialSamples.slang.h"
@@ -195,6 +196,8 @@ void ReSTIRPTRenderer::Render(const RenderInput& input)
 
   shaderio::ReSTIRInitialSamplingParameters initialSampling = m_Settings.common.initialSampling;
   initialSampling.maxBounceDepth = std::min(initialSampling.maxBounceDepth, m_PipelineBounceLimit);
+  shaderio::ReSTIRTemporalResamplingParameters temporalResampling = m_Settings.common.temporalResampling;
+  temporalResampling.uniformRandomNumber = restir::JenkinsHash(m_Context.GetFrameIndex());
 
   const shaderio::ReSTIRPTPushConstant pushConstant{
       .sceneInfoAddress            = (shaderio::GltfSceneInfo*)input.sceneResource->bSceneInfo.address,
@@ -202,7 +205,7 @@ void ReSTIRPTRenderer::Render(const RenderInput& input)
       .accumulatedFrames           = m_Settings.common.accumulate ? m_AccumulatedFrames : 0u,
       .flags                       = BuildFrameFlags(enableTemporal, enableSpatial),
       .initialSampling             = initialSampling,
-      .temporalResampling          = m_Settings.common.temporalResampling,
+      .temporalResampling          = temporalResampling,
       .spatialResampling           = m_Settings.common.spatialResampling,
       .reconnection                = m_Settings.reconnection,
       .enableVisibilityValidation  = m_Settings.common.enableVisibilityValidation ? 1u : 0u,
