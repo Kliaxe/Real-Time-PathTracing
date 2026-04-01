@@ -223,6 +223,7 @@ void ReSTIRGIRenderer::Render(const RenderInput& input)
       .bufferIndices         = m_GiContext->GetBufferIndices(),
       .temporalResampling    = m_GiContext->GetTemporalResamplingParameters(),
       .spatialResampling     = m_GiContext->GetSpatialResamplingParameters(),
+      .boilingFilter         = m_Settings.common.boilingFilter,
       .shading               = m_GiContext->GetShadingParameters(),
   };
   UpdateParameterBuffer(frameSetIndex, parameters);
@@ -301,6 +302,7 @@ void ReSTIRGIRenderer::CreateDescriptorSetLayout()
   bindings.addBinding(shaderio::ReSTIRGIBindingPoints::eReSTIRGIOutputImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRGIBindingPoints::eReSTIRGIAccumulationImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRGIBindingPoints::eReSTIRGIReservoirBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+  bindings.addBinding(shaderio::ReSTIRGIBindingPoints::eReSTIRGIInitialSampleBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRGIBindingPoints::eReSTIRGICurrentSurfaceBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRGIBindingPoints::eReSTIRGIPreviousSurfaceBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRGIBindingPoints::eReSTIRGINeighborOffsetBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
@@ -396,8 +398,9 @@ void ReSTIRGIRenderer::UpdateFrameDescriptors(const RenderInput& input)
   VkDescriptorImageInfo accumulationImageInfo = m_Resources.GetAccumulationImage().descriptor;
   accumulationImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
 
-  std::array<VkDescriptorBufferInfo, 5> bufferInfos{
+  std::array<VkDescriptorBufferInfo, 6> bufferInfos{
       VkDescriptorBufferInfo{m_Resources.GetReservoirBuffer().buffer, 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo{m_Resources.GetInitialSampleBuffer().buffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{m_Resources.GetSurfaceBuffer(currentHistoryIndex).buffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{m_Resources.GetSurfaceBuffer(previousHistoryIndex).buffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{m_Resources.GetNeighborOffsetBuffer().buffer, 0, VK_WHOLE_SIZE},
@@ -411,7 +414,7 @@ void ReSTIRGIRenderer::UpdateFrameDescriptors(const RenderInput& input)
       .pAccelerationStructures    = &accel,
   };
 
-  std::array<VkWriteDescriptorSet, 8> writes{};
+  std::array<VkWriteDescriptorSet, 9> writes{};
   uint32_t                            writeCount = 0;
 
   writes[writeCount]       = m_DescPack.makeWrite(shaderio::ReSTIRGIBindingPoints::eReSTIRGITlas, frameSetIndex);
@@ -426,8 +429,9 @@ void ReSTIRGIRenderer::UpdateFrameDescriptors(const RenderInput& input)
   writes[writeCount].pImageInfo = &accumulationImageInfo;
   ++writeCount;
 
-  const std::array<uint32_t, 4> bufferBindings{
+  const std::array<uint32_t, 5> bufferBindings{
       shaderio::ReSTIRGIBindingPoints::eReSTIRGIReservoirBuffer,
+      shaderio::ReSTIRGIBindingPoints::eReSTIRGIInitialSampleBuffer,
       shaderio::ReSTIRGIBindingPoints::eReSTIRGICurrentSurfaceBuffer,
       shaderio::ReSTIRGIBindingPoints::eReSTIRGIPreviousSurfaceBuffer,
       shaderio::ReSTIRGIBindingPoints::eReSTIRGINeighborOffsetBuffer,
@@ -441,7 +445,7 @@ void ReSTIRGIRenderer::UpdateFrameDescriptors(const RenderInput& input)
   }
 
   writes[writeCount]             = m_DescPack.makeWrite(shaderio::ReSTIRGIBindingPoints::eReSTIRGIParamsBuffer, frameSetIndex);
-  writes[writeCount].pBufferInfo = &bufferInfos[4];
+  writes[writeCount].pBufferInfo = &bufferInfos[5];
   ++writeCount;
 
   vkUpdateDescriptorSets(m_Allocator->getDevice(), writeCount, writes.data(), 0, nullptr);
@@ -450,6 +454,7 @@ void ReSTIRGIRenderer::UpdateFrameDescriptors(const RenderInput& input)
 void ReSTIRGIRenderer::ClearHistoryBuffers(VkCommandBuffer cmd)
 {
   vkCmdFillBuffer(cmd, m_Resources.GetReservoirBuffer().buffer, 0, m_Resources.GetReservoirBuffer().bufferSize, 0);
+  vkCmdFillBuffer(cmd, m_Resources.GetInitialSampleBuffer().buffer, 0, m_Resources.GetInitialSampleBuffer().bufferSize, 0);
   vkCmdFillBuffer(cmd, m_Resources.GetSurfaceBuffer(0).buffer, 0, m_Resources.GetSurfaceBuffer(0).bufferSize, 0);
   vkCmdFillBuffer(cmd, m_Resources.GetSurfaceBuffer(1).buffer, 0, m_Resources.GetSurfaceBuffer(1).bufferSize, 0);
 
@@ -463,6 +468,16 @@ void ReSTIRGIRenderer::ClearHistoryBuffers(VkCommandBuffer cmd)
           .buffer        = m_Resources.GetReservoirBuffer().buffer,
           .offset        = 0,
           .size          = m_Resources.GetReservoirBuffer().bufferSize,
+      },
+      VkBufferMemoryBarrier2{
+          .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+          .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+          .dstStageMask  = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+          .buffer        = m_Resources.GetInitialSampleBuffer().buffer,
+          .offset        = 0,
+          .size          = m_Resources.GetInitialSampleBuffer().bufferSize,
       },
       VkBufferMemoryBarrier2{
           .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,

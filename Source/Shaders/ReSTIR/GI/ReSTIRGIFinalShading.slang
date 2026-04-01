@@ -90,8 +90,42 @@ void rgenMain()
   const ReSTIRGIReservoir reservoir =
       LoadGIReservoir(giParams.reservoirBufferParams, PixelPosToReservoirPos(pixelPosition, giParams.runtimeParams.activeCheckerboardField),
                       giParams.bufferIndices.shadingInputBufferIndex);
+  const ReSTIRGIReservoir initialReservoir = giInitialSampleBuffer[pixelIndex];
 
-  float3 resolvedRadiance = ResolveGIReservoirLighting(pixelPosition, surface, reservoir);
+  float3 resolvedRadiance = GIIsSurfaceValid(surface) ? surface.baseRadiance : ReconstructGIMissRadiance(pixelPosition);
+  if(GIIsSurfaceValid(surface))
+  {
+    float3 reusedContribution = float3(0.0);
+    float3 reusedBsdf         = float3(0.0);
+    const bool hasReusedContribution = GIEvaluateReservoirContribution(surface, reservoir, true, reusedContribution, reusedBsdf);
+
+    float3 initialContribution = float3(0.0);
+    float3 initialBsdf         = float3(0.0);
+    const bool hasInitialContribution = GIEvaluateReservoirContribution(surface, initialReservoir, false, initialContribution, initialBsdf);
+
+    if(giParams.shading.enableFinalMIS != 0u && hasReusedContribution && hasInitialContribution)
+    {
+      const GISurface roughenedSurface = GIMakeFinalMISRoughenedSurface(surface);
+
+      float roughReusedPdf = 0.0;
+      float roughInitialPdf = 0.0;
+      const float3 roughReusedBsdf = GIEvaluateReservoirBsdf(roughenedSurface, reservoir, roughReusedPdf);
+      const float3 roughInitialBsdf = GIEvaluateReservoirBsdf(roughenedSurface, initialReservoir, roughInitialPdf);
+
+      const float reusedWeight  = 1.0 - GIGetFinalMISWeight(roughReusedBsdf, reusedBsdf);
+      const float initialWeight = GIGetFinalMISWeight(roughInitialBsdf, initialBsdf);
+      resolvedRadiance += reusedContribution * reusedWeight + initialContribution * initialWeight;
+    }
+    else if(hasReusedContribution)
+    {
+      resolvedRadiance += reusedContribution;
+    }
+    else if(hasInitialContribution)
+    {
+      resolvedRadiance += initialContribution;
+    }
+  }
+
   if(GIIsSurfaceValid(surface) && pushConst.continuationMaxBounces > 0u)
   {
     PathPayload payload;

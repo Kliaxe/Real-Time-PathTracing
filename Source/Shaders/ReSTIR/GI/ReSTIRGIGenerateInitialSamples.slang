@@ -55,6 +55,7 @@ void rgenMain()
   StoreGIReservoir(payload.primaryReservoir, giParams.reservoirBufferParams,
                    PixelPosToReservoirPos(launchID, giParams.runtimeParams.activeCheckerboardField),
                    giParams.bufferIndices.initialSamplingOutputBufferIndex);
+  giInitialSampleBuffer[pixelIndex] = payload.primaryReservoir;
 }
 
 [shader("miss")]
@@ -151,7 +152,7 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
       if(TraceVisibility(primarySurfaceData.worldPosition, primarySurfaceData.geometricNormal, environmentDirection))
       {
         float environmentBsdfPdf = 0.0;
-        EvaluateSurfaceBsdf(primarySurfaceData, viewDir, environmentDirection, environmentBsdfPdf);
+        EvaluateDirectLightBsdf(primarySurfaceData, viewDir, environmentDirection, environmentBsdfPdf);
         const float environmentSourcePdf = environmentPdf + environmentBsdfPdf;
         const ReSTIRGIReservoir environmentReservoir =
             MakeGIEnvironmentReservoir(environmentDirection, environmentRadiance, environmentSourcePdf);
@@ -172,10 +173,10 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
   uint   sampledLobeKind     = 0u;
   if(SampleSurfaceBsdf(primarySurfaceData, viewDir, payload.seed, bounceDir, bsdfOverPdf, directLightBsdfPdf, isTransmissionEvent,
                        sampledLobeKind)
+     && sampledLobeKind == 0u
      && abs(dot(primarySurfaceData.geometricNormal, bounceDir)) > 1.0e-6)
   {
-    float samplePdf = 0.0;
-    EvaluateSurfaceBsdf(primarySurfaceData, viewDir, bounceDir, samplePdf);
+    const float samplePdf = directLightBsdfPdf;
     if(samplePdf > 0.0)
     {
       payload.radiance                = float3(0.0);

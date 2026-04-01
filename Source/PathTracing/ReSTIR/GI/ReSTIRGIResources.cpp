@@ -28,6 +28,8 @@ void ReSTIRGIResources::Destroy()
 {
   m_Allocator->destroyBuffer(m_ReservoirBuffer);
   m_ReservoirBuffer = {};
+  m_Allocator->destroyBuffer(m_InitialSampleBuffer);
+  m_InitialSampleBuffer = {};
 
   m_SharedResources.Destroy();
   m_ReservoirBufferParameters = {};
@@ -46,6 +48,11 @@ VkExtent2D ReSTIRGIResources::GetViewportSize() const
 const nvvk::Buffer& ReSTIRGIResources::GetReservoirBuffer() const
 {
   return m_ReservoirBuffer;
+}
+
+const nvvk::Buffer& ReSTIRGIResources::GetInitialSampleBuffer() const
+{
+  return m_InitialSampleBuffer;
 }
 
 const nvvk::Buffer& ReSTIRGIResources::GetSurfaceBuffer(uint32_t historyIndex) const
@@ -93,11 +100,14 @@ void ReSTIRGIResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
       VkDeviceSize(m_ReservoirBufferParameters.reservoirArrayPitch) * VkDeviceSize(restir::c_NumReSTIRGIReservoirBuffers);
   const VkDeviceSize reservoirBufferSize = reservoirElementCount * sizeof(shaderio::ReSTIRGIReservoir);
   const VkDeviceSize pixelCount          = VkDeviceSize(viewportSize.width) * VkDeviceSize(viewportSize.height);
+  const VkDeviceSize initialSampleBufferSize = pixelCount * sizeof(shaderio::ReSTIRGIReservoir);
   const VkDeviceSize surfaceBufferSize   = pixelCount * sizeof(shaderio::ReSTIRGIPrimarySurface);
 
   m_SharedResources.EnsureForViewport(viewportSize, surfaceBufferSize);
   ScheduleBufferDestroy(m_ReservoirBuffer);
+  ScheduleBufferDestroy(m_InitialSampleBuffer);
   m_ReservoirBuffer = CreateStorageBuffer(reservoirBufferSize, "ReSTIRGIReservoirBuffer");
+  m_InitialSampleBuffer = CreateStorageBuffer(initialSampleBufferSize, "ReSTIRGIInitialSampleBuffer");
 }
 
 void ReSTIRGIResources::ScheduleBufferDestroy(nvvk::Buffer buffer)

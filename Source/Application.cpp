@@ -116,6 +116,20 @@ bool DrawReSTIRCommonControls(ReSTIRMethodSettings& settings, const char* resamp
     changed                 = true;
   }
 
+  bool enableBoilingFilter = settings.boilingFilter.enableBoilingFilter != 0u;
+  if(ImGui::Checkbox("Boiling Filter", &enableBoilingFilter))
+  {
+    settings.boilingFilter.enableBoilingFilter = enableBoilingFilter ? 1u : 0u;
+    changed                                    = true;
+  }
+
+  ImGui::BeginDisabled(!enableBoilingFilter);
+  if(ImGui::SliderFloat("Boiling Filter Strength", &settings.boilingFilter.boilingFilterStrength, 0.0f, 1.0f, "%.2f"))
+  {
+    changed = true;
+  }
+  ImGui::EndDisabled();
+
   return changed;
 }
 
@@ -640,7 +654,15 @@ void Application::onUIRender()
                 invalidatePathTracingHistory                   = true;
               }
 
-              ImGui::TextDisabled("GI reuses one secondary indirect sample and optionally rechecks its visibility at the primary surface.");
+              bool enableFinalMIS = (restirGiSettings.shading.enableFinalMIS != 0u);
+              if(ImGui::Checkbox("Enable Final MIS", &enableFinalMIS))
+              {
+                restirGiSettings.shading.enableFinalMIS = enableFinalMIS ? 1u : 0u;
+                invalidatePathTracingHistory            = true;
+              }
+
+              ImGui::TextDisabled(
+                  "GI reuses one secondary indirect sample, can recheck reused visibility at the primary surface, and can blend the reused result with the original initial sample.");
               ImGui::TreePop();
             }
 
@@ -743,6 +765,13 @@ void Application::onUIRender()
               if(ImGui::Combo("Debug View", &debugView, debugViews, IM_ARRAYSIZE(debugViews)))
               {
                 restirSettings.common.debugView = static_cast<shaderio::ReSTIRDebugView>(debugView);
+              }
+
+              bool enableReplayFinalShading = restirSettings.enableReplayFinalShading;
+              if(ImGui::Checkbox("Use Replay Final Shading", &enableReplayFinalShading))
+              {
+                restirSettings.enableReplayFinalShading = enableReplayFinalShading;
+                invalidatePathTracingHistory            = true;
               }
 
               ImGui::TreePop();

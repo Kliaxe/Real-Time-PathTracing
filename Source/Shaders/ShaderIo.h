@@ -71,10 +71,11 @@ enum ReSTIRGIBindingPoints
   eReSTIRGIOutputImage          = 2,
   eReSTIRGIAccumulationImage    = 3,
   eReSTIRGIReservoirBuffer      = 4,
-  eReSTIRGICurrentSurfaceBuffer = 5,
-  eReSTIRGIPreviousSurfaceBuffer = 6,
-  eReSTIRGINeighborOffsetBuffer = 7,
-  eReSTIRGIParamsBuffer         = 8,
+  eReSTIRGIInitialSampleBuffer  = 5,
+  eReSTIRGICurrentSurfaceBuffer = 6,
+  eReSTIRGIPreviousSurfaceBuffer = 7,
+  eReSTIRGINeighborOffsetBuffer = 8,
+  eReSTIRGIParamsBuffer         = 9,
 };
 
 struct TutoPushConstant
@@ -212,12 +213,13 @@ struct ReSTIRPTPushConstant
   ReSTIRInitialSamplingParameters     initialSampling;
   ReSTIRTemporalResamplingParameters  temporalResampling;
   ReSTIRSpatialResamplingParameters   spatialResampling;
+  ReSTIRBoilingFilterParameters       boilingFilter;
   ReSTIRPTReconnectionParameters      reconnection;
   uint           enableVisibilityValidation;
   uint           neighborOffsetCount;
   uint           debugView;
   uint           pathTraceInvocationType;
-  uint           pad0;
+  uint           enableReplayFinalShading;
 };
 
 struct ReSTIRDIParameters
@@ -228,6 +230,7 @@ struct ReSTIRDIParameters
   ReSTIRDIInitialSamplingParameters      initialSampling;
   ReSTIRDITemporalResamplingParameters   temporalResampling;
   ReSTIRDISpatialResamplingParameters    spatialResampling;
+  ReSTIRBoilingFilterParameters          boilingFilter;
   ReSTIRDIShadingParameters              shading;
 };
 
@@ -246,6 +249,7 @@ struct ReSTIRGIParameters
   ReSTIRGIBufferIndices                bufferIndices;
   ReSTIRGITemporalResamplingParameters temporalResampling;
   ReSTIRGISpatialResamplingParameters  spatialResampling;
+  ReSTIRBoilingFilterParameters        boilingFilter;
   ReSTIRGIShadingParameters            shading;
 };
 
@@ -322,8 +326,9 @@ struct ReSTIRPTPrimarySurface
   uint   isFrontFace;
   uint   valid;
   uint   pad0;
+  uint   pad1;
   float3 baseRadiance;
-  float  pad1;
+  float  pad2;
 };
 
 struct ReSTIRGIPrimarySurface
@@ -415,6 +420,9 @@ CHECK_STRUCT_ALIGNMENT(ReSTIRGIPrimarySurface)
 CHECK_STRUCT_ALIGNMENT(ReSTIRGIReservoir)
 CHECK_STRUCT_ALIGNMENT(ReSTIRGIParameters)
 CHECK_STRUCT_ALIGNMENT(ReSTIRGIPushConstant)
+CHECK_STRUCT_ALIGNMENT(ReSTIRPTPrimarySurface)
+CHECK_STRUCT_ALIGNMENT(ReSTIRPTReservoir)
+CHECK_STRUCT_ALIGNMENT(ReSTIRPTPushConstant)
 
 NAMESPACE_SHADERIO_END()
 

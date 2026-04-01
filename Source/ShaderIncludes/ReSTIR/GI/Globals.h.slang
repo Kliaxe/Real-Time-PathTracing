@@ -14,6 +14,7 @@
 [[vk::binding(ReSTIRGIBindingPoints::eReSTIRGIOutputImage)]] RWTexture2D<float4> outImage;
 [[vk::binding(ReSTIRGIBindingPoints::eReSTIRGIAccumulationImage)]] RWTexture2D<float4> accumulationImage;
 [[vk::binding(ReSTIRGIBindingPoints::eReSTIRGIReservoirBuffer)]] RWStructuredBuffer<ReSTIRGIReservoir> giReservoirBuffer;
+[[vk::binding(ReSTIRGIBindingPoints::eReSTIRGIInitialSampleBuffer)]] RWStructuredBuffer<ReSTIRGIReservoir> giInitialSampleBuffer;
 [[vk::binding(ReSTIRGIBindingPoints::eReSTIRGICurrentSurfaceBuffer)]] RWStructuredBuffer<ReSTIRGIPrimarySurface> currentSurfaceBuffer;
 [[vk::binding(ReSTIRGIBindingPoints::eReSTIRGIPreviousSurfaceBuffer)]] StructuredBuffer<ReSTIRGIPrimarySurface> previousSurfaceBuffer;
 [[vk::binding(ReSTIRGIBindingPoints::eReSTIRGINeighborOffsetBuffer)]] StructuredBuffer<float2> giNeighborOffsetBuffer;

@@ -207,11 +207,13 @@ void ReSTIRPTRenderer::Render(const RenderInput& input)
       .initialSampling             = initialSampling,
       .temporalResampling          = temporalResampling,
       .spatialResampling           = m_Settings.common.spatialResampling,
+      .boilingFilter               = m_Settings.common.boilingFilter,
       .reconnection                = m_Settings.reconnection,
       .enableVisibilityValidation  = m_Settings.common.enableVisibilityValidation ? 1u : 0u,
       .neighborOffsetCount         = m_Resources.GetNeighborOffsetCount(),
       .debugView                   = static_cast<uint32_t>(m_Settings.common.debugView),
       .pathTraceInvocationType     = shaderio::eReSTIRPTPathTraceInvocationTypeNone,
+      .enableReplayFinalShading    = m_Settings.enableReplayFinalShading ? 1u : 0u,
   };
 
   RunInitialSamplingPass(input, pushConstant);

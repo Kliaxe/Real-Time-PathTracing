@@ -231,6 +231,7 @@ void ReSTIRDIRenderer::Render(const RenderInput& input)
       .initialSampling       = m_DiContext->GetInitialSamplingParameters(),
       .temporalResampling    = m_DiContext->GetTemporalResamplingParameters(),
       .spatialResampling     = m_DiContext->GetSpatialResamplingParameters(),
+      .boilingFilter         = m_Settings.common.boilingFilter,
       .shading               = m_DiContext->GetShadingParameters(),
   };
   UpdateParameterBuffer(frameSetIndex, parameters);

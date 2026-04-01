@@ -23,9 +23,9 @@ ReSTIRGITemporalResamplingParameters GetDefaultReSTIRGITemporalResamplingParams(
   params.depthThreshold            = 0.1f;
   params.normalThreshold           = 0.6f;
   params.maxHistoryLength          = 8u;
-  params.enableFallbackSampling    = 1u;
+  params.enableFallbackSampling    = 0u;
   params.biasCorrectionMode        = ReSTIRGIBiasCorrectionMode::Basic;
-  params.maxReservoirAge           = 30u;
+  params.maxReservoirAge           = 1u;
   params.enablePermutationSampling = 0u;
   params.uniformRandomNumber       = 0u;
   return params;
@@ -46,6 +46,7 @@ ReSTIRGIShadingParameters GetDefaultReSTIRGIShadingParams()
 {
   ReSTIRGIShadingParameters params = {};
   params.enableFinalVisibility = 1u;
+  params.enableFinalMIS        = 1u;
   return params;
 }
 

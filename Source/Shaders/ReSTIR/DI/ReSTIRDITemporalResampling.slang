@@ -1,10 +1,28 @@
 #include "ShaderIncludes/ReSTIR/DI/Globals.h.slang"
 #include "ShaderIncludes/ReSTIR/DI/Lighting.h.slang"
 #include "ShaderIncludes/ReSTIR/Common/Common.h.slang"
+#define RESTIR_ENABLE_BOILING_FILTER
+#define RESTIR_BOILING_FILTER_GROUP_SIZE 8
+#include "ReSTIR/Common/BoilingFilter.hlsli"
 #include "ReSTIR/DI/TemporalResampling.hlsli"
 
+ReSTIRDIReservoir ApplyDIBoilingFilter(uint2 localIndex, ReSTIRDIReservoir reservoir)
+{
+  if(diParams.boilingFilter.enableBoilingFilter == 0u || diParams.boilingFilter.boilingFilterStrength <= 0.0 || !IsValidDIReservoir(reservoir))
+  {
+    return reservoir;
+  }
+
+  if(ReSTIRBoilingFilterInternal(localIndex, diParams.boilingFilter.boilingFilterStrength, reservoir.weightSum))
+  {
+    return EmptyDIReservoir();
+  }
+
+  return reservoir;
+}
+
 [numthreads(8, 8, 1)]
-void main(uint3 dispatchThreadID : SV_DispatchThreadID)
+void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThreadID)
 {
   const uint2 pixelPosition = dispatchThreadID.xy;
   const uint2 viewportSize  = uint2(pushConst.sceneInfoAddress[0].viewportSize);
@@ -32,7 +50,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
   const float3 previousPixelAndDepth    = ReprojectWorldPositionToPixel(surface.worldPosition, sceneInfo);
   if(previousPixelAndDepth.x < 0.0 || previousPixelAndDepth.y < 0.0)
   {
-    StoreDIReservoir(currentReservoir, diParams.reservoirBufferParams,
+    const ReSTIRDIReservoir filteredReservoir = ApplyDIBoilingFilter(groupThreadID.xy, currentReservoir);
+    StoreDIReservoir(filteredReservoir, diParams.reservoirBufferParams,
                      PixelPosToReservoirPos(pixelPosition, diParams.runtimeParams.activeCheckerboardField),
                      diParams.bufferIndices.temporalResamplingOutputBufferIndex);
     return;
@@ -50,8 +69,9 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                                     diParams.reservoirBufferParams, screenSpaceMotion,
                                     diParams.bufferIndices.temporalResamplingInputBufferIndex, diParams.temporalResampling,
                                     temporalSamplePixelPos, selectedLightSample);
+  const ReSTIRDIReservoir filteredReservoir = ApplyDIBoilingFilter(groupThreadID.xy, temporalReservoir);
 
-  StoreDIReservoir(temporalReservoir, diParams.reservoirBufferParams,
+  StoreDIReservoir(filteredReservoir, diParams.reservoirBufferParams,
                    PixelPosToReservoirPos(pixelPosition, diParams.runtimeParams.activeCheckerboardField),
                    diParams.bufferIndices.temporalResamplingOutputBufferIndex);
 }

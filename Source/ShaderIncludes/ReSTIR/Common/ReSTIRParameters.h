@@ -96,6 +96,14 @@ struct ReSTIRReservoirBufferParameters
     uint32_t pad2;
 };
 
+struct ReSTIRBoilingFilterParameters
+{
+    uint32_t enableBoilingFilter;
+    float boilingFilterStrength;
+    uint32_t pad1;
+    uint32_t pad2;
+};
+
 struct ReSTIRPackedDIReservoir
 {
     uint32_t lightData;

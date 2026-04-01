@@ -31,6 +31,7 @@ public:
 
   VkExtent2D                             GetViewportSize() const;
   const nvvk::Buffer&                    GetReservoirBuffer() const;
+  const nvvk::Buffer&                    GetInitialSampleBuffer() const;
   const nvvk::Buffer&                    GetSurfaceBuffer(uint32_t historyIndex) const;
   const nvvk::Buffer&                    GetNeighborOffsetBuffer() const;
   const nvvk::Image&                     GetAccumulationImage() const;
@@ -46,6 +47,7 @@ private:
   nvvk::ResourceAllocator*        m_Allocator = nullptr;
   ReSTIRSharedResources           m_SharedResources;
   nvvk::Buffer                    m_ReservoirBuffer;
+  nvvk::Buffer                    m_InitialSampleBuffer;
   ReSTIRReservoirBufferParameters m_ReservoirBufferParameters{};
 };
 

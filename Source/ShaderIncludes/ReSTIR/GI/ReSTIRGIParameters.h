@@ -68,7 +68,7 @@ struct ReSTIRGISpatialResamplingParameters
 struct ReSTIRGIShadingParameters
 {
   uint32_t enableFinalVisibility;
-  uint32_t pad1;
+  uint32_t enableFinalMIS;
   uint32_t pad2;
   uint32_t pad3;
 };

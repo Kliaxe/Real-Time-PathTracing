@@ -22,6 +22,9 @@ struct ReSTIRPTSettings
   // PT-specific receiver compatibility thresholds used before shifting a
   // reused candidate onto the current receiver.
   shaderio::ReSTIRPTReconnectionParameters reconnection = GetDefaultReSTIRPTReconnectionParameters();
+  // Debug switch that lets us compare cached-reservoir resolve against full
+  // path replay without changing the reuse passes themselves.
+  bool                                     enableReplayFinalShading = true;
 };
 
 }  // namespace nvsamples

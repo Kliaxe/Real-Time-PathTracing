@@ -1,5 +1,25 @@
 #include "ShaderIncludes/ReSTIR/PT/Reservoir.h.slang"
+#include "ShaderIncludes/ReSTIR/PT/Common.h.slang"
+#define RESTIR_ENABLE_BOILING_FILTER
+#define RESTIR_BOILING_FILTER_GROUP_SIZE 8
+#include "ReSTIR/Common/BoilingFilter.hlsli"
 #include "ReSTIR/Common/Utils/ReservoirAddressing.hlsli"
+
+ReSTIRPTReservoir ApplyPTBoilingFilter(uint2 localIndex, ReSTIRPTReservoir reservoir)
+{
+  if(pushConst.boilingFilter.enableBoilingFilter == 0u || pushConst.boilingFilter.boilingFilterStrength <= 0.0 || !IsValidReservoir(reservoir))
+  {
+    return reservoir;
+  }
+
+  const float reservoirWeight = reservoir.targetPdf * reservoir.weight;
+  if(ReSTIRBoilingFilterInternal(localIndex, pushConst.boilingFilter.boilingFilterStrength, reservoirWeight))
+  {
+    return EmptyReservoir();
+  }
+
+  return reservoir;
+}
 
 int2 CalculateTemporalSampleOffset(int sampleIndex, int radius)
 {
@@ -102,7 +122,7 @@ bool FindTemporalHistoryCandidate(uint2 viewportSize,
 }
 
 [numthreads(8, 8, 1)]
-void main(uint2 globalIndex : SV_DispatchThreadID)
+void main(uint2 globalIndex : SV_DispatchThreadID, uint2 localIndex : SV_GroupThreadID)
 {
   const GltfSceneInfo sceneInfo    = pushConst.sceneInfoAddress[0];
   const uint2         viewportSize = uint2(sceneInfo.viewportSize);
@@ -117,6 +137,7 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
   ReSTIRPTReservoir currentReservoir = initialReservoirBuffer[pixelIndex];
   if(!HasTemporalHistory())
   {
+    currentReservoir = ApplyPTBoilingFilter(localIndex, currentReservoir);
     StoreTemporalOutput(pixelIndex, currentReservoir);
     WriteDebugPixel(pixelIndex, currentReservoir, 1.0, currentReservoir.valid != 0u ? 1.0 : 0.0,
                     uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedNoHistory), debugBuffer[pixelIndex].spatialStatus);
@@ -126,6 +147,7 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
   const ReSTIRPTPrimarySurface currentSurface = currentSurfaceBuffer[pixelIndex];
   if(!IsValidPrimarySurface(currentSurface))
   {
+    currentReservoir = ApplyPTBoilingFilter(localIndex, currentReservoir);
     StoreTemporalOutput(pixelIndex, currentReservoir);
     WriteDebugPixel(pixelIndex, currentReservoir, 1.0, 0.0, uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface),
                     debugBuffer[pixelIndex].spatialStatus);
@@ -140,6 +162,7 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
                                              currentStatus);
   if(currentReservoir.valid == 0)
   {
+    currentReservoir = ApplyPTBoilingFilter(localIndex, currentReservoir);
     StoreTemporalOutput(pixelIndex, currentReservoir);
     WriteDebugPixel(pixelIndex, currentReservoir, currentJacobian, 0.0, currentStatus, debugBuffer[pixelIndex].spatialStatus);
     return;
@@ -152,6 +175,7 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
   if(!FindTemporalHistoryCandidate(viewportSize, globalIndex, pixelIndex, currentSurface, expectedPreviousDepth, previousSurface,
                                    previousReservoir, rejectStatus))
   {
+    currentReservoir = ApplyPTBoilingFilter(localIndex, currentReservoir);
     StoreTemporalOutput(pixelIndex, currentReservoir);
     WriteDebugPixel(pixelIndex, currentReservoir, currentJacobian, currentReservoir.valid != 0u ? 1.0 : 0.0, rejectStatus,
                     debugBuffer[pixelIndex].spatialStatus);
@@ -164,6 +188,7 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
                                               previousStatus);
   if(previousReservoir.valid == 0)
   {
+    currentReservoir = ApplyPTBoilingFilter(localIndex, currentReservoir);
     StoreTemporalOutput(pixelIndex, currentReservoir);
     WriteDebugPixel(pixelIndex, currentReservoir, previousJacobian, currentReservoir.valid != 0u ? 1.0 : 0.0, previousStatus,
                     debugBuffer[pixelIndex].spatialStatus);
@@ -200,6 +225,7 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
 
   const uint finalStatus = (selectedPreviousSample && combinedReservoir.valid == 0u) ? inverseStatus
                                                                                       : uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
+  combinedReservoir = ApplyPTBoilingFilter(localIndex, combinedReservoir);
   StoreTemporalOutput(pixelIndex, combinedReservoir);
   WriteDebugPixel(pixelIndex, combinedReservoir, previousJacobian, combinedReservoir.M, finalStatus, debugBuffer[pixelIndex].spatialStatus);
 }

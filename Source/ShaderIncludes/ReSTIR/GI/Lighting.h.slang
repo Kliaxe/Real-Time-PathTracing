@@ -28,6 +28,15 @@
 typedef ReSTIRGIPrimarySurface GISurface;
 typedef uint                   GIMaterial;
 
+static const float kGIFinalMISMaxBsdfValue = 1.0e4;
+static const float kGIFinalMISRoughness    = 0.3;
+
+float3 GIEvaluateReservoirBsdf(GISurface surface, ReSTIRGIReservoir reservoir, out float samplePdf);
+GISurface GIMakeFinalMISRoughenedSurface(GISurface surface);
+float GIGetFinalMISWeight(float3 roughBsdf, float3 trueBsdf);
+bool GIEvaluateReservoirContribution(GISurface surface, ReSTIRGIReservoir reservoir, bool applyFinalVisibility, out float3 contribution,
+                                     out float3 bsdf);
+
 GISurface EmptyGIPrimarySurface()
 {
   return (GISurface)0;
@@ -202,20 +211,8 @@ GISurface GILoadGBufferSurface(int2 pixelPosition, bool previousFrame)
 
 float GIGetSampleTargetPdfForSurface(ReSTIRGIReservoir reservoir, GISurface surface)
 {
-  if(!GIIsSurfaceValid(surface))
-  {
-    return 0.0;
-  }
-
-  const SurfaceData unpackedSurface = UnpackGIPrimarySurface(surface);
-  const float3      viewDirection   = normalize(pushConst.sceneInfoAddress[0].cameraPosition - surface.worldPosition);
-  const float3      incidentDirection = GIGetReservoirIncidentDirection(surface, reservoir);
-  if(dot(incidentDirection, incidentDirection) <= 1.0e-8)
-  {
-    return 0.0;
-  }
-  float             samplePdf       = 0.0;
-  const float3      brdf            = EvaluateSurfaceBsdf(unpackedSurface, viewDirection, incidentDirection, samplePdf);
+  float  samplePdf = 0.0;
+  const float3 brdf = GIEvaluateReservoirBsdf(surface, reservoir, samplePdf);
   return ReSTIRLuminance(max(brdf * reservoir.sampleRadiance, float3(0.0)));
 }
 
@@ -275,6 +272,71 @@ float3 ReconstructGIMissRadiance(uint2 pixelPosition)
   return SampleEnvironment(sceneInfo, worldDirection);
 }
 
+float3 GIEvaluateReservoirBsdf(GISurface surface, ReSTIRGIReservoir reservoir, out float samplePdf)
+{
+  if(!GIIsSurfaceValid(surface))
+  {
+    samplePdf = 0.0;
+    return float3(0.0);
+  }
+
+  const float3 incidentDirection = GIGetReservoirIncidentDirection(surface, reservoir);
+  if(dot(incidentDirection, incidentDirection) <= 1.0e-8)
+  {
+    samplePdf = 0.0;
+    return float3(0.0);
+  }
+
+  const SurfaceData unpackedSurface = UnpackGIPrimarySurface(surface);
+  const float3      viewDirection   = normalize(pushConst.sceneInfoAddress[0].cameraPosition - surface.worldPosition);
+
+  // ReSTIR GI owns only the broad first-bounce indirect estimator. Glossy /
+  // glass / clearcoat transport is handled by the hybrid continuation path.
+  return EvaluateDirectLightBsdf(unpackedSurface, viewDirection, incidentDirection, samplePdf);
+}
+
+GISurface GIMakeFinalMISRoughenedSurface(GISurface surface)
+{
+  GISurface roughened = surface;
+  roughened.roughness = max(roughened.roughness, kGIFinalMISRoughness);
+  return roughened;
+}
+
+float GIGetFinalMISWeight(float3 roughBsdf, float3 trueBsdf)
+{
+  const float3 clampedRoughBsdf = clamp(roughBsdf, 1.0e-4, kGIFinalMISMaxBsdfValue);
+  const float3 clampedTrueBsdf  = clamp(trueBsdf, 0.0, kGIFinalMISMaxBsdfValue);
+  const float  weight           = saturate(ReSTIRLuminance(clampedTrueBsdf) / ReSTIRLuminance(clampedTrueBsdf + clampedRoughBsdf));
+  return weight * weight * weight;
+}
+
+bool GIEvaluateReservoirContribution(GISurface surface, ReSTIRGIReservoir reservoir, bool applyFinalVisibility, out float3 contribution,
+                                     out float3 bsdf)
+{
+  contribution = float3(0.0);
+  bsdf         = float3(0.0);
+  if(!IsValidGIReservoir(reservoir))
+  {
+    return false;
+  }
+
+  float samplePdf = 0.0;
+  bsdf            = GIEvaluateReservoirBsdf(surface, reservoir, samplePdf);
+  if(samplePdf <= 0.0 || SafeMax3(bsdf) <= 0.0)
+  {
+    return false;
+  }
+
+  float3 visibility = float3(1.0);
+  if(applyFinalVisibility && giParams.shading.enableFinalVisibility != 0u)
+  {
+    visibility = GIGetConservativeVisibility(surface, reservoir) ? float3(1.0) : float3(0.0);
+  }
+
+  contribution = max(bsdf * reservoir.sampleRadiance, float3(0.0)) * visibility * reservoir.weightSum;
+  return true;
+}
+
 float3 ResolveGIReservoirLighting(uint2 pixelPosition, GISurface surface, ReSTIRGIReservoir reservoir)
 {
   if(!GIIsSurfaceValid(surface))
@@ -283,28 +345,14 @@ float3 ResolveGIReservoirLighting(uint2 pixelPosition, GISurface surface, ReSTIR
   }
 
   float3 radiance = surface.baseRadiance;
-  if(!IsValidGIReservoir(reservoir))
+
+  float3 contribution = float3(0.0);
+  float3 bsdf         = float3(0.0);
+  if(GIEvaluateReservoirContribution(surface, reservoir, true, contribution, bsdf))
   {
-    return radiance;
+    radiance += contribution;
   }
 
-  float3 visibility = float3(1.0);
-  if(giParams.shading.enableFinalVisibility != 0u)
-  {
-    visibility = GIGetConservativeVisibility(surface, reservoir) ? float3(1.0) : float3(0.0);
-  }
-
-  const float3 incidentDirection = GIGetReservoirIncidentDirection(surface, reservoir);
-  if(dot(incidentDirection, incidentDirection) <= 1.0e-8)
-  {
-    return radiance;
-  }
-
-  const SurfaceData unpackedSurface = UnpackGIPrimarySurface(surface);
-  const float3 viewDirection        = normalize(pushConst.sceneInfoAddress[0].cameraPosition - surface.worldPosition);
-  float samplePdf                   = 0.0;
-  const float3 bsdf                 = EvaluateSurfaceBsdf(unpackedSurface, viewDirection, incidentDirection, samplePdf);
-  radiance += max(bsdf * reservoir.sampleRadiance, float3(0.0)) * visibility * reservoir.weightSum;
   return SanitizeRadiance(radiance);
 }
 

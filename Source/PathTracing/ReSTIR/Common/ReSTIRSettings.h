@@ -7,6 +7,14 @@
 namespace nvsamples
 {
 
+inline ReSTIRBoilingFilterParameters GetDefaultReSTIRBoilingFilterParameters()
+{
+  return ReSTIRBoilingFilterParameters{
+      .enableBoilingFilter   = 1u,
+      .boilingFilterStrength = 0.2f,
+  };
+}
+
 // Shared ReSTIR resampling topology used by all thesis methods.
 enum class ReSTIRResamplingMode : uint32_t
 {
@@ -20,6 +28,7 @@ struct ReSTIRMethodSettings
 {
   bool                 accumulate     = false;
   ReSTIRResamplingMode resamplingMode = ReSTIRResamplingMode::eTemporalAndSpatial;
+  ReSTIRBoilingFilterParameters boilingFilter = GetDefaultReSTIRBoilingFilterParameters();
 };
 
 inline shaderio::ReSTIRInitialSamplingParameters GetDefaultReSTIRInitialSamplingParameters()
