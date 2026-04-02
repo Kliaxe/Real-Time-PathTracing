@@ -23,7 +23,9 @@ inline ReSTIRDITemporalResamplingParameters GetDefaultReSTIRDITemporalParameters
 
 inline ReSTIRDISpatialResamplingParameters GetDefaultReSTIRDISpatialParameters()
 {
-  return restir::GetDefaultReSTIRDISpatialResamplingParams();
+  ReSTIRDISpatialResamplingParameters parameters = restir::GetDefaultReSTIRDISpatialResamplingParams();
+  parameters.samplingRadius = 10.0f;
+  return parameters;
 }
 
 inline ReSTIRDIShadingParameters GetDefaultReSTIRDIShadingParameters()

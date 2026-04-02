@@ -15,10 +15,21 @@ inline shaderio::ReSTIRPTReconnectionParameters GetDefaultReSTIRPTReconnectionPa
   };
 }
 
+inline ReSTIRSettings GetDefaultReSTIRPTSettings()
+{
+  ReSTIRSettings settings = {};
+  // The local RTXDI PT reference keeps fallback sampling on but defaults
+  // permutation sampling to off.
+  settings.temporalResampling.enablePermutationSampling = 0u;
+  settings.temporalResampling.maxReservoirAge           = 1u;
+  settings.spatialResampling.samplingRadius             = 10.0f;
+  return settings;
+}
+
 struct ReSTIRPTSettings
 {
   // Shared baseline knobs that future ReSTIR methods can inherit unchanged.
-  ReSTIRSettings                           common;
+  ReSTIRSettings                           common = GetDefaultReSTIRPTSettings();
   // PT-specific receiver compatibility thresholds used before shifting a
   // reused candidate onto the current receiver.
   shaderio::ReSTIRPTReconnectionParameters reconnection = GetDefaultReSTIRPTReconnectionParameters();

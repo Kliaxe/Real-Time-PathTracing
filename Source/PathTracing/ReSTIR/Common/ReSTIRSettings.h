@@ -50,7 +50,7 @@ inline shaderio::ReSTIRTemporalResamplingParameters GetDefaultReSTIRTemporalResa
       .depthThreshold           = 0.1f,
       .normalThreshold          = 0.6f,
       .maxHistoryLength         = 8u,
-      .maxReservoirAge          = 30u,
+      .maxReservoirAge          = 1u,
       .enablePermutationSampling = 1u,
       .enableFallbackSampling    = 1u,
       .uniformRandomNumber       = 0u,
@@ -62,7 +62,7 @@ inline shaderio::ReSTIRSpatialResamplingParameters GetDefaultReSTIRSpatialResamp
   // One spatial sample keeps the baseline close to the canonical minimal form.
   return shaderio::ReSTIRSpatialResamplingParameters{
       .numSpatialSamples = 1u,
-      .samplingRadius    = 32.0f,
+      .samplingRadius    = 10.0f,
       .normalThreshold   = 0.6f,
       .depthThreshold    = 0.1f,
   };

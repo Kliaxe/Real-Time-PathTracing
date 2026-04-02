@@ -8,12 +8,16 @@ namespace nvsamples
 
 inline ReSTIRGITemporalResamplingParameters GetDefaultReSTIRGITemporalParameters()
 {
-  return restir::GetDefaultReSTIRGITemporalResamplingParams();
+  ReSTIRGITemporalResamplingParameters parameters = restir::GetDefaultReSTIRGITemporalResamplingParams();
+  parameters.maxReservoirAge = 1u;
+  return parameters;
 }
 
 inline ReSTIRGISpatialResamplingParameters GetDefaultReSTIRGISpatialParameters()
 {
-  return restir::GetDefaultReSTIRGISpatialResamplingParams();
+  ReSTIRGISpatialResamplingParameters parameters = restir::GetDefaultReSTIRGISpatialResamplingParams();
+  parameters.samplingRadius = 10.0f;
+  return parameters;
 }
 
 inline ReSTIRGIShadingParameters GetDefaultReSTIRGIShadingParameters()

@@ -48,6 +48,10 @@ struct ReSTIRRenderInput
 
 struct ReSTIRHistorySignature
 {
+  glm::mat4                     viewProjMatrix{};
+  glm::mat4                     projInvMatrix{};
+  glm::mat4                     viewInvMatrix{};
+  glm::vec3                     cameraPosition{};
   int                           useSky                  = 0;
   int                           useHdrEnv               = 0;
   int                           environmentTextureIndex = -1;
@@ -64,6 +68,10 @@ inline ReSTIRHistorySignature MakeReSTIRHistorySignature(const shaderio::GltfSce
                                                          VkExtent2D viewportSize)
 {
   ReSTIRHistorySignature signature{};
+  signature.viewProjMatrix          = sceneInfo.viewProjMatrix;
+  signature.projInvMatrix           = sceneInfo.projInvMatrix;
+  signature.viewInvMatrix           = sceneInfo.viewInvMatrix;
+  signature.cameraPosition          = sceneInfo.cameraPosition;
   signature.useSky                  = sceneInfo.useSky;
   signature.useHdrEnv               = sceneInfo.useHdrEnv;
   signature.environmentTextureIndex = sceneInfo.environmentTextureIndex;
