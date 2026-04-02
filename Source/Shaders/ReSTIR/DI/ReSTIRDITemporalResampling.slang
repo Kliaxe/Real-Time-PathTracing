@@ -1,5 +1,6 @@
 #include "ShaderIncludes/ReSTIR/DI/Globals.h.slang"
 #include "ShaderIncludes/ReSTIR/DI/Lighting.h.slang"
+#include "ShaderIncludes/ReSTIR/DI/Debug.h.slang"
 #include "ShaderIncludes/ReSTIR/Common/Common.h.slang"
 #define RESTIR_ENABLE_BOILING_FILTER
 #define RESTIR_BOILING_FILTER_GROUP_SIZE 8
@@ -40,9 +41,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
 
   if(!DIIsSurfaceValid(surface))
   {
-    StoreDIReservoir(EmptyDIReservoir(), diParams.reservoirBufferParams,
+    const ReSTIRDIReservoir emptyReservoir = EmptyDIReservoir();
+    StoreDIReservoir(emptyReservoir, diParams.reservoirBufferParams,
                      PixelPosToReservoirPos(pixelPosition, diParams.runtimeParams.activeCheckerboardField),
                      diParams.bufferIndices.temporalResamplingOutputBufferIndex);
+    WriteDIDebugPixel(pixelIndex, emptyReservoir, 1.0, 0.0, uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface),
+                      debugBuffer[pixelIndex].spatialStatus);
     return;
   }
 
@@ -54,6 +58,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
     StoreDIReservoir(filteredReservoir, diParams.reservoirBufferParams,
                      PixelPosToReservoirPos(pixelPosition, diParams.runtimeParams.activeCheckerboardField),
                      diParams.bufferIndices.temporalResamplingOutputBufferIndex);
+    WriteDIDebugPixel(pixelIndex, filteredReservoir, 1.0, filteredReservoir.M, uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedNoHistory),
+                      debugBuffer[pixelIndex].spatialStatus);
     return;
   }
 
@@ -74,4 +80,16 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
   StoreDIReservoir(filteredReservoir, diParams.reservoirBufferParams,
                    PixelPosToReservoirPos(pixelPosition, diParams.runtimeParams.activeCheckerboardField),
                    diParams.bufferIndices.temporalResamplingOutputBufferIndex);
+
+  uint temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusNone);
+  if(diParams.runtimeParams.frameIndex == 0u)
+  {
+    temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedNoHistory);
+  }
+  else if(filteredReservoir.age > currentReservoir.age)
+  {
+    temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
+  }
+
+  WriteDIDebugPixel(pixelIndex, filteredReservoir, 1.0, filteredReservoir.M, temporalStatus, debugBuffer[pixelIndex].spatialStatus);
 }

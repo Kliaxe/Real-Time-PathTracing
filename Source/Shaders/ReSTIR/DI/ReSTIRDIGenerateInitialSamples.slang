@@ -3,6 +3,7 @@
 #include "ShaderIncludes/ReSTIR/DI/Globals.h.slang"
 #include "ShaderIncludes/PathTracing/Intersection.h.slang"
 #include "ShaderIncludes/ReSTIR/DI/Lighting.h.slang"
+#include "ShaderIncludes/ReSTIR/DI/Debug.h.slang"
 #include "ReSTIR/DI/InitialSampling.hlsli"
 
 struct DIPrimaryPayload
@@ -36,6 +37,8 @@ void rgenMain()
   StoreDIReservoir(payload.reservoir, diParams.reservoirBufferParams,
                    PixelPosToReservoirPos(launchID, diParams.runtimeParams.activeCheckerboardField),
                    diParams.bufferIndices.initialSamplingOutputBufferIndex);
+  WriteDIDebugPixel(pixelIndex, payload.reservoir, 1.0, payload.reservoir.M, uint(ReSTIRShiftStatus::eReSTIRShiftStatusNone),
+                    uint(ReSTIRShiftStatus::eReSTIRShiftStatusNone));
 }
 
 [shader("miss")]

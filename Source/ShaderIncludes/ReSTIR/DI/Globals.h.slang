@@ -16,5 +16,6 @@
 [[vk::binding(ReSTIRDIBindingPoints::eReSTIRDIPreviousSurfaceBuffer)]] StructuredBuffer<ReSTIRDISurface> previousSurfaceBuffer;
 [[vk::binding(ReSTIRDIBindingPoints::eReSTIRDINeighborOffsetBuffer)]] StructuredBuffer<float2> diNeighborOffsetBuffer;
 [[vk::binding(ReSTIRDIBindingPoints::eReSTIRDIParamsBuffer)]] ConstantBuffer<ReSTIRDIParameters> diParams;
+[[vk::binding(ReSTIRDIBindingPoints::eReSTIRDIDebugBuffer)]] RWStructuredBuffer<ReSTIRDebugPixel> debugBuffer;
 
 #endif

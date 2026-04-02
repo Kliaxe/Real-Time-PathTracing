@@ -133,6 +133,20 @@ bool DrawReSTIRCommonControls(ReSTIRMethodSettings& settings, const char* resamp
   return changed;
 }
 
+bool DrawReSTIRDebugViewControl(shaderio::ReSTIRDebugView& debugView, const char* methodTagLabel)
+{
+  int view = static_cast<int>(debugView);
+  const char* debugViews[] = {"Disabled", methodTagLabel, "Target PDF", "Reservoir Weight", "Reservoir Age",
+                              "Temporal Status", "Spatial Status", "Shift Jacobian", "Reuse Count"};
+  if(!ImGui::Combo("Debug View", &view, debugViews, IM_ARRAYSIZE(debugViews)))
+  {
+    return false;
+  }
+
+  debugView = static_cast<shaderio::ReSTIRDebugView>(view);
+  return true;
+}
+
 bool DrawBounceLimitControl(const char* label, uint32_t& settingValue, uint32_t bounceLimit)
 {
   int value = static_cast<int>(settingValue);
@@ -646,6 +660,12 @@ void Application::onUIRender()
               ImGui::TreePop();
             }
 
+            if(ImGui::TreeNodeEx("Debug"))
+            {
+              DrawReSTIRDebugViewControl(restirDiSettings.common.debugView, "Light Kind");
+              ImGui::TreePop();
+            }
+
             DrawReSTIRMethodFooter(
                 "This DI mode uses ReSTIR direct-light reservoirs and a path-traced continuation for reflections and indirect transport.",
               m_ReSTIRDI->GetAccumulatedFrameCount());
@@ -696,6 +716,12 @@ void Application::onUIRender()
               }
 
               ImGui::TextDisabled("Indirect lighting comes from GI reservoirs, while the continuation path covers glossy reflections and further transport.");
+              ImGui::TreePop();
+            }
+
+            if(ImGui::TreeNodeEx("Debug"))
+            {
+              DrawReSTIRDebugViewControl(restirGiSettings.common.debugView, "Sample Kind");
               ImGui::TreePop();
             }
 
@@ -759,21 +785,7 @@ void Application::onUIRender()
 
             if(ImGui::TreeNodeEx("Debug"))
             {
-              int debugView = static_cast<int>(restirSettings.common.debugView);
-              const char* debugViews[] = {"Disabled", "Candidate Kind", "Target PDF", "Reservoir Weight", "Reservoir Age",
-                                          "Temporal Status", "Spatial Status", "Shift Jacobian", "Reuse Count"};
-              if(ImGui::Combo("Debug View", &debugView, debugViews, IM_ARRAYSIZE(debugViews)))
-              {
-                restirSettings.common.debugView = static_cast<shaderio::ReSTIRDebugView>(debugView);
-              }
-
-              bool enableReplayFinalShading = restirSettings.enableReplayFinalShading;
-              if(ImGui::Checkbox("Use Replay Final Shading", &enableReplayFinalShading))
-              {
-                restirSettings.enableReplayFinalShading = enableReplayFinalShading;
-                invalidatePathTracingHistory            = true;
-              }
-
+              DrawReSTIRDebugViewControl(restirSettings.common.debugView, "Candidate Kind");
               ImGui::TreePop();
             }
 

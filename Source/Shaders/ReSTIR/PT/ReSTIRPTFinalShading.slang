@@ -43,31 +43,23 @@ void rgenMain()
     const ReSTIRPTReservoir reservoir = currentHistoryReservoirBuffer[pixelIndex];
     if(IsValidReservoir(reservoir))
     {
-      if(pushConst.enableReplayFinalShading == 0u)
+      float3 worldDirection = float3(0.0);
+      PathPayload payload;
+      if(InitializeReplayPayload(payload, primarySurface, reservoir, worldDirection))
       {
-        resolvedRadiance = primarySurface.baseRadiance
-                           + ResolveReservoirContribution(primarySurface, reservoir, sceneInfo.cameraPosition);
-      }
-      else
-      {
-        float3 worldDirection = float3(0.0);
-        PathPayload payload;
-        if(InitializeReplayPayload(payload, primarySurface, reservoir, worldDirection))
-        {
-          const float3 originNormal = SelectOffsetNormal(primarySurface.geometricNormal, worldDirection);
+        const float3 originNormal = SelectOffsetNormal(primarySurface.geometricNormal, worldDirection);
 
-          RayDesc bounceRay;
-          bounceRay.Origin    = OffsetRay(primarySurface.worldPosition, originNormal);
-          bounceRay.Direction = worldDirection;
-          bounceRay.TMin      = 0.001;
-          bounceRay.TMax      = kRayTMax;
+        RayDesc bounceRay;
+        bounceRay.Origin    = OffsetRay(primarySurface.worldPosition, originNormal);
+        bounceRay.Direction = worldDirection;
+        bounceRay.TMin      = 0.001;
+        bounceRay.TMax      = kRayTMax;
 
-          TraceRay(topLevelAS, 0, 0xFF, 0, 0, 0, bounceRay, payload);
-          // The replay payload starts from base radiance, so only the suffix is
-          // scaled by the final reservoir weight here.
-          const float3 replayedContinuation = max(payload.radiance - primarySurface.baseRadiance, float3(0.0));
-          resolvedRadiance = primarySurface.baseRadiance + replayedContinuation * reservoir.weight;
-        }
+        TraceRay(topLevelAS, 0, 0xFF, 0, 0, 0, bounceRay, payload);
+        // The replay payload starts from base radiance, so only the suffix is
+        // scaled by the final reservoir weight here.
+        const float3 replayedContinuation = max(payload.radiance - primarySurface.baseRadiance, float3(0.0));
+        resolvedRadiance = primarySurface.baseRadiance + replayedContinuation * reservoir.weight;
       }
     }
   }

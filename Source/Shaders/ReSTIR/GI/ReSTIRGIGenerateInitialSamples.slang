@@ -21,6 +21,7 @@
 #include "ShaderIncludes/PathTracing/Intersection.h.slang"
 #include "ShaderIncludes/PathTracing/DirectLighting.h.slang"
 #include "ShaderIncludes/ReSTIR/GI/Lighting.h.slang"
+#include "ShaderIncludes/ReSTIR/GI/Debug.h.slang"
 
 [shader("raygeneration")]
 void rgenMain()
@@ -56,6 +57,8 @@ void rgenMain()
                    PixelPosToReservoirPos(launchID, giParams.runtimeParams.activeCheckerboardField),
                    giParams.bufferIndices.initialSamplingOutputBufferIndex);
   giInitialSampleBuffer[pixelIndex] = payload.primaryReservoir;
+  WriteGIDebugPixel(pixelIndex, currentSurfaceBuffer[pixelIndex], payload.primaryReservoir, 1.0, payload.primaryReservoir.M,
+                    uint(ReSTIRShiftStatus::eReSTIRShiftStatusNone), uint(ReSTIRShiftStatus::eReSTIRShiftStatusNone));
 }
 
 [shader("miss")]

@@ -28,6 +28,8 @@ void ReSTIRDIResources::Destroy()
 {
   m_Allocator->destroyBuffer(m_LightReservoirBuffer);
   m_LightReservoirBuffer = {};
+  m_Allocator->destroyBuffer(m_DebugBuffer);
+  m_DebugBuffer = {};
 
   m_SharedResources.Destroy();
   m_ReservoirBufferParameters = {};
@@ -56,6 +58,11 @@ const nvvk::Buffer& ReSTIRDIResources::GetSurfaceBuffer(uint32_t historyIndex) c
 const nvvk::Buffer& ReSTIRDIResources::GetNeighborOffsetBuffer() const
 {
   return m_SharedResources.GetNeighborOffsetBuffer();
+}
+
+const nvvk::Buffer& ReSTIRDIResources::GetDebugBuffer() const
+{
+  return m_DebugBuffer;
 }
 
 const nvvk::Image& ReSTIRDIResources::GetAccumulationImage() const
@@ -94,10 +101,13 @@ void ReSTIRDIResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
   const VkDeviceSize reservoirBufferSize = reservoirElementCount * sizeof(ReSTIRPackedDIReservoir);
   const VkDeviceSize pixelCount          = VkDeviceSize(viewportSize.width) * VkDeviceSize(viewportSize.height);
   const VkDeviceSize surfaceBufferSize   = pixelCount * sizeof(shaderio::ReSTIRDISurface);
+  const VkDeviceSize debugBufferSize     = pixelCount * sizeof(shaderio::ReSTIRDebugPixel);
 
   m_SharedResources.EnsureForViewport(viewportSize, surfaceBufferSize);
   ScheduleBufferDestroy(m_LightReservoirBuffer);
+  ScheduleBufferDestroy(m_DebugBuffer);
   m_LightReservoirBuffer = CreateStorageBuffer(reservoirBufferSize, "ReSTIRDILightReservoirBuffer");
+  m_DebugBuffer          = CreateStorageBuffer(debugBufferSize, "ReSTIRDIDebugBuffer");
 }
 
 void ReSTIRDIResources::ScheduleBufferDestroy(nvvk::Buffer buffer)

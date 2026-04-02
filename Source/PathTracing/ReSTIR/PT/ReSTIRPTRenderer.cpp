@@ -213,7 +213,6 @@ void ReSTIRPTRenderer::Render(const RenderInput& input)
       .neighborOffsetCount         = m_Resources.GetNeighborOffsetCount(),
       .debugView                   = static_cast<uint32_t>(m_Settings.common.debugView),
       .pathTraceInvocationType     = shaderio::eReSTIRPTPathTraceInvocationTypeNone,
-      .enableReplayFinalShading    = m_Settings.enableReplayFinalShading ? 1u : 0u,
   };
 
   RunInitialSamplingPass(input, pushConstant);

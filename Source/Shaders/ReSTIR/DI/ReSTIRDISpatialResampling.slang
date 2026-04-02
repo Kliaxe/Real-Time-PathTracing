@@ -1,5 +1,6 @@
 #include "ShaderIncludes/ReSTIR/DI/Globals.h.slang"
 #include "ShaderIncludes/ReSTIR/DI/Lighting.h.slang"
+#include "ShaderIncludes/ReSTIR/DI/Debug.h.slang"
 #include "ReSTIR/DI/SpatialResampling.hlsli"
 
 [numthreads(8, 8, 1)]
@@ -21,9 +22,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
   if(!DIIsSurfaceValid(surface))
   {
-    StoreDIReservoir(EmptyDIReservoir(), diParams.reservoirBufferParams,
+    const ReSTIRDIReservoir emptyReservoir = EmptyDIReservoir();
+    StoreDIReservoir(emptyReservoir, diParams.reservoirBufferParams,
                      PixelPosToReservoirPos(pixelPosition, diParams.runtimeParams.activeCheckerboardField),
                      diParams.bufferIndices.spatialResamplingOutputBufferIndex);
+    WriteDIDebugPixel(pixelIndex, emptyReservoir, 1.0, 0.0, debugBuffer[pixelIndex].temporalStatus,
+                      uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface));
     return;
   }
 
@@ -37,4 +41,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
   StoreDIReservoir(spatialReservoir, diParams.reservoirBufferParams,
                    PixelPosToReservoirPos(pixelPosition, diParams.runtimeParams.activeCheckerboardField),
                    diParams.bufferIndices.spatialResamplingOutputBufferIndex);
+
+  const bool selectedNeighbor = spatialReservoir.lightData != centerReservoir.lightData || spatialReservoir.uvData != centerReservoir.uvData
+                                || spatialReservoir.age != centerReservoir.age;
+  const uint spatialStatus = selectedNeighbor ? uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted)
+                                              : uint(ReSTIRShiftStatus::eReSTIRShiftStatusNone);
+  WriteDIDebugPixel(pixelIndex, spatialReservoir, 1.0, spatialReservoir.M, debugBuffer[pixelIndex].temporalStatus, spatialStatus);
 }

@@ -29,6 +29,7 @@ struct ReSTIRMethodSettings
   bool                 accumulate     = false;
   ReSTIRResamplingMode resamplingMode = ReSTIRResamplingMode::eTemporalAndSpatial;
   ReSTIRBoilingFilterParameters boilingFilter = GetDefaultReSTIRBoilingFilterParameters();
+  shaderio::ReSTIRDebugView      debugView     = shaderio::eReSTIRDebugViewDisabled;
 };
 
 inline shaderio::ReSTIRInitialSamplingParameters GetDefaultReSTIRInitialSamplingParameters()
@@ -76,8 +77,6 @@ struct ReSTIRSettings : ReSTIRMethodSettings
   // Compute-stage visibility checks use ray queries and can be disabled for
   // controlled estimator comparisons.
   bool                                       enableVisibilityValidation = true;
-  // Shared debug slot so future ReSTIR methods can present the same UI hook.
-  shaderio::ReSTIRDebugView                  debugView                  = shaderio::eReSTIRDebugViewDisabled;
 };
 
 }  // namespace nvsamples

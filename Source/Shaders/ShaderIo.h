@@ -62,6 +62,7 @@ enum ReSTIRDIBindingPoints
   eReSTIRDIPreviousSurfaceBuffer = 6,
   eReSTIRDINeighborOffsetBuffer = 7,
   eReSTIRDIParamsBuffer        = 8,
+  eReSTIRDIDebugBuffer         = 9,
 };
 
 enum ReSTIRGIBindingPoints
@@ -76,6 +77,7 @@ enum ReSTIRGIBindingPoints
   eReSTIRGIPreviousSurfaceBuffer = 7,
   eReSTIRGINeighborOffsetBuffer = 8,
   eReSTIRGIParamsBuffer         = 9,
+  eReSTIRGIDebugBuffer          = 10,
 };
 
 struct TutoPushConstant
@@ -219,7 +221,6 @@ struct ReSTIRPTPushConstant
   uint           neighborOffsetCount;
   uint           debugView;
   uint           pathTraceInvocationType;
-  uint           enableReplayFinalShading;
 };
 
 struct ReSTIRDIParameters
@@ -240,6 +241,7 @@ struct ReSTIRDIPushConstant
   uint           accumulatedFrames;
   uint           flags;
   uint           continuationMaxBounces;
+  uint           debugView;
 };
 
 struct ReSTIRGIParameters
@@ -259,6 +261,7 @@ struct ReSTIRGIPushConstant
   uint           accumulatedFrames;
   uint           flags;
   uint           continuationMaxBounces;
+  uint           debugView;
 };
 
 struct ReSTIRDISurface

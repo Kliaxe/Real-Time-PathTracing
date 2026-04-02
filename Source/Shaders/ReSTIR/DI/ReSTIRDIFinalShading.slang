@@ -5,6 +5,7 @@
 #include "ShaderIncludes/PathTracing/Common.h.slang"
 #include "ShaderIncludes/PathTracing/Continuation.h.slang"
 #include "ShaderIncludes/ReSTIR/DI/Lighting.h.slang"
+#include "ShaderIncludes/ReSTIR/DI/Debug.h.slang"
 
 bool TraceHybridDIContinuation(SurfaceData surface, inout PathPayload payload)
 {
@@ -73,7 +74,9 @@ void rgenMain()
   }
 
   resolvedRadiance = SanitizeRadiance(resolvedRadiance);
-  if((pushConst.flags & uint(ReSTIRFlags::eReSTIRFlagAccumulate)) != 0 && pushConst.accumulatedFrames > 0)
+  resolvedRadiance = VisualizeReSTIRDIDebug(pixelIndex, resolvedRadiance);
+  if(pushConst.debugView == uint(ReSTIRDebugView::eReSTIRDebugViewDisabled)
+     && (pushConst.flags & uint(ReSTIRFlags::eReSTIRFlagAccumulate)) != 0 && pushConst.accumulatedFrames > 0)
   {
     const float3 previousAverage = accumulationImage[int2(pixelPosition)].xyz;
     const float historyWeight    = float(pushConst.accumulatedFrames);

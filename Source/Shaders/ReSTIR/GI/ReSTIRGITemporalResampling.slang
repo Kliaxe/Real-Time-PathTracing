@@ -2,6 +2,7 @@
 #define RESTIR_GI_ENABLE_FINAL_VISIBILITY 0
 #include "ShaderIncludes/ReSTIR/GI/Globals.h.slang"
 #include "ShaderIncludes/ReSTIR/GI/Lighting.h.slang"
+#include "ShaderIncludes/ReSTIR/GI/Debug.h.slang"
 #define RESTIR_ENABLE_BOILING_FILTER
 #define RESTIR_BOILING_FILTER_GROUP_SIZE 8
 #include "ReSTIR/Common/BoilingFilter.hlsli"
@@ -42,9 +43,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
 
   if(!GIIsSurfaceValid(surface))
   {
-    StoreGIReservoir(EmptyGIReservoir(), giParams.reservoirBufferParams,
+    const ReSTIRGIReservoir emptyReservoir = EmptyGIReservoir();
+    StoreGIReservoir(emptyReservoir, giParams.reservoirBufferParams,
                      PixelPosToReservoirPos(pixelPosition, giParams.runtimeParams.activeCheckerboardField),
                      giParams.bufferIndices.temporalResamplingOutputBufferIndex);
+    WriteGIDebugPixel(pixelIndex, surface, emptyReservoir, 1.0, 0.0, uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface),
+                      debugBuffer[pixelIndex].spatialStatus);
     return;
   }
 
@@ -56,6 +60,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
     StoreGIReservoir(filteredReservoir, giParams.reservoirBufferParams,
                      PixelPosToReservoirPos(pixelPosition, giParams.runtimeParams.activeCheckerboardField),
                      giParams.bufferIndices.temporalResamplingOutputBufferIndex);
+    WriteGIDebugPixel(pixelIndex, surface, filteredReservoir, 1.0, filteredReservoir.M,
+                      uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedNoHistory), debugBuffer[pixelIndex].spatialStatus);
     return;
   }
 
@@ -75,4 +81,16 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
   StoreGIReservoir(filteredReservoir, giParams.reservoirBufferParams,
                    PixelPosToReservoirPos(pixelPosition, giParams.runtimeParams.activeCheckerboardField),
                    giParams.bufferIndices.temporalResamplingOutputBufferIndex);
+
+  uint temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusNone);
+  if(giParams.runtimeParams.frameIndex == 0u)
+  {
+    temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedNoHistory);
+  }
+  else if(filteredReservoir.age > currentReservoir.age)
+  {
+    temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
+  }
+
+  WriteGIDebugPixel(pixelIndex, surface, filteredReservoir, 1.0, filteredReservoir.M, temporalStatus, debugBuffer[pixelIndex].spatialStatus);
 }

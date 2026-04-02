@@ -2,6 +2,7 @@
 #define RESTIR_GI_ENABLE_FINAL_VISIBILITY 0
 #include "ShaderIncludes/ReSTIR/GI/Globals.h.slang"
 #include "ShaderIncludes/ReSTIR/GI/Lighting.h.slang"
+#include "ShaderIncludes/ReSTIR/GI/Debug.h.slang"
 #include "ReSTIR/Common/Utils/RandomSamplerState.hlsli"
 #include "ReSTIR/GI/SpatialResampling.hlsli"
 
@@ -23,9 +24,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
   if(!GIIsSurfaceValid(surface))
   {
-    StoreGIReservoir(EmptyGIReservoir(), giParams.reservoirBufferParams,
+    const ReSTIRGIReservoir emptyReservoir = EmptyGIReservoir();
+    StoreGIReservoir(emptyReservoir, giParams.reservoirBufferParams,
                      PixelPosToReservoirPos(pixelPosition, giParams.runtimeParams.activeCheckerboardField),
                      giParams.bufferIndices.spatialResamplingOutputBufferIndex);
+    WriteGIDebugPixel(pixelIndex, surface, emptyReservoir, 1.0, 0.0, debugBuffer[pixelIndex].temporalStatus,
+                      uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface));
     return;
   }
 
@@ -37,4 +41,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
   StoreGIReservoir(spatialReservoir, giParams.reservoirBufferParams,
                    PixelPosToReservoirPos(pixelPosition, giParams.runtimeParams.activeCheckerboardField),
                    giParams.bufferIndices.spatialResamplingOutputBufferIndex);
+
+  const bool selectedNeighbor = spatialReservoir.age != centerReservoir.age || spatialReservoir.sampleKind != centerReservoir.sampleKind
+                                || any(spatialReservoir.samplePosition != centerReservoir.samplePosition)
+                                || any(spatialReservoir.sampleDirection != centerReservoir.sampleDirection)
+                                || any(spatialReservoir.sampleRadiance != centerReservoir.sampleRadiance);
+  const uint spatialStatus = selectedNeighbor ? uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted)
+                                              : uint(ReSTIRShiftStatus::eReSTIRShiftStatusNone);
+  WriteGIDebugPixel(pixelIndex, surface, spatialReservoir, 1.0, spatialReservoir.M, debugBuffer[pixelIndex].temporalStatus, spatialStatus);
 }

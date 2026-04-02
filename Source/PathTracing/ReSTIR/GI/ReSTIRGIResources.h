@@ -34,6 +34,7 @@ public:
   const nvvk::Buffer&                    GetInitialSampleBuffer() const;
   const nvvk::Buffer&                    GetSurfaceBuffer(uint32_t historyIndex) const;
   const nvvk::Buffer&                    GetNeighborOffsetBuffer() const;
+  const nvvk::Buffer&                    GetDebugBuffer() const;
   const nvvk::Image&                     GetAccumulationImage() const;
   uint32_t                               GetNeighborOffsetCount() const;
   const ReSTIRReservoirBufferParameters& GetReservoirBufferParameters() const;
@@ -48,6 +49,7 @@ private:
   ReSTIRSharedResources           m_SharedResources;
   nvvk::Buffer                    m_ReservoirBuffer;
   nvvk::Buffer                    m_InitialSampleBuffer;
+  nvvk::Buffer                    m_DebugBuffer;
   ReSTIRReservoirBufferParameters m_ReservoirBufferParameters{};
 };
 

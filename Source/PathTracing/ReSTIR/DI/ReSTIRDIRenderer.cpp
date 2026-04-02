@@ -251,6 +251,7 @@ void ReSTIRDIRenderer::Render(const RenderInput& input)
       .accumulatedFrames      = m_Settings.common.accumulate ? m_AccumulatedFrames : 0u,
       .flags                  = m_Settings.common.accumulate ? shaderio::eReSTIRFlagAccumulate : 0u,
       .continuationMaxBounces = m_Settings.continuationMaxBounces,
+      .debugView              = static_cast<uint32_t>(m_Settings.common.debugView),
   };
 
   RunInitialSamplingPass(input, pushConstant);
@@ -314,6 +315,7 @@ void ReSTIRDIRenderer::CreateDescriptorSetLayout()
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDIPreviousSurfaceBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDINeighborOffsetBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDIParamsBuffer, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, allStages);
+  bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDIDebugBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
 
   m_DescPack.init(bindings, m_Allocator->getDevice(), m_App->getFrameCycleSize(), VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
                   VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT);
@@ -405,12 +407,13 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
   VkDescriptorImageInfo accumulationImageInfo = m_Resources.GetAccumulationImage().descriptor;
   accumulationImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
 
-  std::array<VkDescriptorBufferInfo, 5> bufferInfos{
+  std::array<VkDescriptorBufferInfo, 6> bufferInfos{
       VkDescriptorBufferInfo{m_Resources.GetLightReservoirBuffer().buffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{m_Resources.GetSurfaceBuffer(currentHistoryIndex).buffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{m_Resources.GetSurfaceBuffer(previousHistoryIndex).buffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{m_Resources.GetNeighborOffsetBuffer().buffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{m_ParameterBuffers[frameSetIndex].buffer, 0, sizeof(shaderio::ReSTIRDIParameters)},
+      VkDescriptorBufferInfo{m_Resources.GetDebugBuffer().buffer, 0, VK_WHOLE_SIZE},
   };
 
   VkAccelerationStructureKHR accel = input.topLevelAS->accel;
@@ -420,7 +423,7 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
       .pAccelerationStructures    = &accel,
   };
 
-  std::array<VkWriteDescriptorSet, 8> writes{};
+  std::array<VkWriteDescriptorSet, 9> writes{};
   uint32_t                            writeCount = 0;
 
   writes[writeCount]       = m_DescPack.makeWrite(shaderio::ReSTIRDIBindingPoints::eReSTIRDITlas, frameSetIndex);
@@ -453,6 +456,10 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
   writes[writeCount].pBufferInfo = &bufferInfos[4];
   ++writeCount;
 
+  writes[writeCount]             = m_DescPack.makeWrite(shaderio::ReSTIRDIBindingPoints::eReSTIRDIDebugBuffer, frameSetIndex);
+  writes[writeCount].pBufferInfo = &bufferInfos[5];
+  ++writeCount;
+
   vkUpdateDescriptorSets(m_Allocator->getDevice(), writeCount, writes.data(), 0, nullptr);
 }
 
@@ -461,6 +468,7 @@ void ReSTIRDIRenderer::ClearHistoryBuffers(VkCommandBuffer cmd)
   vkCmdFillBuffer(cmd, m_Resources.GetLightReservoirBuffer().buffer, 0, m_Resources.GetLightReservoirBuffer().bufferSize, 0);
   vkCmdFillBuffer(cmd, m_Resources.GetSurfaceBuffer(0).buffer, 0, m_Resources.GetSurfaceBuffer(0).bufferSize, 0);
   vkCmdFillBuffer(cmd, m_Resources.GetSurfaceBuffer(1).buffer, 0, m_Resources.GetSurfaceBuffer(1).bufferSize, 0);
+  vkCmdFillBuffer(cmd, m_Resources.GetDebugBuffer().buffer, 0, m_Resources.GetDebugBuffer().bufferSize, 0);
 
   const VkBufferMemoryBarrier2 barriers[] = {
       VkBufferMemoryBarrier2{
@@ -492,6 +500,16 @@ void ReSTIRDIRenderer::ClearHistoryBuffers(VkCommandBuffer cmd)
           .buffer        = m_Resources.GetSurfaceBuffer(1).buffer,
           .offset        = 0,
           .size          = m_Resources.GetSurfaceBuffer(1).bufferSize,
+      },
+      VkBufferMemoryBarrier2{
+          .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+          .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+          .dstStageMask  = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+          .buffer        = m_Resources.GetDebugBuffer().buffer,
+          .offset        = 0,
+          .size          = m_Resources.GetDebugBuffer().bufferSize,
       },
   };
 

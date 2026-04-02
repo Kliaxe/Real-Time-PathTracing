@@ -2,6 +2,7 @@
 #include "nvshaders/random.h.slang"
 #include "ShaderIncludes/ReSTIR/GI/Globals.h.slang"
 #include "ShaderIncludes/ReSTIR/GI/Lighting.h.slang"
+#include "ShaderIncludes/ReSTIR/GI/Debug.h.slang"
 #include "ShaderIncludes/PathTracing/Continuation.h.slang"
 #include "ShaderIncludes/PathTracing/Intersection.h.slang"
 
@@ -147,7 +148,9 @@ void rgenMain()
   }
 
   resolvedRadiance = SanitizeRadiance(resolvedRadiance);
-  if((pushConst.flags & uint(ReSTIRFlags::eReSTIRFlagAccumulate)) != 0u && pushConst.accumulatedFrames > 0u)
+  resolvedRadiance = VisualizeReSTIRGIDebug(pixelIndex, resolvedRadiance);
+  if(pushConst.debugView == uint(ReSTIRDebugView::eReSTIRDebugViewDisabled)
+     && (pushConst.flags & uint(ReSTIRFlags::eReSTIRFlagAccumulate)) != 0u && pushConst.accumulatedFrames > 0u)
   {
     const float3 previousAverage = accumulationImage[int2(pixelPosition)].xyz;
     const float historyWeight    = float(pushConst.accumulatedFrames);
