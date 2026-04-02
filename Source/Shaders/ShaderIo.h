@@ -29,11 +29,17 @@ NAMESPACE_SHADERIO_BEGIN()
 
 enum BindingPoints
 {
-  eTextures          = 0,
-  eTlas              = 1,
-  eOutputImage       = 2,
-  eAccumulationImage = 3,
-};
+  eTextures                         = 0,
+  eTlas                             = 1,
+    eOutputImage                      = 2,
+    eAccumulationImage                = 3,
+    eMotionVectorsImage               = 4,
+    eNormalRoughnessImage             = 5,
+    eBaseColorMetalnessImage          = 6,
+    eViewZImage                       = 7,
+    eDiffuseRadianceHitDistanceImage  = 8,
+    eSpecularRadianceHitDistanceImage = 9,
+  };
 
 enum ReSTIRBindingPoints
 {
@@ -47,9 +53,15 @@ enum ReSTIRBindingPoints
   eReSTIRPreviousHistoryReservoirBuffer = 7,
   eReSTIRCurrentSurfaceBuffer          = 8,
   eReSTIRPreviousSurfaceBuffer         = 9,
-  eReSTIRNeighborOffsetBuffer          = 10,
-  eReSTIRDebugBuffer                   = 11,
-};
+    eReSTIRNeighborOffsetBuffer          = 10,
+    eReSTIRDebugBuffer                   = 11,
+    eReSTIRMotionVectorsImage            = 12,
+    eReSTIRNormalRoughnessImage          = 13,
+    eReSTIRBaseColorMetalnessImage       = 14,
+    eReSTIRViewZImage                    = 15,
+    eReSTIRDiffuseRadianceHitDistanceImage = 16,
+    eReSTIRSpecularRadianceHitDistanceImage = 17,
+  };
 
 enum ReSTIRDIBindingPoints
 {
@@ -63,6 +75,12 @@ enum ReSTIRDIBindingPoints
   eReSTIRDINeighborOffsetBuffer = 7,
   eReSTIRDIParamsBuffer        = 8,
   eReSTIRDIDebugBuffer         = 9,
+  eReSTIRDIMotionVectorsImage             = 10,
+  eReSTIRDINormalRoughnessImage           = 11,
+  eReSTIRDIBaseColorMetalnessImage        = 12,
+  eReSTIRDIViewZImage                     = 13,
+  eReSTIRDIDiffuseRadianceHitDistanceImage = 14,
+  eReSTIRDISpecularRadianceHitDistanceImage = 15,
 };
 
 enum ReSTIRGIBindingPoints
@@ -78,6 +96,12 @@ enum ReSTIRGIBindingPoints
   eReSTIRGINeighborOffsetBuffer = 8,
   eReSTIRGIParamsBuffer         = 9,
   eReSTIRGIDebugBuffer          = 10,
+  eReSTIRGIMotionVectorsImage             = 11,
+  eReSTIRGINormalRoughnessImage           = 12,
+  eReSTIRGIBaseColorMetalnessImage        = 13,
+  eReSTIRGIViewZImage                     = 14,
+  eReSTIRGIDiffuseRadianceHitDistanceImage = 15,
+  eReSTIRGISpecularRadianceHitDistanceImage = 16,
 };
 
 struct TutoPushConstant

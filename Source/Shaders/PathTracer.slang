@@ -20,6 +20,7 @@
 #include "ShaderIncludes/Pbr.h.slang"
 #include "ShaderIncludes/Camera.h.slang"
 #include "ShaderIo.h"
+#include "NRD.hlsli"
 #include "ShaderIncludes/PathTracing/Globals.h.slang"
 
 #include "ShaderIncludes/PathTracing/Common.h.slang"
@@ -30,6 +31,84 @@
 #include "ShaderIncludes/PathTracing/Disney.h.slang"
 #include "ShaderIncludes/PathTracing/Intersection.h.slang"
 #include "ShaderIncludes/PathTracing/Lights.h.slang"
+
+static const float kInvalidDenoiserViewZ     = 1.0e32;
+static const float kDenoiserMissHitDistance  = 65504.0;
+static const float4 kReblurHitDistanceParameters = float4(3.0, 0.1, 20.0, -25.0);
+static const float3 kMinDiffuseDemodulationFactor = float3(0.05, 0.05, 0.05);
+
+float4 PackNrdNormalRoughness(float3 shadingNormal, float roughness)
+{
+  return NRD_FrontEnd_PackNormalAndRoughness(shadingNormal, roughness, 0.0);
+}
+
+float4 PackReblurRadianceHitDistance(float3 radiance, float hitDistance, float viewZ, float roughness, bool isDiffuse)
+{
+  const float normalizedHitDistance =
+      REBLUR_FrontEnd_GetNormHitDist(hitDistance, viewZ, kReblurHitDistanceParameters, isDiffuse ? 1.0 : roughness);
+  return REBLUR_FrontEnd_PackRadianceAndNormHitDist(radiance, normalizedHitDistance, true);
+}
+
+float4 PackBaseColorMetalness(float3 baseColor, float metalness)
+{
+  return float4(saturate(baseColor), saturate(metalness));
+}
+
+float3 ComputeDiffuseDemodulationFactor(PathPayload payload)
+{
+  if(payload.hasPrimarySurface == 0u)
+  {
+    return float3(1.0, 1.0, 1.0);
+  }
+
+  const float3 diffuseFactor = payload.primaryBaseColor * (1.0 - payload.primaryMetalness);
+  return max(diffuseFactor, kMinDiffuseDemodulationFactor);
+}
+
+void WriteDenoiserGuideBuffers(uint2 pixelPosition, GltfSceneInfo sceneInfo, PathPayload payload)
+{
+  if(payload.hasPrimarySurface != 0u)
+  {
+    const float viewZ = mul(float4(payload.primaryWorldPosition, 1.0), sceneInfo.viewMatrix).z;
+    const float3 motion = ComputeDenoiserMotionVector(float2(pixelPosition) + 0.5, payload.primaryWorldPosition, sceneInfo);
+    motionVectorsImage[int2(pixelPosition)]   = float4(motion, 0.0);
+    normalRoughnessImage[int2(pixelPosition)] = PackNrdNormalRoughness(payload.primaryShadingNormal, payload.primaryRoughness);
+    baseColorMetalnessImage[int2(pixelPosition)] = PackBaseColorMetalness(payload.primaryBaseColor, payload.primaryMetalness);
+    viewZImage[int2(pixelPosition)]           = viewZ;
+    return;
+  }
+
+  motionVectorsImage[int2(pixelPosition)]   = float4(0.0, 0.0, 0.0, 0.0);
+  normalRoughnessImage[int2(pixelPosition)] = float4(0.0, 0.0, 0.0, 0.0);
+  baseColorMetalnessImage[int2(pixelPosition)] = float4(0.0, 0.0, 0.0, 0.0);
+  viewZImage[int2(pixelPosition)]           = kInvalidDenoiserViewZ;
+}
+
+void WriteDenoiserNoisySignals(uint2 pixelPosition, PathPayload payload)
+{
+  const int2 imagePosition = int2(pixelPosition);
+
+  if(payload.hasPrimarySurface == 0u)
+  {
+    diffuseRadianceHitDistanceImage[imagePosition]  = float4(0.0, 0.0, 0.0, 0.0);
+    specularRadianceHitDistanceImage[imagePosition] = float4(0.0, 0.0, 0.0, 0.0);
+    return;
+  }
+
+  const GltfSceneInfo sceneInfo         = pushConst.sceneInfoAddress[0];
+  const float         primaryViewZ      = mul(float4(payload.primaryWorldPosition, 1.0), sceneInfo.viewMatrix).z;
+  const float         diffuseHitDistance  = payload.hasDiffuseDenoiserHitDistance != 0u ? payload.diffuseDenoiserHitDistance : 0.0;
+  const float specularHitDistance = payload.hasSpecularDenoiserHitDistance != 0u ? payload.specularDenoiserHitDistance : 0.0;
+  const float3 diffuseDemodulationFactor = ComputeDiffuseDemodulationFactor(payload);
+
+  diffuseRadianceHitDistanceImage[imagePosition] =
+      PackReblurRadianceHitDistance(max(payload.diffuseDenoiserRadiance, float3(0.0)) / diffuseDemodulationFactor, diffuseHitDistance,
+                                    primaryViewZ,
+                                    payload.primaryRoughness, true);
+  specularRadianceHitDistanceImage[imagePosition] =
+      PackReblurRadianceHitDistance(max(payload.specularDenoiserRadiance, float3(0.0)), specularHitDistance, primaryViewZ,
+                                    payload.primaryRoughness, false);
+}
 
 
 [shader("raygeneration")]
@@ -58,8 +137,24 @@ void rgenMain()
   payload.mediumActive             = 0;
   payload.lastEnvironmentNeeActive = 0;
   payload.hasLastBsdfSample        = 0;
+  payload.primaryWorldPosition     = float3(0.0);
+  payload.primaryRoughness         = 0.0;
+  payload.primaryShadingNormal     = float3(0.0);
+  payload.primaryBaseColor         = float3(0.0);
+  payload.primaryMetalness         = 0.0;
+  payload.hasPrimarySurface        = 0;
+  payload.diffuseDenoiserRadiance       = float3(0.0);
+  payload.diffuseDenoiserHitDistance    = 0.0;
+  payload.specularDenoiserRadiance      = float3(0.0);
+  payload.specularDenoiserHitDistance   = 0.0;
+  payload.hasDiffuseDenoiserHitDistance = 0u;
+  payload.hasSpecularDenoiserHitDistance = 0u;
+  payload.firstBounceIsSpecular          = 0u;
+  payload.awaitingFirstBounceHitDistance = 0u;
 
   TraceRay(topLevelAS, 0, 0xFF, 0, 0, 0, ray, payload);
+  WriteDenoiserGuideBuffers(launchID, sceneInfo, payload);
+  WriteDenoiserNoisySignals(launchID, payload);
 
   const float3 sampleRadiance   = max(payload.radiance, float3(0.0));
   float3       resolvedRadiance = sampleRadiance;
@@ -96,7 +191,10 @@ void rmissMain(inout PathPayload payload)
     envThroughput *= EvaluateMediumTransmittance(payload.mediumAttenuation, payload.mediumThickness);
   }
 
-  payload.radiance += envThroughput * envColor * misWeight;
+  const float3 contribution = envThroughput * envColor * misWeight;
+  payload.radiance += contribution;
+  AccumulateDenoiserRadiance(payload, contribution);
+  StoreFirstBounceHitDistance(payload, kDenoiserMissHitDistance);
 }
 
 [shader("miss")]
@@ -130,6 +228,9 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
   const SurfaceData   surface   = LoadSurfaceData(attr);
   const float3        viewDir   = -WorldRayDirection();
 
+  StorePrimarySurfaceForDenoiser(payload, surface);
+  StoreFirstBounceHitDistance(payload, RayTCurrent());
+
   ApplyCurrentMediumAttenuation(payload, RayTCurrent());
 
   float emissiveMisWeight = 1.0;
@@ -143,7 +244,9 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
     }
   }
 
-  payload.radiance += payload.throughput * surface.emission * emissiveMisWeight;
+  const float3 emissiveContribution = payload.throughput * surface.emission * emissiveMisWeight;
+  payload.radiance += emissiveContribution;
+  AccumulateDenoiserRadiance(payload, emissiveContribution);
   AccumulateEnvironmentDirectLight(payload, surface, sceneInfo, viewDir);
   AccumulateEmissiveDirectLight(payload, surface, sceneInfo, viewDir);
 
@@ -172,6 +275,11 @@ void rchitMain(inout PathPayload payload, in BuiltInTriangleIntersectionAttribut
   if(SafeMax3(nextThroughput) <= 0.0)
   {
     return;
+  }
+
+  if(payload.depth == 0u)
+  {
+    BeginFirstBounceDenoiserSignal(payload, sampledLobeKind);
   }
 
   payload.depth += 1;

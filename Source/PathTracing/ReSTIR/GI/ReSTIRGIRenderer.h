@@ -12,6 +12,8 @@
 #include "PathTracing/ReSTIR/Common/ReSTIRRenderUtils.h"
 #include "PathTracing/ReSTIR/GI/ReSTIRGIResources.h"
 #include "PathTracing/ReSTIR/GI/ReSTIRGISettings.h"
+#include "PathTracing/PathTraceDenoiserResources.h"
+#include "PathTracing/PathTraceNrdDenoiser.h"
 #include "nvvk/descriptors.hpp"
 
 namespace nvapp
@@ -53,6 +55,7 @@ public:
 
 private:
   using HistorySignature    = ReSTIRHistorySignature;
+  using DenoiserSignature   = ReSTIRDenoiserHistorySignature;
   using RayTracingPassState = ReSTIRRayTracingPassState;
 
   enum class ComputePass : uint32_t
@@ -86,12 +89,16 @@ private:
   uint32_t                              m_AccumulatedFrames     = 0;
   bool                                  m_HistoryInvalidated    = true;
   bool                                  m_HasHistorySignature   = false;
+  bool                                  m_HasDenoiserSignature  = false;
   bool                                  m_NeedsHistoryClear     = true;
 
   ReSTIRGISettings                      m_Settings{};
   HistorySignature                      m_LastHistorySignature{};
+  DenoiserSignature                     m_LastDenoiserSignature{};
   ReSTIRContext                         m_Context;
   ReSTIRGIResources                     m_Resources;
+  PathTraceDenoiserResources            m_DenoiserResources;
+  PathTraceNrdDenoiser                  m_NrdDenoiser;
   std::unique_ptr<restir::ReSTIRGIContext> m_GiContext;
   std::vector<nvvk::Buffer>             m_ParameterBuffers;
 

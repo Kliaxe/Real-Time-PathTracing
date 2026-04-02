@@ -63,6 +63,19 @@ struct ReSTIRHistorySignature
   VkExtent2D                    viewportSize{};
 };
 
+struct ReSTIRDenoiserHistorySignature
+{
+  int                           useSky                  = 0;
+  int                           useHdrEnv               = 0;
+  int                           environmentTextureIndex = -1;
+  int                           pad0                    = 0;
+  glm::vec3                     backgroundColor{};
+  int                           pad1 = 0;
+  shaderio::SkySimpleParameters skySimpleParam{};
+  VkDeviceAddress               topLevelAsAddress = 0;
+  VkExtent2D                    viewportSize{};
+};
+
 inline ReSTIRHistorySignature MakeReSTIRHistorySignature(const shaderio::GltfSceneInfo& sceneInfo,
                                                          VkDeviceAddress topLevelAsAddress,
                                                          VkExtent2D viewportSize)
@@ -72,6 +85,21 @@ inline ReSTIRHistorySignature MakeReSTIRHistorySignature(const shaderio::GltfSce
   signature.projInvMatrix           = sceneInfo.projInvMatrix;
   signature.viewInvMatrix           = sceneInfo.viewInvMatrix;
   signature.cameraPosition          = sceneInfo.cameraPosition;
+  signature.useSky                  = sceneInfo.useSky;
+  signature.useHdrEnv               = sceneInfo.useHdrEnv;
+  signature.environmentTextureIndex = sceneInfo.environmentTextureIndex;
+  signature.backgroundColor         = sceneInfo.backgroundColor;
+  signature.skySimpleParam          = sceneInfo.skySimpleParam;
+  signature.topLevelAsAddress       = topLevelAsAddress;
+  signature.viewportSize            = viewportSize;
+  return signature;
+}
+
+inline ReSTIRDenoiserHistorySignature MakeReSTIRDenoiserHistorySignature(const shaderio::GltfSceneInfo& sceneInfo,
+                                                                         VkDeviceAddress topLevelAsAddress,
+                                                                         VkExtent2D viewportSize)
+{
+  ReSTIRDenoiserHistorySignature signature{};
   signature.useSky                  = sceneInfo.useSky;
   signature.useHdrEnv               = sceneInfo.useHdrEnv;
   signature.environmentTextureIndex = sceneInfo.environmentTextureIndex;

@@ -10,6 +10,8 @@
 #include "PathTracing/ReSTIR/Common/ReSTIRRenderUtils.h"
 #include "PathTracing/ReSTIR/Common/ReSTIRResources.h"
 #include "PathTracing/ReSTIR/PT/ReSTIRPTSettings.h"
+#include "PathTracing/PathTraceDenoiserResources.h"
+#include "PathTracing/PathTraceNrdDenoiser.h"
 #include "nvvk/descriptors.hpp"
 
 namespace nvapp
@@ -48,6 +50,7 @@ public:
 
 private:
   using HistorySignature   = ReSTIRHistorySignature;
+  using DenoiserSignature  = ReSTIRDenoiserHistorySignature;
   using RayTracingPassState = ReSTIRRayTracingPassState;
 
   enum class ComputePass : uint32_t
@@ -80,13 +83,19 @@ private:
   uint32_t                 m_AccumulatedFrames     = 0;
   bool                     m_HistoryInvalidated    = true;
   bool                     m_HasHistorySignature   = false;
+  bool                     m_HasDenoiserSignature  = false;
 
   ReSTIRPTSettings         m_Settings{};
   // Stored so render-time signature comparison can reset accumulated output
   // only when the accumulation contract changes.
   HistorySignature         m_LastHistorySignature{};
+  DenoiserSignature        m_LastDenoiserSignature{};
   ReSTIRContext            m_Context;
   ReSTIRResources          m_Resources;
+  // The NRD shell is shared with the ground-truth path tracer; PT plugs in by
+  // producing the same guide and noisy-signal contract.
+  PathTraceDenoiserResources m_DenoiserResources;
+  PathTraceNrdDenoiser       m_NrdDenoiser;
 
   nvvk::DescriptorPack        m_DescPack;
   VkPipelineLayout            m_PipelineLayout = VK_NULL_HANDLE;

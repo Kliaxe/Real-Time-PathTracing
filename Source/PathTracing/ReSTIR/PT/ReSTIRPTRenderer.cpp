@@ -33,6 +33,55 @@ constexpr VkShaderStageFlags kReSTIRPTPushConstantStages = VK_SHADER_STAGE_RAYGE
                                                            | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR
                                                            | VK_SHADER_STAGE_COMPUTE_BIT;
 
+void TransitionStorageImageForWrite(VkCommandBuffer cmd, nvvk::Image& image, VkPipelineStageFlags2 dstStageMask)
+{
+  if(image.image == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  if(image.descriptor.imageLayout == VK_IMAGE_LAYOUT_GENERAL)
+  {
+    const VkImageMemoryBarrier2 imageBarrier{
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
+        .srcAccessMask = VK_ACCESS_2_NONE,
+        .dstStageMask  = dstStageMask,
+        .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+        .oldLayout     = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
+        .image         = image.image,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
+    };
+    const VkDependencyInfo dependencyInfo{
+        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers    = &imageBarrier,
+    };
+    vkCmdPipelineBarrier2(cmd, &dependencyInfo);
+    return;
+  }
+
+  const VkImageMemoryBarrier2 imageBarrier{
+      .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+      .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
+      .srcAccessMask = VK_ACCESS_2_NONE,
+      .dstStageMask  = dstStageMask,
+      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+      .oldLayout     = image.descriptor.imageLayout,
+      .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
+      .image         = image.image,
+      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
+  };
+  const VkDependencyInfo dependencyInfo{
+      .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .imageMemoryBarrierCount = 1,
+      .pImageMemoryBarriers    = &imageBarrier,
+  };
+  vkCmdPipelineBarrier2(cmd, &dependencyInfo);
+  image.descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+}
+
 VkShaderModuleCreateInfo GetInitialSamplingShaderCode()
 {
   return nvsamples::GetShaderModuleCreateInfo(std::span(ReSTIRPTGenerateInitialSamples_slang));
@@ -60,6 +109,8 @@ ReSTIRPTRenderer::ReSTIRPTRenderer(const CreateInfo& createInfo)
     , m_Allocator(createInfo.allocator)
     , m_MaxTextureDescriptors(createInfo.maxTextureDescriptors)
     , m_Resources(ReSTIRResources::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
+    , m_DenoiserResources(PathTraceDenoiserResources::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
+    , m_NrdDenoiser(PathTraceNrdDenoiser::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
 {
 }
 
@@ -78,6 +129,7 @@ void ReSTIRPTRenderer::Initialize()
   CreateInitialSamplingPipeline();
   CreateFinalShadingPipeline();
   CreateComputePipelines();
+  m_NrdDenoiser.Initialize();
   InvalidateHistory();
 }
 
@@ -89,6 +141,8 @@ void ReSTIRPTRenderer::Destroy()
   }
 
   VkDevice device = m_Allocator->getDevice();
+  m_NrdDenoiser.Destroy();
+  m_DenoiserResources.Destroy();
   m_Resources.Destroy();
 
   DestroyReSTIRRayTracingPass(m_Allocator, m_InitialSamplingPass);
@@ -107,6 +161,7 @@ void ReSTIRPTRenderer::Destroy()
   m_AccumulatedFrames = 0;
   m_HistoryInvalidated = true;
   m_HasHistorySignature = false;
+  m_HasDenoiserSignature = false;
 }
 
 bool ReSTIRPTRenderer::IsReady() const
@@ -128,7 +183,7 @@ const ReSTIRPTSettings& ReSTIRPTRenderer::GetSettings() const
 
 uint32_t ReSTIRPTRenderer::GetAccumulatedFrameCount() const
 {
-  return m_Settings.common.accumulate ? m_AccumulatedFrames : 0;
+  return IsAccumulationResolveMode(m_Settings.common.resolveMode) ? m_AccumulatedFrames : 0;
 }
 
 uint32_t ReSTIRPTRenderer::GetPipelineBounceLimit() const
@@ -142,7 +197,9 @@ void ReSTIRPTRenderer::InvalidateHistory()
   m_AccumulatedFrames = 0;
   m_HistoryInvalidated = true;
   m_HasHistorySignature = false;
+  m_HasDenoiserSignature = false;
   m_Context.InvalidateHistory();
+  m_NrdDenoiser.InvalidateHistory();
 }
 
 nvvk::DescriptorPack& ReSTIRPTRenderer::GetDescriptorPack()
@@ -171,17 +228,38 @@ void ReSTIRPTRenderer::Render(const RenderInput& input)
 
   m_Context.EnsureViewport(viewportSize);
   m_Resources.EnsureForViewport(viewportSize);
+  m_DenoiserResources.EnsureForViewport(viewportSize);
 
   // Camera-driven invalidation is only needed when final accumulation is
   // active. Temporal ReSTIR reuse is allowed to follow normal camera motion.
   const HistorySignature currentSignature = MakeReSTIRHistorySignature(*input.sceneInfo, input.topLevelAS->address, viewportSize);
   const bool signatureChanged = !m_HasHistorySignature
                                 || std::memcmp(&currentSignature, &m_LastHistorySignature, sizeof(HistorySignature)) != 0;
-  const bool historyInvalidated = m_HistoryInvalidated || (m_Settings.common.accumulate && signatureChanged);
-  if(historyInvalidated)
+  const bool denoiseEnabled = IsDenoiseResolveMode(m_Settings.common.resolveMode);
+  const bool restirHistoryInvalidated =
+      m_HistoryInvalidated || (IsAccumulationResolveMode(m_Settings.common.resolveMode) && signatureChanged);
+  const DenoiserSignature currentDenoiserSignature =
+      MakeReSTIRDenoiserHistorySignature(*input.sceneInfo, input.topLevelAS->address, viewportSize);
+  const bool denoiserSignatureChanged = !m_HasDenoiserSignature
+                                        || std::memcmp(&currentDenoiserSignature, &m_LastDenoiserSignature, sizeof(DenoiserSignature)) != 0;
+  const bool denoiserHistoryInvalidated = m_HistoryInvalidated || (denoiseEnabled && denoiserSignatureChanged);
+  if(restirHistoryInvalidated)
   {
     m_AccumulatedFrames = 0;
     m_Context.InvalidateHistory();
+  }
+
+  const bool restirDebugActive = m_Settings.common.debugView != shaderio::eReSTIRDebugViewDisabled;
+  if(denoiseEnabled)
+  {
+    m_NrdDenoiser.PrepareFrame(PathTraceNrdDenoiser::FrameInput{
+                                   .sceneInfo          = input.sceneInfo,
+                                   .viewportSize       = viewportSize,
+                                   .historyInvalidated = denoiserHistoryInvalidated,
+                                   .enableMaterialDemodulation = true,
+                                   .settings           = &m_Settings.common.denoiserSettings,
+                               },
+                               m_DenoiserResources);
   }
 
   UpdateFrameDescriptors(input);
@@ -190,6 +268,14 @@ void ReSTIRPTRenderer::Render(const RenderInput& input)
   TransitionReSTIRStorageImages(input.cmd, const_cast<nvvk::Image&>(m_Resources.GetAccumulationImage()),
                                 input.gBuffers->getColorImage(input.renderedImageIndex),
                                 VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetMotionVectorsImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetNormalRoughnessImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetBaseColorMetalnessImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetViewZImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetDiffuseRadianceHitDistanceImage(),
+                                 VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetSpecularRadianceHitDistanceImage(),
+                                 VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
 
   const bool enableTemporal = IsReSTIRTemporalResamplingEnabled(m_Settings.common.resamplingMode);
   const bool enableSpatial  = IsReSTIRSpatialResamplingEnabled(m_Settings.common.resamplingMode);
@@ -202,7 +288,7 @@ void ReSTIRPTRenderer::Render(const RenderInput& input)
   const shaderio::ReSTIRPTPushConstant pushConstant{
       .sceneInfoAddress            = (shaderio::GltfSceneInfo*)input.sceneResource->bSceneInfo.address,
       .rngFrameNumber              = m_Context.GetFrameIndex(),
-      .accumulatedFrames           = m_Settings.common.accumulate ? m_AccumulatedFrames : 0u,
+      .accumulatedFrames           = IsAccumulationResolveMode(m_Settings.common.resolveMode) ? m_AccumulatedFrames : 0u,
       .flags                       = BuildFrameFlags(enableTemporal, enableSpatial),
       .initialSampling             = initialSampling,
       .temporalResampling          = temporalResampling,
@@ -246,17 +332,29 @@ void ReSTIRPTRenderer::Render(const RenderInput& input)
   RunFinalShadingPass(input, pushConstant);
   nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
+  if(denoiseEnabled && !restirDebugActive && m_NrdDenoiser.IsReady())
+  {
+    m_NrdDenoiser.Denoise(input.cmd, m_DenoiserResources, m_Resources.GetAccumulationImage().descriptor.imageView,
+                          input.gBuffers->getColorImageView(input.renderedImageIndex), m_Settings.common.denoiserDebugView, viewportSize);
+  }
+  else if(denoiseEnabled && restirDebugActive)
+  {
+    m_NrdDenoiser.InvalidateHistory();
+  }
+
   m_LastHistorySignature = currentSignature;
+  m_LastDenoiserSignature = currentDenoiserSignature;
   m_HasHistorySignature  = true;
+  m_HasDenoiserSignature = true;
   m_HistoryInvalidated   = false;
   m_Context.AdvanceFrame();
-  m_AccumulatedFrames = m_Settings.common.accumulate ? (m_AccumulatedFrames + 1u) : 0u;
+  m_AccumulatedFrames = IsAccumulationResolveMode(m_Settings.common.resolveMode) ? (m_AccumulatedFrames + 1u) : 0u;
 }
 
 uint32_t ReSTIRPTRenderer::BuildFrameFlags(bool enableTemporal, bool enableSpatial) const
 {
   uint32_t flags = 0;
-  if(m_Settings.common.accumulate)
+  if(IsAccumulationResolveMode(m_Settings.common.resolveMode))
   {
     flags |= shaderio::eReSTIRFlagAccumulate;
   }
@@ -325,6 +423,12 @@ void ReSTIRPTRenderer::CreateDescriptorSetLayout()
   bindings.addBinding(shaderio::ReSTIRBindingPoints::eReSTIRPreviousSurfaceBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRBindingPoints::eReSTIRNeighborOffsetBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRBindingPoints::eReSTIRDebugBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+  bindings.addBinding(shaderio::ReSTIRBindingPoints::eReSTIRMotionVectorsImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.addBinding(shaderio::ReSTIRBindingPoints::eReSTIRNormalRoughnessImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.addBinding(shaderio::ReSTIRBindingPoints::eReSTIRBaseColorMetalnessImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.addBinding(shaderio::ReSTIRBindingPoints::eReSTIRViewZImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.addBinding(shaderio::ReSTIRBindingPoints::eReSTIRDiffuseRadianceHitDistanceImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.addBinding(shaderio::ReSTIRBindingPoints::eReSTIRSpecularRadianceHitDistanceImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
 
   m_DescPack.init(bindings, m_Allocator->getDevice(), m_App->getFrameCycleSize(), VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
                   VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT);
@@ -386,6 +490,18 @@ void ReSTIRPTRenderer::UpdateFrameDescriptors(const RenderInput& input)
   outputImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
   VkDescriptorImageInfo accumulationImageInfo = m_Resources.GetAccumulationImage().descriptor;
   accumulationImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
+  VkDescriptorImageInfo motionVectorsImageInfo = m_DenoiserResources.GetMotionVectorsImage().descriptor;
+  motionVectorsImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
+  VkDescriptorImageInfo normalRoughnessImageInfo = m_DenoiserResources.GetNormalRoughnessImage().descriptor;
+  normalRoughnessImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
+  VkDescriptorImageInfo baseColorMetalnessImageInfo = m_DenoiserResources.GetBaseColorMetalnessImage().descriptor;
+  baseColorMetalnessImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
+  VkDescriptorImageInfo viewZImageInfo = m_DenoiserResources.GetViewZImage().descriptor;
+  viewZImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
+  VkDescriptorImageInfo diffuseRadianceHitDistanceImageInfo = m_DenoiserResources.GetDiffuseRadianceHitDistanceImage().descriptor;
+  diffuseRadianceHitDistanceImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
+  VkDescriptorImageInfo specularRadianceHitDistanceImageInfo = m_DenoiserResources.GetSpecularRadianceHitDistanceImage().descriptor;
+  specularRadianceHitDistanceImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
 
   // History buffer bindings are rotated here so the shaders always see
   // "current" and "previous" through stable binding numbers.
@@ -407,7 +523,7 @@ void ReSTIRPTRenderer::UpdateFrameDescriptors(const RenderInput& input)
       .pAccelerationStructures    = &accel,
   };
 
-  std::array<VkWriteDescriptorSet, 11> writes{};
+  std::array<VkWriteDescriptorSet, 17> writes{};
   uint32_t                             writeCount = 0;
 
   writes[writeCount]       = m_DescPack.makeWrite(shaderio::ReSTIRBindingPoints::eReSTIRTlas, frameSetIndex);
@@ -437,6 +553,29 @@ void ReSTIRPTRenderer::UpdateFrameDescriptors(const RenderInput& input)
   {
     writes[writeCount]             = m_DescPack.makeWrite(bufferBindings[i], frameSetIndex);
     writes[writeCount].pBufferInfo = &bufferInfos[i];
+    ++writeCount;
+  }
+
+  const std::array<uint32_t, 6> imageBindings{
+      shaderio::ReSTIRBindingPoints::eReSTIRMotionVectorsImage,
+      shaderio::ReSTIRBindingPoints::eReSTIRNormalRoughnessImage,
+      shaderio::ReSTIRBindingPoints::eReSTIRBaseColorMetalnessImage,
+      shaderio::ReSTIRBindingPoints::eReSTIRViewZImage,
+      shaderio::ReSTIRBindingPoints::eReSTIRDiffuseRadianceHitDistanceImage,
+      shaderio::ReSTIRBindingPoints::eReSTIRSpecularRadianceHitDistanceImage,
+  };
+  const std::array<VkDescriptorImageInfo*, 6> imageInfos{
+      &motionVectorsImageInfo,
+      &normalRoughnessImageInfo,
+      &baseColorMetalnessImageInfo,
+      &viewZImageInfo,
+      &diffuseRadianceHitDistanceImageInfo,
+      &specularRadianceHitDistanceImageInfo,
+  };
+  for(size_t i = 0; i < imageBindings.size(); ++i)
+  {
+    writes[writeCount]            = m_DescPack.makeWrite(imageBindings[i], frameSetIndex);
+    writes[writeCount].pImageInfo = imageInfos[i];
     ++writeCount;
   }
 

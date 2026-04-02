@@ -171,9 +171,11 @@ CHECK_STRUCT_ALIGNMENT(PathTraceEmissiveTriangle)
 struct GltfSceneInfo
 {
   float4x4               viewProjMatrix;     // View-projection matrix
+  float4x4               viewMatrix;         // View matrix used for camera-space guide-buffer reconstruction
   float4x4               projInvMatrix;      // Historical name: stores the inverse view-projection matrix for shared camera-ray reconstruction
   float4x4               viewInvMatrix;      // Inverse view matrix
   float4x4               prevViewProjMatrix; // Previous frame view-projection matrix for temporal reprojection
+  float4x4               prevViewMatrix;     // Previous frame view matrix used for screen-space motion reprojection
   float4x4               prevPrevViewProjMatrix; // Frame N-2 view-projection matrix for history-aware reprojection/debugging
   float3                 cameraPosition;     // Camera position
   int                    _padPrevCamera0;

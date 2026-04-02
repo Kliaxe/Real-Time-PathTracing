@@ -20,5 +20,11 @@
 [[vk::binding(ReSTIRGIBindingPoints::eReSTIRGINeighborOffsetBuffer)]] StructuredBuffer<float2> giNeighborOffsetBuffer;
 [[vk::binding(ReSTIRGIBindingPoints::eReSTIRGIParamsBuffer)]] ConstantBuffer<ReSTIRGIParameters> giParams;
 [[vk::binding(ReSTIRGIBindingPoints::eReSTIRGIDebugBuffer)]] RWStructuredBuffer<ReSTIRDebugPixel> debugBuffer;
+[[vk::binding(ReSTIRGIBindingPoints::eReSTIRGIMotionVectorsImage)]] RWTexture2D<float4> motionVectorsImage;
+[[vk::binding(ReSTIRGIBindingPoints::eReSTIRGINormalRoughnessImage)]] RWTexture2D<float4> normalRoughnessImage;
+[[vk::binding(ReSTIRGIBindingPoints::eReSTIRGIBaseColorMetalnessImage)]] RWTexture2D<float4> baseColorMetalnessImage;
+[[vk::binding(ReSTIRGIBindingPoints::eReSTIRGIViewZImage)]] RWTexture2D<float> viewZImage;
+[[vk::binding(ReSTIRGIBindingPoints::eReSTIRGIDiffuseRadianceHitDistanceImage)]] RWTexture2D<float4> diffuseRadianceHitDistanceImage;
+[[vk::binding(ReSTIRGIBindingPoints::eReSTIRGISpecularRadianceHitDistanceImage)]] RWTexture2D<float4> specularRadianceHitDistanceImage;
 
 #endif

@@ -97,15 +97,75 @@ namespace nvsamples
 namespace
 {
 
+bool DrawResolveModeControl(RenderResolveMode& resolveMode, const char* label = "Resolve")
+{
+  int mode = static_cast<int>(resolveMode);
+  const char* resolveModes[] = {"Off", "Accumulate", "Denoise"};
+  if(!ImGui::Combo(label, &mode, resolveModes, IM_ARRAYSIZE(resolveModes)))
+  {
+    return false;
+  }
+
+  resolveMode = static_cast<RenderResolveMode>(mode);
+  return true;
+}
+
+bool DrawDenoiserDebugViewControl(DenoiserDebugView& debugView, const char* label = "Denoiser Output")
+{
+  int view = static_cast<int>(debugView);
+  const char* debugViews[] = {"Final",          "Raw Beauty",      "Denoised Beauty", "Diffuse Input", "Specular Input",
+                              "Denoised Diffuse", "Denoised Specular", "Normal Roughness", "ViewZ",         "Motion Vectors"};
+  if(!ImGui::Combo(label, &view, debugViews, IM_ARRAYSIZE(debugViews)))
+  {
+    return false;
+  }
+
+  debugView = static_cast<DenoiserDebugView>(view);
+  return true;
+}
+
+bool DrawDenoiserSettingsSection(const char* treeLabel, DenoiserSettings& settings)
+{
+  if(!ImGui::TreeNodeEx(treeLabel))
+  {
+    return false;
+  }
+
+  bool changed = false;
+
+  int maxAccumulatedFrames = static_cast<int>(settings.maxAccumulatedFrames);
+  if(ImGui::SliderInt("Max Accumulated Frames", &maxAccumulatedFrames, 1, 63))
+  {
+    settings.maxAccumulatedFrames = static_cast<uint32_t>(maxAccumulatedFrames);
+    changed = true;
+  }
+
+  int maxFastAccumulatedFrames = static_cast<int>(settings.maxFastAccumulatedFrames);
+  if(ImGui::SliderInt("Max Fast Accumulated Frames", &maxFastAccumulatedFrames, 0, static_cast<int>(settings.maxAccumulatedFrames)))
+  {
+    settings.maxFastAccumulatedFrames = static_cast<uint32_t>(maxFastAccumulatedFrames);
+    changed = true;
+  }
+
+  changed |= ImGui::SliderFloat("Diffuse Prepass Radius", &settings.diffusePrepassBlurRadius, 0.0f, 64.0f, "%.1f");
+  changed |= ImGui::SliderFloat("Specular Prepass Radius", &settings.specularPrepassBlurRadius, 0.0f, 64.0f, "%.1f");
+
+  if(ImGui::Checkbox("Anti-Firefly", &settings.enableAntiFirefly))
+  {
+    changed = true;
+  }
+
+  ImGui::TreePop();
+  return changed;
+}
+
 bool DrawReSTIRCommonControls(ReSTIRMethodSettings& settings, const char* resamplingLabel)
 {
   bool changed = false;
 
-  bool accumulate = settings.accumulate;
-  if(ImGui::Checkbox("Accumulate", &accumulate))
+  if(DrawResolveModeControl(settings.resolveMode))
   {
-    settings.accumulate = accumulate;
-    changed             = true;
+    changed = true;
   }
 
   int resamplingMode = static_cast<int>(settings.resamplingMode);
@@ -354,15 +414,27 @@ bool DrawReSTIRResamplingSection(const char* treeLabel, ReSTIRGITemporalResampli
   return changed;
 }
 
-void DrawReSTIRAccumulationStatus(uint32_t accumulatedFrames)
+void DrawResolveStatus(RenderResolveMode resolveMode, uint32_t accumulatedFrames)
 {
-  ImGui::Text("Accumulated Frames: %u", accumulatedFrames);
+  if(IsAccumulationResolveMode(resolveMode))
+  {
+    ImGui::Text("Accumulated Frames: %u", accumulatedFrames);
+    return;
+  }
+
+  if(IsDenoiseResolveMode(resolveMode))
+  {
+    ImGui::TextUnformatted("Resolve Mode: Denoise");
+    return;
+  }
+
+  ImGui::TextUnformatted("Resolve Mode: Off");
 }
 
-void DrawReSTIRMethodFooter(const char* description, uint32_t accumulatedFrames)
+void DrawReSTIRMethodFooter(const char* description, RenderResolveMode resolveMode, uint32_t accumulatedFrames)
 {
   ImGui::TextWrapped("%s", description);
-  DrawReSTIRAccumulationStatus(accumulatedFrames);
+  DrawResolveStatus(resolveMode, accumulatedFrames);
 }
 
 }  // namespace
@@ -538,11 +610,9 @@ void Application::onUIRender()
             nvsamples::PathTracer::Settings& pathTracingSettings = m_PathTracer->GetSettings();
             const uint32_t                   bounceLimit         = m_PathTracer->GetPipelineBounceLimit();
 
-            bool accumulate = pathTracingSettings.accumulate;
-            if(ImGui::Checkbox("Accumulate", &accumulate))
+            if(DrawResolveModeControl(pathTracingSettings.resolveMode))
             {
-              pathTracingSettings.accumulate = accumulate;
-              invalidatePathTracingHistory   = true;
+              invalidatePathTracingHistory = true;
             }
 
             if(DrawBounceLimitControl("Max Bounces", pathTracingSettings.maxBounces, bounceLimit))
@@ -553,12 +623,22 @@ void Application::onUIRender()
             DrawTransmissionBounceHint(pathTracingSettings.maxBounces);
 
             ImGui::SameLine();
-            if(ImGui::Button("Reset Accumulation"))
+            if(ImGui::Button("Reset Resolve History"))
             {
               invalidatePathTracingHistory = true;
             }
 
-            ImGui::Text("Accumulated Frames: %u", m_PathTracer->GetAccumulatedFrameCount());
+            DrawResolveStatus(pathTracingSettings.resolveMode, m_PathTracer->GetAccumulatedFrameCount());
+            if(IsDenoiseResolveMode(pathTracingSettings.resolveMode))
+            {
+              if(DrawDenoiserDebugViewControl(pathTracingSettings.denoiserDebugView))
+              {
+                invalidatePathTracingHistory = true;
+              }
+              invalidatePathTracingHistory |= DrawDenoiserSettingsSection("Denoiser Settings", pathTracingSettings.denoiserSettings);
+              ImGui::TextDisabled(
+                  "NRD currently runs on the ground-truth path tracer with packed guide buffers plus diffuse/specular REBLUR inputs. ReSTIR integration can build on this path later.");
+            }
           }
         }
         else if(m_RenderMode == RenderMode::ePathTracingReSTIRDI)
@@ -666,8 +746,20 @@ void Application::onUIRender()
               ImGui::TreePop();
             }
 
+            if(IsDenoiseResolveMode(restirDiSettings.common.resolveMode))
+            {
+              if(DrawDenoiserDebugViewControl(restirDiSettings.common.denoiserDebugView))
+              {
+                invalidatePathTracingHistory = true;
+              }
+
+              invalidatePathTracingHistory |= DrawDenoiserSettingsSection("Denoiser Settings##ReSTIRDI",
+                                                                         restirDiSettings.common.denoiserSettings);
+            }
+
             DrawReSTIRMethodFooter(
                 "This DI mode uses ReSTIR direct-light reservoirs and a path-traced continuation for reflections and indirect transport.",
+              restirDiSettings.common.resolveMode,
               m_ReSTIRDI->GetAccumulatedFrameCount());
           }
         }
@@ -725,8 +817,20 @@ void Application::onUIRender()
               ImGui::TreePop();
             }
 
+            if(IsDenoiseResolveMode(restirGiSettings.common.resolveMode))
+            {
+              if(DrawDenoiserDebugViewControl(restirGiSettings.common.denoiserDebugView))
+              {
+                invalidatePathTracingHistory = true;
+              }
+
+              invalidatePathTracingHistory |= DrawDenoiserSettingsSection("Denoiser Settings##ReSTIRGI",
+                                                                         restirGiSettings.common.denoiserSettings);
+            }
+
             DrawReSTIRMethodFooter(
                 "This GI mode keeps direct lighting in the primary base radiance, reuses one indirect sample through temporal and spatial resampling, and adds a path-traced continuation for glossy reflections and further transport.",
+                restirGiSettings.common.resolveMode,
                 m_ReSTIRGI->GetAccumulatedFrameCount());
           }
         }
@@ -789,8 +893,20 @@ void Application::onUIRender()
               ImGui::TreePop();
             }
 
+            if(IsDenoiseResolveMode(restirSettings.common.resolveMode))
+            {
+              if(DrawDenoiserDebugViewControl(restirSettings.common.denoiserDebugView))
+              {
+                invalidatePathTracingHistory = true;
+              }
+
+              invalidatePathTracingHistory |= DrawDenoiserSettingsSection("Denoiser Settings##ReSTIRPT",
+                                                                         restirSettings.common.denoiserSettings);
+            }
+
             DrawReSTIRMethodFooter(
                 "The baseline path tracer remains the ground truth. This mode keeps a separate ReSTIR PT implementation so we can compare reuse behavior and quality directly.",
+                restirSettings.common.resolveMode,
                 m_ReSTIRPT->GetAccumulatedFrameCount());
           }
         }

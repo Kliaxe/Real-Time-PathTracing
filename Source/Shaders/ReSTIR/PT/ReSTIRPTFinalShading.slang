@@ -1,6 +1,7 @@
 #include <nvshaders/slang_types.h>
 #include "nvshaders/random.h.slang"
 #include "nvshaders/sky_functions.h.slang"
+#include "NRD.hlsli"
 #include "ShaderIncludes/Pbr.h.slang"
 #include "ShaderIncludes/Camera.h.slang"
 #include "ShaderIo.h"
@@ -23,6 +24,95 @@
 #include "ShaderIncludes/ReSTIR/PT/PathReplay.h.slang"
 #include "ShaderIncludes/ReSTIR/PT/Debug.h.slang"
 
+static const float kInvalidDenoiserViewZ     = 1.0e32;
+static const float kDenoiserMissHitDistance  = 65504.0;
+static const float4 kReblurHitDistanceParameters = float4(3.0, 0.1, 20.0, -25.0);
+static const float3 kMinDiffuseDemodulationFactor = float3(0.05, 0.05, 0.05);
+
+float4 PackNrdNormalRoughness(float3 shadingNormal, float roughness)
+{
+  return NRD_FrontEnd_PackNormalAndRoughness(shadingNormal, roughness, 0.0);
+}
+
+float4 PackReblurRadianceHitDistance(float3 radiance, float hitDistance, float viewZ, float roughness, bool isDiffuse)
+{
+  const float normalizedHitDistance =
+      REBLUR_FrontEnd_GetNormHitDist(hitDistance, viewZ, kReblurHitDistanceParameters, isDiffuse ? 1.0 : roughness);
+  return REBLUR_FrontEnd_PackRadianceAndNormHitDist(radiance, normalizedHitDistance, true);
+}
+
+float4 PackBaseColorMetalness(float3 baseColor, float metalness)
+{
+  return float4(saturate(baseColor), saturate(metalness));
+}
+
+float3 ComputeDiffuseDemodulationFactor(ReSTIRPTPrimarySurface primarySurface)
+{
+  const float3 diffuseFactor = primarySurface.albedo * (1.0 - primarySurface.metallic);
+  return max(diffuseFactor, kMinDiffuseDemodulationFactor);
+}
+
+void WriteInvalidDenoiserSignals(int2 pixelPosition)
+{
+  motionVectorsImage[pixelPosition]               = float4(0.0, 0.0, 0.0, 0.0);
+  normalRoughnessImage[pixelPosition]             = float4(0.0, 0.0, 0.0, 0.0);
+  baseColorMetalnessImage[pixelPosition]          = float4(0.0, 0.0, 0.0, 0.0);
+  viewZImage[pixelPosition]                       = kInvalidDenoiserViewZ;
+  diffuseRadianceHitDistanceImage[pixelPosition]  = float4(0.0, 0.0, 0.0, 0.0);
+  specularRadianceHitDistanceImage[pixelPosition] = float4(0.0, 0.0, 0.0, 0.0);
+}
+
+void WriteDenoiserSignals(int2 pixelPosition,
+                          GltfSceneInfo sceneInfo,
+                          ReSTIRPTPrimarySurface primarySurface,
+                          ReSTIRPTReservoir reservoir,
+                          float3 resolvedContinuation)
+{
+  if(!IsValidPrimarySurface(primarySurface))
+  {
+    WriteInvalidDenoiserSignals(pixelPosition);
+    return;
+  }
+
+  const float viewZ = mul(float4(primarySurface.worldPosition, 1.0), sceneInfo.viewMatrix).z;
+  const float3 motion = ComputeDenoiserMotionVector(float2(pixelPosition) + 0.5, primarySurface.worldPosition, sceneInfo);
+  motionVectorsImage[pixelPosition]   = float4(motion, 0.0);
+  normalRoughnessImage[pixelPosition] = PackNrdNormalRoughness(primarySurface.shadingNormal, primarySurface.roughness);
+  baseColorMetalnessImage[pixelPosition] = PackBaseColorMetalness(primarySurface.albedo, primarySurface.metallic);
+  viewZImage[pixelPosition]           = viewZ;
+
+  float3 diffuseRadiance  = max(primarySurface.baseRadiance, float3(0.0));
+  float3 specularRadiance = float3(0.0);
+  float  diffuseHitDistance = 0.0;
+  float  specularHitDistance = 0.0;
+  const float3 diffuseDemodulationFactor = ComputeDiffuseDemodulationFactor(primarySurface);
+
+  if(IsValidReservoir(reservoir) && SafeMax3(resolvedContinuation) > 0.0)
+  {
+    const bool firstBounceIsSpecular = IsSpecularDenoiserLobe(reservoir.candidateKind);
+    const float hitDistance = (reservoir.reconnectionValid != 0u)
+                                  ? length(reservoir.reconnectionPoint - primarySurface.worldPosition)
+                                  : kDenoiserMissHitDistance;
+
+    if(firstBounceIsSpecular)
+    {
+      specularRadiance = resolvedContinuation;
+      specularHitDistance = hitDistance;
+    }
+    else
+    {
+      diffuseRadiance += resolvedContinuation;
+      diffuseHitDistance = hitDistance;
+    }
+  }
+
+  diffuseRadianceHitDistanceImage[pixelPosition] =
+      PackReblurRadianceHitDistance(diffuseRadiance / diffuseDemodulationFactor, diffuseHitDistance, viewZ, primarySurface.roughness,
+                                    true);
+  specularRadianceHitDistanceImage[pixelPosition] =
+      PackReblurRadianceHitDistance(specularRadiance, specularHitDistance, viewZ, primarySurface.roughness, false);
+}
+
 [shader("raygeneration")]
 void rgenMain()
 {
@@ -32,6 +122,7 @@ void rgenMain()
   const float2        pixelCenter = float2(launchID) + 0.5;
 
   float3 resolvedRadiance = float3(0.0);
+  float3 resolvedContinuation = float3(0.0);
 
   const ReSTIRPTPrimarySurface primarySurface = currentSurfaceBuffer[pixelIndex];
   if(IsValidPrimarySurface(primarySurface))
@@ -59,7 +150,8 @@ void rgenMain()
         // The replay payload starts from base radiance, so only the suffix is
         // scaled by the final reservoir weight here.
         const float3 replayedContinuation = max(payload.radiance - primarySurface.baseRadiance, float3(0.0));
-        resolvedRadiance = primarySurface.baseRadiance + replayedContinuation * reservoir.weight;
+        resolvedContinuation = replayedContinuation * reservoir.weight;
+        resolvedRadiance = primarySurface.baseRadiance + resolvedContinuation;
       }
     }
   }
@@ -68,6 +160,9 @@ void rgenMain()
     const float3 primaryDirection = ReconstructWorldDirectionFromPixel(pixelCenter, sceneInfo);
     resolvedRadiance              = SampleEnvironment(sceneInfo, primaryDirection);
   }
+
+  WriteDenoiserSignals(int2(launchID), sceneInfo, primarySurface,
+                       IsValidPrimarySurface(primarySurface) ? currentHistoryReservoirBuffer[pixelIndex] : EmptyReservoir(), resolvedContinuation);
 
   resolvedRadiance = SanitizeRadiance(resolvedRadiance);
   resolvedRadiance = VisualizeReSTIRPTDebug(pixelIndex, resolvedRadiance);

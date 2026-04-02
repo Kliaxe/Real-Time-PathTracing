@@ -89,6 +89,7 @@ private:
   nvvk::Buffer                                    m_TlasInstancesBuffer;
   nvvk::AccelerationStructure                     m_TopLevelAS;
   bool                                            m_HasFrameHistory = false;
+  glm::mat4                                       m_PreviousViewMatrix{1.0f};
   glm::mat4                                       m_PreviousViewProjMatrix{1.0f};
   glm::mat4                                       m_PreviousPreviousViewProjMatrix{1.0f};
   glm::vec3                                       m_PreviousCameraPosition{0.0f};

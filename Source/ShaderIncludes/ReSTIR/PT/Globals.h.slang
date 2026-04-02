@@ -17,5 +17,11 @@
 [[vk::binding(ReSTIRBindingPoints::eReSTIRPreviousSurfaceBuffer)]] StructuredBuffer<ReSTIRPTPrimarySurface> previousSurfaceBuffer;
 [[vk::binding(ReSTIRBindingPoints::eReSTIRNeighborOffsetBuffer)]] StructuredBuffer<ReSTIRNeighborOffset> neighborOffsetBuffer;
 [[vk::binding(ReSTIRBindingPoints::eReSTIRDebugBuffer)]] RWStructuredBuffer<ReSTIRDebugPixel> debugBuffer;
+[[vk::binding(ReSTIRBindingPoints::eReSTIRMotionVectorsImage)]] RWTexture2D<float4> motionVectorsImage;
+[[vk::binding(ReSTIRBindingPoints::eReSTIRNormalRoughnessImage)]] RWTexture2D<float4> normalRoughnessImage;
+[[vk::binding(ReSTIRBindingPoints::eReSTIRBaseColorMetalnessImage)]] RWTexture2D<float4> baseColorMetalnessImage;
+[[vk::binding(ReSTIRBindingPoints::eReSTIRViewZImage)]] RWTexture2D<float> viewZImage;
+[[vk::binding(ReSTIRBindingPoints::eReSTIRDiffuseRadianceHitDistanceImage)]] RWTexture2D<float4> diffuseRadianceHitDistanceImage;
+[[vk::binding(ReSTIRBindingPoints::eReSTIRSpecularRadianceHitDistanceImage)]] RWTexture2D<float4> specularRadianceHitDistanceImage;
 
 #endif

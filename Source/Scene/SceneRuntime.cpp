@@ -212,6 +212,7 @@ void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewM
 
   if(!m_HasFrameHistory)
   {
+    m_PreviousViewMatrix             = viewMatrix;
     m_PreviousViewProjMatrix         = currentViewProjMatrix;
     m_PreviousPreviousViewProjMatrix = currentViewProjMatrix;
     m_PreviousCameraPosition         = cameraPosition;
@@ -219,7 +220,9 @@ void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewM
   }
 
   m_SceneResource.sceneInfo.viewProjMatrix         = currentViewProjMatrix;
+  m_SceneResource.sceneInfo.viewMatrix             = viewMatrix;
   m_SceneResource.sceneInfo.prevViewProjMatrix     = m_PreviousViewProjMatrix;
+  m_SceneResource.sceneInfo.prevViewMatrix         = m_PreviousViewMatrix;
   m_SceneResource.sceneInfo.prevPrevViewProjMatrix = m_PreviousPreviousViewProjMatrix;
 
   // Historical note: the shared shader struct still calls this field
@@ -285,6 +288,7 @@ void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewM
   };
   vkCmdPipelineBarrier2(cmd, &afterUpdateDependency);
 
+  m_PreviousViewMatrix             = viewMatrix;
   m_PreviousPreviousViewProjMatrix = m_PreviousViewProjMatrix;
   m_PreviousViewProjMatrix         = currentViewProjMatrix;
   m_PreviousPreviousCameraPosition = m_PreviousCameraPosition;
@@ -295,6 +299,7 @@ void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewM
 void SceneRuntime::InvalidateFrameHistory()
 {
   m_HasFrameHistory               = false;
+  m_PreviousViewMatrix            = glm::mat4(1.0f);
   m_PreviousViewProjMatrix        = glm::mat4(1.0f);
   m_PreviousPreviousViewProjMatrix = glm::mat4(1.0f);
   m_PreviousCameraPosition        = glm::vec3(0.0f);

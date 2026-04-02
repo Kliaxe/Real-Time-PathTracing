@@ -165,7 +165,9 @@ void AccumulateEmissiveDirectLight(inout PathPayload payload, SurfaceData surfac
 
   // MIS keeps the direct-light sample and BSDF-hit path from double counting the same emissive contribution.
   const float misWeight = MisMixWeight(lightPdf, bsdfPdf);
-  payload.radiance += payload.throughput * radiance * bsdf * (misWeight / lightPdf);
+  const float3 contribution = payload.throughput * radiance * bsdf * (misWeight / lightPdf);
+  payload.radiance += contribution;
+  AccumulateDenoiserRadiance(payload, contribution);
 }
 
 #endif

@@ -22,6 +22,7 @@
 static const uint kReSTIRDILightKindInvalid          = 0u;
 static const uint kReSTIRDILightKindEmissiveTriangle = 1u;
 static const uint kReSTIRDILightKindEnvironment      = 2u;
+static const float kDIDenoiserMissHitDistance        = 65504.0;
 
 typedef ReSTIRDISurface DISurface;
 typedef uint DIMaterial;
@@ -44,6 +45,16 @@ struct DILightSample
   uint   kind;
   float3 normal;
   uint   valid;
+};
+
+struct DIResolvedDirectLighting
+{
+  float3 totalRadiance;
+  float  diffuseHitDistance;
+  float3 diffuseRadiance;
+  float  specularHitDistance;
+  float3 specularRadiance;
+  float  pad0;
 };
 
 float4 ResolveDIBaseColor(GltfMetallicRoughness material, float2 texCoord)
@@ -458,6 +469,44 @@ float3 EvaluateDIBrdfContribution(DISurface surface, float3 lightDir, out float 
   return max(broadContribution + reflectionContribution + clearcoatContribution, float3(0.0));
 }
 
+void EvaluateDIBrdfContributionSplit(DISurface surface, float3 lightDir, out float3 diffuseContribution, out float3 specularContribution, out float pdf)
+{
+  diffuseContribution  = float3(0.0);
+  specularContribution = float3(0.0);
+  pdf                  = 0.0;
+
+  const SurfaceData unpackedSurface = UnpackDIPrimarySurface(surface);
+  const float3 viewDirection        = normalize(pushConst.sceneInfoAddress[0].cameraPosition - surface.worldPosition);
+
+  const DisneyMaterialData material = GetDisneyMaterialData(unpackedSurface);
+  const DisneyBrdfData     brdf     = PrepareBrdfData(unpackedSurface, material, viewDirection, lightDir);
+  const DisneyLobeSetup    setup    = GetLobeSetup(material, brdf);
+
+  const float broadWeight      = BroadGroupProbability(setup);
+  const float reflectionWeight = ReflectionGroupProbability(setup);
+  const float clearcoatWeight  = setup.clearcoatProbability;
+  const float totalWeight      = broadWeight + reflectionWeight + clearcoatWeight;
+  if(totalWeight <= 0.0)
+  {
+    return;
+  }
+
+  float broadPdf      = 0.0;
+  float reflectionPdf = 0.0;
+  float clearcoatPdf  = 0.0;
+
+  diffuseContribution = EvaluateBroadBsdfGroup(material, brdf, setup, broadPdf);
+  const float3 reflectionContribution = EvaluateReflectionBsdfGroup(material, brdf, setup, reflectionPdf);
+  const float3 clearcoatContribution  = EvaluateClearcoatBsdfGroup(material, brdf, setup, clearcoatPdf);
+  specularContribution                = reflectionContribution + clearcoatContribution;
+
+  pdf = broadPdf * (broadWeight / totalWeight) + reflectionPdf * (reflectionWeight / totalWeight)
+        + clearcoatPdf * (clearcoatWeight / totalWeight);
+
+  diffuseContribution  = max(diffuseContribution, float3(0.0));
+  specularContribution = max(specularContribution, float3(0.0));
+}
+
 float DIGetLightSampleTargetPdf(DILightSample lightSample, DISurface surface)
 {
   if(lightSample.valid == 0 || lightSample.solidAnglePdf <= 0.0 || isinf(lightSample.solidAnglePdf) || isnan(lightSample.solidAnglePdf))
@@ -687,6 +736,23 @@ float3 EvaluateLightSampleContribution(DISurface surface, DILightSample lightSam
   return max(brdfCos * lightSample.radiance, float3(0.0));
 }
 
+void EvaluateLightSampleContributionSplit(DISurface surface, DILightSample lightSample, out float3 diffuseContribution, out float3 specularContribution)
+{
+  diffuseContribution  = float3(0.0);
+  specularContribution = float3(0.0);
+  if(lightSample.valid == 0)
+  {
+    return;
+  }
+
+  float  bsdfPdf                = 0.0;
+  float3 diffuseBrdfContribution = float3(0.0);
+  float3 specularBrdfContribution = float3(0.0);
+  EvaluateDIBrdfContributionSplit(surface, lightSample.direction, diffuseBrdfContribution, specularBrdfContribution, bsdfPdf);
+  diffuseContribution  = max(diffuseBrdfContribution * lightSample.radiance, float3(0.0));
+  specularContribution = max(specularBrdfContribution * lightSample.radiance, float3(0.0));
+}
+
 float3 ReconstructMissRadiance(uint2 pixelPosition)
 {
   const GltfSceneInfo sceneInfo   = pushConst.sceneInfoAddress[0];
@@ -695,24 +761,32 @@ float3 ReconstructMissRadiance(uint2 pixelPosition)
   return SampleEnvironment(sceneInfo, worldDirection);
 }
 
-float3 ResolveReservoirDirectLighting(uint2 pixelPosition, DISurface surface, ReSTIRDIReservoir reservoir, bool updateVisibility)
+DIResolvedDirectLighting ResolveReservoirDirectLightingSplit(uint2 pixelPosition,
+                                                             DISurface surface,
+                                                             ReSTIRDIReservoir reservoir,
+                                                             bool updateVisibility)
 {
+  DIResolvedDirectLighting resolved = (DIResolvedDirectLighting)0;
+
   if(!DIIsSurfaceValid(surface))
   {
-    return ReconstructMissRadiance(pixelPosition);
+    resolved.totalRadiance = ReconstructMissRadiance(pixelPosition);
+    return resolved;
   }
 
-  float3 radiance = surface.emission;
+  resolved.totalRadiance   = surface.emission;
+  resolved.diffuseRadiance = surface.emission;
+
   if(!IsValidDIReservoir(reservoir))
   {
-    return radiance;
+    return resolved;
   }
 
-  const DILightInfo   lightInfo    = DILoadLightInfo(GetDIReservoirLightIndex(reservoir), false);
-  const DILightSample lightSample  = DISampleLight(lightInfo, surface, GetDIReservoirSampleUv(reservoir));
+  const DILightInfo   lightInfo   = DILoadLightInfo(GetDIReservoirLightIndex(reservoir), false);
+  const DILightSample lightSample = DISampleLight(lightInfo, surface, GetDIReservoirSampleUv(reservoir));
   if(lightSample.valid == 0 || lightSample.solidAnglePdf <= 0.0 || isinf(lightSample.solidAnglePdf) || isnan(lightSample.solidAnglePdf))
   {
-    return radiance;
+    return resolved;
   }
 
   float3 visibility = float3(1.0);
@@ -740,8 +814,35 @@ float3 ResolveReservoirDirectLighting(uint2 pixelPosition, DISurface surface, Re
     }
   }
 
-  const float invPdf = GetDIReservoirInvPdf(reservoir);
-  return radiance + EvaluateLightSampleContribution(surface, lightSample) * visibility * (invPdf / lightSample.solidAnglePdf);
+  float3 diffuseContribution  = float3(0.0);
+  float3 specularContribution = float3(0.0);
+  EvaluateLightSampleContributionSplit(surface, lightSample, diffuseContribution, specularContribution);
+
+  const float lightWeight = GetDIReservoirInvPdf(reservoir) / lightSample.solidAnglePdf;
+  diffuseContribution *= visibility * lightWeight;
+  specularContribution *= visibility * lightWeight;
+
+  resolved.diffuseRadiance += diffuseContribution;
+  resolved.specularRadiance = specularContribution;
+  resolved.totalRadiance    = resolved.diffuseRadiance + resolved.specularRadiance;
+
+  const float lightHitDistance =
+      (lightInfo.kind == kReSTIRDILightKindEnvironment) ? kDIDenoiserMissHitDistance : max(lightSample.distance, 0.0);
+  if(SafeMax3(diffuseContribution) > 0.0)
+  {
+    resolved.diffuseHitDistance = lightHitDistance;
+  }
+  if(SafeMax3(specularContribution) > 0.0)
+  {
+    resolved.specularHitDistance = lightHitDistance;
+  }
+
+  return resolved;
+}
+
+float3 ResolveReservoirDirectLighting(uint2 pixelPosition, DISurface surface, ReSTIRDIReservoir reservoir, bool updateVisibility)
+{
+  return ResolveReservoirDirectLightingSplit(pixelPosition, surface, reservoir, updateVisibility).totalRadiance;
 }
 
 #endif

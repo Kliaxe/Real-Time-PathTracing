@@ -2,6 +2,7 @@
 
 #include <cstdint>
 
+#include "PathTracing/Common/ResolveMode.h"
 #include "Shaders/ShaderIo.h"
 
 namespace nvsamples
@@ -26,10 +27,12 @@ enum class ReSTIRResamplingMode : uint32_t
 
 struct ReSTIRMethodSettings
 {
-  bool                 accumulate     = false;
+  RenderResolveMode    resolveMode    = RenderResolveMode::eOff;
   ReSTIRResamplingMode resamplingMode = ReSTIRResamplingMode::eTemporalAndSpatial;
   ReSTIRBoilingFilterParameters boilingFilter = GetDefaultReSTIRBoilingFilterParameters();
   shaderio::ReSTIRDebugView      debugView     = shaderio::eReSTIRDebugViewDisabled;
+  DenoiserDebugView              denoiserDebugView = DenoiserDebugView::eFinal;
+  DenoiserSettings               denoiserSettings{};
 };
 
 inline shaderio::ReSTIRInitialSamplingParameters GetDefaultReSTIRInitialSamplingParameters()

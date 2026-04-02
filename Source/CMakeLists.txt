@@ -4,12 +4,22 @@ project(RealTimePathTracing_Source LANGUAGES CXX)
 # Single app lives directly under Source/
 #
 
+set(_thesis_extra_shader_includes
+    "${CMAKE_SOURCE_DIR}/Source"
+)
+
+if(DEFINED THESIS_NRD_SOURCE_DIR)
+    list(APPEND _thesis_extra_shader_includes
+        "${THESIS_NRD_SOURCE_DIR}/Shaders/Include"
+    )
+endif()
+
 setup_thesis_app(
     TARGET     RealTimePathTracing
     SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}"
     SHADER_DIR "${CMAKE_CURRENT_LIST_DIR}/Shaders"
     EXTRA_SHADER_INCLUDES
-        "${CMAKE_SOURCE_DIR}/Source"
+        ${_thesis_extra_shader_includes}
 )
 
 # Keep scene-system sources explicit so they are compiled even though the shared
@@ -30,6 +40,11 @@ target_sources(RealTimePathTracing PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/Scene/SceneRenderer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/Scene/SceneRenderer.h"
     "${CMAKE_CURRENT_LIST_DIR}/Scene/SceneTypes.h"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/PathTraceDenoiserResources.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/PathTraceDenoiserResources.h"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/PathTraceNrdDenoiser.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/PathTraceNrdDenoiser.h"
+    "${CMAKE_CURRENT_LIST_DIR}/PathTracing/Common/ResolveMode.h"
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/PathTracer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/PathTracer.h"
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/ReSTIR/Common/ReSTIRContext.cpp"
@@ -59,6 +74,15 @@ target_sources(RealTimePathTracing PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/ReSTIR/PT/ReSTIRPTRenderer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/ReSTIR/PT/ReSTIRPTRenderer.h"
 )
+
+if(TARGET NRD)
+    target_link_libraries(RealTimePathTracing PRIVATE NRD)
+    target_include_directories(RealTimePathTracing PRIVATE
+        "${THESIS_NRD_SOURCE_DIR}/Include"
+        "${THESIS_NRD_SOURCE_DIR}/Integration"
+    )
+    target_compile_definitions(RealTimePathTracing PRIVATE THESIS_ENABLE_NRD=1)
+endif()
 
 if(BUILD_TESTING)
     add_executable(PathTracingDiagnostics

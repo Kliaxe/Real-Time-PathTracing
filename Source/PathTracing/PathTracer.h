@@ -7,6 +7,9 @@
 #include <vulkan/vulkan_core.h>
 
 #include "Common/GltfUtils.hpp"
+#include "PathTracing/Common/ResolveMode.h"
+#include "PathTraceDenoiserResources.h"
+#include "PathTraceNrdDenoiser.h"
 #include "Shaders/ShaderIo.h"
 #include "nvvk/descriptors.hpp"
 #include "nvvk/gbuffers.hpp"
@@ -44,8 +47,10 @@ public:
 
   struct Settings
   {
-    bool     accumulate = false;
-    uint32_t maxBounces = 8;
+    RenderResolveMode resolveMode       = RenderResolveMode::eOff;
+    DenoiserDebugView denoiserDebugView = DenoiserDebugView::eFinal;
+    DenoiserSettings  denoiserSettings{};
+    uint32_t          maxBounces        = 8;
   };
 
   explicit PathTracer(const CreateInfo& createInfo);
@@ -83,6 +88,19 @@ private:
     VkExtent2D                  viewportSize{};
   };
 
+  struct DenoiserSignature
+  {
+    int                         useSky                  = 0;
+    int                         useHdrEnv               = 0;
+    int                         environmentTextureIndex = -1;
+    int                         _pad0                   = 0;
+    glm::vec3                   backgroundColor{};
+    int                         _pad1 = 0;
+    shaderio::SkySimpleParameters skySimpleParam{};
+    VkDeviceAddress             topLevelAsAddress = 0;
+    VkExtent2D                  viewportSize{};
+  };
+
   void QueryRayTracingProperties();
   void CreateDescriptorSetLayout();
   void CreatePipelineLayout();
@@ -92,7 +110,9 @@ private:
   void CreateOrResizeAccumulationImage(VkExtent2D size);
   void DestroyAccumulationImage();
   void ScheduleAccumulationImageDestroy(nvvk::Image image);
+  void TransitionStorageImageForWrite(VkCommandBuffer cmd, nvvk::Image& image, VkPipelineStageFlags2 dstStageMask);
   AccumulationSignature MakeAccumulationSignature(const RenderInput& input, VkExtent2D size) const;
+  DenoiserSignature MakeDenoiserSignature(const RenderInput& input, VkExtent2D size) const;
 
   nvapp::Application*      m_App       = nullptr;
   nvvk::ResourceAllocator* m_Allocator = nullptr;
@@ -103,8 +123,10 @@ private:
   uint32_t                 m_AccumulatedFrames     = 0;
   bool                     m_AccumulationInvalidated = true;
   bool                     m_HasAccumulationSignature = false;
+  bool                     m_HasDenoiserSignature = false;
   Settings                 m_Settings{};
   AccumulationSignature    m_LastAccumulationSignature{};
+  DenoiserSignature        m_LastDenoiserSignature{};
 
   nvvk::DescriptorPack        m_DescPack;
   VkPipelineLayout            m_PipelineLayout = VK_NULL_HANDLE;
@@ -112,6 +134,8 @@ private:
   nvvk::SBTGenerator          m_SbtGenerator;
   nvvk::Buffer                m_SbtBuffer;
   nvvk::Image                 m_AccumulationImage;
+  PathTraceDenoiserResources  m_DenoiserResources;
+  PathTraceNrdDenoiser        m_NrdDenoiser;
   nvvk::SBTGenerator::Regions m_SbtRegions{};
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_RtProperties{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
