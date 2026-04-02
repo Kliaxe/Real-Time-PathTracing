@@ -160,13 +160,7 @@ void main(uint2 globalIndex : SV_DispatchThreadID, uint2 localIndex : SV_GroupTh
   // pass handles invalid local candidates and shifted history uniformly.
   currentReservoir = ShiftReservoirToSurface(currentReservoir, currentSurface, currentSurface, sceneInfo.cameraPosition, currentJacobian,
                                              currentStatus);
-  if(currentReservoir.valid == 0)
-  {
-    currentReservoir = ApplyPTBoilingFilter(localIndex, currentReservoir);
-    StoreTemporalOutput(pixelIndex, currentReservoir);
-    WriteDebugPixel(pixelIndex, currentReservoir, currentJacobian, 0.0, currentStatus, debugBuffer[pixelIndex].spatialStatus);
-    return;
-  }
+  const bool hasCurrentCandidate = currentReservoir.valid != 0u;
 
   const float expectedPreviousDepth = length(currentSurface.worldPosition - sceneInfo.prevCameraPosition);
   ReSTIRPTPrimarySurface previousSurface = EmptyPrimarySurface();
@@ -200,16 +194,20 @@ void main(uint2 globalIndex : SV_DispatchThreadID, uint2 localIndex : SV_GroupTh
   bool selectedPreviousSample = false;
   // RIS first inserts the current-frame candidate, then one history candidate
   // whose effective sample count is capped by the max history length.
-  CombineReservoir(combinedReservoir, currentReservoir, currentReservoir.weight * max(currentReservoir.M, 1.0), max(currentReservoir.M, 1.0),
-                   RandomFloat(rng), false);
+  if(hasCurrentCandidate)
+  {
+    CombineReservoir(combinedReservoir, currentReservoir, currentReservoir.weight * currentReservoir.M, currentReservoir.M, RandomFloat(rng),
+                     false);
+  }
 
   const float historyM = min(previousReservoir.M, float(pushConst.temporalResampling.maxHistoryLength));
   previousReservoir.M = historyM;
+  previousReservoir.age += 1u;
   selectedPreviousSample =
       CombineReservoir(combinedReservoir, previousReservoir, previousReservoir.weight * historyM, historyM, RandomFloat(rng), true);
 
   float normalizationNumerator   = combinedReservoir.targetPdf;
-  float normalizationDenominator = combinedReservoir.targetPdf * max(currentReservoir.M, 1.0);
+  float normalizationDenominator = hasCurrentCandidate ? (combinedReservoir.targetPdf * currentReservoir.M) : 0.0;
 
   float inverseJacobian = 1.0;
   uint  inverseStatus   = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
@@ -223,9 +221,18 @@ void main(uint2 globalIndex : SV_DispatchThreadID, uint2 localIndex : SV_GroupTh
   normalizationDenominator += temporalTargetPdf * historyM;
   ApplyReservoirBiasCorrectionScale(combinedReservoir, normalizationNumerator, normalizationDenominator);
 
-  const uint finalStatus = (selectedPreviousSample && combinedReservoir.valid == 0u) ? inverseStatus
-                                                                                      : uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
+  uint finalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
+  if(selectedPreviousSample && combinedReservoir.valid == 0u)
+  {
+    finalStatus = inverseStatus;
+  }
+  else if(!hasCurrentCandidate && !selectedPreviousSample)
+  {
+    finalStatus = currentStatus;
+  }
+
   combinedReservoir = ApplyPTBoilingFilter(localIndex, combinedReservoir);
   StoreTemporalOutput(pixelIndex, combinedReservoir);
-  WriteDebugPixel(pixelIndex, combinedReservoir, previousJacobian, combinedReservoir.M, finalStatus, debugBuffer[pixelIndex].spatialStatus);
+  const float debugJacobian = selectedPreviousSample ? previousJacobian : currentJacobian;
+  WriteDebugPixel(pixelIndex, combinedReservoir, debugJacobian, combinedReservoir.M, finalStatus, debugBuffer[pixelIndex].spatialStatus);
 }

@@ -61,12 +61,7 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
   uint  centerStatus   = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
   centerReservoir = ShiftReservoirToSurface(centerReservoir, centerSurface, centerSurface, sceneInfo.cameraPosition, centerJacobian,
                                             centerStatus);
-  if(centerReservoir.valid == 0)
-  {
-    currentHistoryReservoirBuffer[pixelIndex] = centerReservoir;
-    WriteDebugPixel(pixelIndex, centerReservoir, centerJacobian, 0.0, debugBuffer[pixelIndex].temporalStatus, centerStatus);
-    return;
-  }
+  const bool hasCenterCandidate = centerReservoir.valid != 0u;
 
   uint rng = HashUint((pushConst.rngFrameNumber + 17u) ^ pixelIndex);
   ReSTIRPTReservoir combinedReservoir = EmptyReservoir();
@@ -76,8 +71,11 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
   const uint offsetRotation           = pushConst.neighborOffsetCount > 0u ? (rng % pushConst.neighborOffsetCount) : 0u;
   // Spatial reuse always starts from the center pixel's own reservoir, then
   // tries to improve it with a small neighbor set.
-  CombineReservoir(combinedReservoir, centerReservoir, centerReservoir.weight * max(centerReservoir.M, 1.0), max(centerReservoir.M, 1.0),
-                   RandomFloat(rng), centerReservoir.age > 0u);
+  if(hasCenterCandidate)
+  {
+    CombineReservoir(combinedReservoir, centerReservoir, centerReservoir.weight * centerReservoir.M, centerReservoir.M, RandomFloat(rng),
+                     centerReservoir.age > 0u);
+  }
 
   const uint sampleCount = min(pushConst.spatialResampling.numSpatialSamples, pushConst.neighborOffsetCount);
   for(uint sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
@@ -122,6 +120,13 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
 
     float inverseJacobian = 1.0;
     uint  inverseStatus   = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
+    ReSTIRPTReservoir shiftedNeighbor =
+        ShiftReservoirToSurface(neighborReservoir, neighborSurface, centerSurface, sceneInfo.cameraPosition, inverseJacobian, inverseStatus);
+    if(shiftedNeighbor.valid == 0)
+    {
+      continue;
+    }
+
     ReSTIRPTReservoir selectedAtNeighbor =
         ShiftReservoirToSurface(combinedReservoir, centerSurface, neighborSurface, sceneInfo.cameraPosition, inverseJacobian, inverseStatus);
     const float neighborTargetPdf = IsValidReservoir(selectedAtNeighbor) ? selectedAtNeighbor.targetPdf : 0.0;
@@ -135,8 +140,16 @@ void main(uint2 globalIndex : SV_DispatchThreadID)
 
   ApplyReservoirBiasCorrectionScale(combinedReservoir, normalizationNumerator, normalizationDenominator);
 
-  const uint finalStatus = (selectedNeighborIndex >= 0 && combinedReservoir.valid == 0u) ? selectedInverseStatus
-                                                                                          : uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
+  uint finalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
+  if(selectedNeighborIndex >= 0 && combinedReservoir.valid == 0u)
+  {
+    finalStatus = selectedInverseStatus;
+  }
+  else if(!hasCenterCandidate && selectedNeighborIndex < 0)
+  {
+    finalStatus = centerStatus;
+  }
+
   currentHistoryReservoirBuffer[pixelIndex] = combinedReservoir;
   WriteDebugPixel(pixelIndex, combinedReservoir, selectedJacobian, combinedReservoir.M, debugBuffer[pixelIndex].temporalStatus, finalStatus);
 }

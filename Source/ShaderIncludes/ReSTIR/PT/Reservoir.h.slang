@@ -42,7 +42,9 @@ bool CombineReservoir(inout ReSTIRPTReservoir targetReservoir,
     targetReservoir.continuationSeed       = candidate.continuationSeed;
     targetReservoir.candidateKind          = candidate.candidateKind;
     targetReservoir.reconnectionValid      = candidate.reconnectionValid;
-    targetReservoir.age                    = candidateFromHistory ? (candidate.age + 1u) : 0u;
+    // Reservoir age advances once during temporal validation; combine keeps the
+    // chosen candidate's existing age so spatial reuse does not age it again.
+    targetReservoir.age                    = candidate.age;
     targetReservoir.valid                  = 1u;
   }
 

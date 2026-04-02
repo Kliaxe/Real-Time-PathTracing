@@ -165,6 +165,27 @@ bool DrawReSTIRTemporalControls(shaderio::ReSTIRTemporalResamplingParameters& se
     changed                   = true;
   }
 
+  int maxReservoirAge = static_cast<int>(settings.maxReservoirAge);
+  if(ImGui::SliderInt("Max Reservoir Age", &maxReservoirAge, 1, 64))
+  {
+    settings.maxReservoirAge = static_cast<uint32_t>(maxReservoirAge);
+    changed                  = true;
+  }
+
+  bool enableFallbackSampling = (settings.enableFallbackSampling != 0u);
+  if(ImGui::Checkbox("Fallback Sampling", &enableFallbackSampling))
+  {
+    settings.enableFallbackSampling = enableFallbackSampling ? 1u : 0u;
+    changed                         = true;
+  }
+
+  bool enablePermutationSampling = (settings.enablePermutationSampling != 0u);
+  if(ImGui::Checkbox("Permutation Sampling", &enablePermutationSampling))
+  {
+    settings.enablePermutationSampling = enablePermutationSampling ? 1u : 0u;
+    changed                            = true;
+  }
+
   changed |= ImGui::SliderFloat("Temporal Depth Threshold", &settings.depthThreshold, 0.0f, 1.0f, "%.3f");
   changed |= ImGui::SliderFloat("Temporal Normal Threshold", &settings.normalThreshold, 0.0f, 1.0f, "%.2f");
   return changed;
@@ -730,27 +751,6 @@ void Application::onUIRender()
               {
                 restirSettings.common.enableVisibilityValidation = enableVisibilityValidation;
                 invalidatePathTracingHistory                     = true;
-              }
-
-              int maxReservoirAge = static_cast<int>(restirSettings.common.temporalResampling.maxReservoirAge);
-              if(ImGui::SliderInt("Max Reservoir Age", &maxReservoirAge, 1, 64))
-              {
-                restirSettings.common.temporalResampling.maxReservoirAge = static_cast<uint32_t>(maxReservoirAge);
-                invalidatePathTracingHistory                             = true;
-              }
-
-              bool enablePermutationSampling = restirSettings.common.temporalResampling.enablePermutationSampling != 0;
-              if(ImGui::Checkbox("Enable Temporal Permutation Sampling", &enablePermutationSampling))
-              {
-                restirSettings.common.temporalResampling.enablePermutationSampling = enablePermutationSampling ? 1u : 0u;
-                invalidatePathTracingHistory                                       = true;
-              }
-
-              bool enableFallbackSampling = restirSettings.common.temporalResampling.enableFallbackSampling != 0;
-              if(ImGui::Checkbox("Enable Temporal Fallback Sample", &enableFallbackSampling))
-              {
-                restirSettings.common.temporalResampling.enableFallbackSampling = enableFallbackSampling ? 1u : 0u;
-                invalidatePathTracingHistory                                    = true;
               }
 
               ImGui::TextWrapped("The thesis baseline uses fixed-threshold reconnection plus optional ray-query visibility validation.");
