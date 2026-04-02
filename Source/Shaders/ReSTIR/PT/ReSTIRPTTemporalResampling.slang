@@ -49,6 +49,7 @@ bool FindTemporalHistoryCandidate(uint2 viewportSize,
                                   uint2 pixelPosition,
                                   uint pixelIndex,
                                   ReSTIRPTPrimarySurface currentSurface,
+                                  float3 screenSpaceMotion,
                                   float expectedPreviousDepth,
                                   out ReSTIRPTPrimarySurface previousSurface,
                                   out ReSTIRPTReservoir previousReservoir,
@@ -58,8 +59,8 @@ bool FindTemporalHistoryCandidate(uint2 viewportSize,
   previousReservoir  = EmptyReservoir();
   rejectStatus       = uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface);
 
-  const float3 reprojectedPixel = ReprojectWorldPositionToPixel(currentSurface.worldPosition, pushConst.sceneInfoAddress[0]);
-  const int2   previousPixel    = int2(round(reprojectedPixel.xy));
+  const float2 pixelCenter      = float2(pixelPosition) + 0.5;
+  const int2   previousPixel    = int2(round(pixelCenter + screenSpaceMotion.xy - 0.5));
   const float  depthThreshold   = max(expectedPreviousDepth * pushConst.temporalResampling.depthThreshold, 1.0e-4);
   const int    radius           = 1;
   const int    temporalSampleCount = 5;
@@ -162,12 +163,25 @@ void main(uint2 globalIndex : SV_DispatchThreadID, uint2 localIndex : SV_GroupTh
                                              currentStatus);
   const bool hasCurrentCandidate = currentReservoir.valid != 0u;
 
-  const float expectedPreviousDepth = length(currentSurface.worldPosition - sceneInfo.prevCameraPosition);
+  const float2 pixelCenter = float2(globalIndex) + 0.5;
+  float3 temporalMotionVector = float3(0.0, 0.0, 0.0);
+  if(!TryComputeReSTIRTemporalMotionVector(pixelCenter, currentSurface.worldPosition, currentSurface.linearDepth, sceneInfo,
+                                           temporalMotionVector))
+  {
+    currentReservoir = ApplyPTBoilingFilter(localIndex, currentReservoir);
+    StoreTemporalOutput(pixelIndex, currentReservoir);
+    WriteDebugPixel(pixelIndex, currentReservoir, currentJacobian, currentReservoir.valid != 0u ? 1.0 : 0.0,
+                    uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedNoHistory), debugBuffer[pixelIndex].spatialStatus);
+    return;
+  }
+
+  const float3 screenSpaceMotion = ConvertMotionVectorToPixelSpace(pixelCenter, temporalMotionVector, sceneInfo);
+  const float expectedPreviousDepth = currentSurface.linearDepth + screenSpaceMotion.z;
   ReSTIRPTPrimarySurface previousSurface = EmptyPrimarySurface();
   ReSTIRPTReservoir previousReservoir = EmptyReservoir();
   uint rejectStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface);
-  if(!FindTemporalHistoryCandidate(viewportSize, globalIndex, pixelIndex, currentSurface, expectedPreviousDepth, previousSurface,
-                                   previousReservoir, rejectStatus))
+  if(!FindTemporalHistoryCandidate(viewportSize, globalIndex, pixelIndex, currentSurface, screenSpaceMotion, expectedPreviousDepth,
+                                   previousSurface, previousReservoir, rejectStatus))
   {
     currentReservoir = ApplyPTBoilingFilter(localIndex, currentReservoir);
     StoreTemporalOutput(pixelIndex, currentReservoir);

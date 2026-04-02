@@ -52,9 +52,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
     return;
   }
 
-  const GltfSceneInfo sceneInfo      = pushConst.sceneInfoAddress[0];
-  const float3 previousPixelAndDepth = ReprojectWorldPositionToPixel(surface.worldPosition, sceneInfo);
-  if(previousPixelAndDepth.x < 0.0 || previousPixelAndDepth.y < 0.0)
+  const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
+  const float2 pixelCenter      = float2(pixelPosition) + 0.5;
+  float3 temporalMotionVector   = float3(0.0, 0.0, 0.0);
+  if(!TryComputeReSTIRTemporalMotionVector(pixelCenter, surface.worldPosition, surface.linearDepth, sceneInfo, temporalMotionVector))
   {
     const ReSTIRGIReservoir filteredReservoir = ApplyGIBoilingFilter(groupThreadID.xy, currentReservoir);
     StoreGIReservoir(filteredReservoir, giParams.reservoirBufferParams,
@@ -65,9 +66,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
     return;
   }
 
-  const float2 currentPixel      = float2(pixelPosition);
-  const float  previousDepth     = length(surface.worldPosition - sceneInfo.prevCameraPosition);
-  const float3 screenSpaceMotion = float3(previousPixelAndDepth.xy - currentPixel, previousDepth - surface.linearDepth);
+  const float3 screenSpaceMotion = ConvertMotionVectorToPixelSpace(pixelCenter, temporalMotionVector, sceneInfo);
 
   ReSTIRRandomSamplerState rng = InitRandomSampler(pixelPosition, giParams.runtimeParams.frameIndex, 4u);
   ReSTIRGITemporalResamplingParameters temporalParams = giParams.temporalResampling;
