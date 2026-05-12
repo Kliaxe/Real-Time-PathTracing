@@ -21,9 +21,7 @@
 #define SHADERIO_H
 
 #include "Common/IoGltf.h"
-#include "ReSTIR/Common/ReSTIRParameters.h"
-#include "ReSTIR/DI/ReSTIRDIParameters.h"
-#include "ReSTIR/GI/ReSTIRGIParameters.h"
+#include "ReSTIR/Parameters.h"
 
 NAMESPACE_SHADERIO_BEGIN()
 
@@ -39,28 +37,6 @@ enum BindingPoints
     eViewZImage                       = 7,
     eDiffuseRadianceHitDistanceImage  = 8,
     eSpecularRadianceHitDistanceImage = 9,
-  };
-
-enum ReSTIRBindingPoints
-{
-  eReSTIRTextures                      = 0,
-  eReSTIRTlas                          = 1,
-  eReSTIROutputImage                   = 2,
-  eReSTIRAccumulationImage             = 3,
-  eReSTIRInitialReservoirBuffer        = 4,
-  eReSTIRScratchReservoirBuffer        = 5,
-  eReSTIRCurrentHistoryReservoirBuffer = 6,
-  eReSTIRPreviousHistoryReservoirBuffer = 7,
-  eReSTIRCurrentSurfaceBuffer          = 8,
-  eReSTIRPreviousSurfaceBuffer         = 9,
-    eReSTIRNeighborOffsetBuffer          = 10,
-    eReSTIRDebugBuffer                   = 11,
-    eReSTIRMotionVectorsImage            = 12,
-    eReSTIRNormalRoughnessImage          = 13,
-    eReSTIRBaseColorMetalnessImage       = 14,
-    eReSTIRViewZImage                    = 15,
-    eReSTIRDiffuseRadianceHitDistanceImage = 16,
-    eReSTIRSpecularRadianceHitDistanceImage = 17,
   };
 
 enum ReSTIRDIBindingPoints
@@ -81,27 +57,6 @@ enum ReSTIRDIBindingPoints
   eReSTIRDIViewZImage                     = 13,
   eReSTIRDIDiffuseRadianceHitDistanceImage = 14,
   eReSTIRDISpecularRadianceHitDistanceImage = 15,
-};
-
-enum ReSTIRGIBindingPoints
-{
-  eReSTIRGITextures             = 0,
-  eReSTIRGITlas                 = 1,
-  eReSTIRGIOutputImage          = 2,
-  eReSTIRGIAccumulationImage    = 3,
-  eReSTIRGIReservoirBuffer      = 4,
-  eReSTIRGIInitialSampleBuffer  = 5,
-  eReSTIRGICurrentSurfaceBuffer = 6,
-  eReSTIRGIPreviousSurfaceBuffer = 7,
-  eReSTIRGINeighborOffsetBuffer = 8,
-  eReSTIRGIParamsBuffer         = 9,
-  eReSTIRGIDebugBuffer          = 10,
-  eReSTIRGIMotionVectorsImage             = 11,
-  eReSTIRGINormalRoughnessImage           = 12,
-  eReSTIRGIBaseColorMetalnessImage        = 13,
-  eReSTIRGIViewZImage                     = 14,
-  eReSTIRGIDiffuseRadianceHitDistanceImage = 15,
-  eReSTIRGISpecularRadianceHitDistanceImage = 16,
 };
 
 struct TutoPushConstant
@@ -145,21 +100,6 @@ enum ReSTIRDIPassType
   eReSTIRDIPassTypeFinalShading    = 3u,
 };
 
-enum ReSTIRPTCandidateKind
-{
-  eReSTIRPTCandidateKindBroad = 0u,
-  eReSTIRPTCandidateKindReflection = 1u,
-  eReSTIRPTCandidateKindGlass = 2u,
-  eReSTIRPTCandidateKindClearcoat = 3u,
-};
-
-enum ReSTIRPTPathTraceInvocationType
-{
-  eReSTIRPTPathTraceInvocationTypeNone = 0u,
-  eReSTIRPTPathTraceInvocationTypeInitial = 1u,
-  eReSTIRPTPathTraceInvocationTypeReplay = 2u,
-};
-
 enum ReSTIRDebugView
 {
   eReSTIRDebugViewDisabled = 0u,
@@ -171,12 +111,6 @@ enum ReSTIRDebugView
   eReSTIRDebugViewSpatialStatus = 6u,
   eReSTIRDebugViewShiftJacobian = 7u,
   eReSTIRDebugViewReuseCount = 8u,
-};
-
-enum ReSTIRGISampleKind
-{
-  eReSTIRGISampleKindSurface = 0u,
-  eReSTIRGISampleKindEnvironment = 1u,
 };
 
 enum ReSTIRShiftStatus
@@ -191,62 +125,6 @@ enum ReSTIRShiftStatus
   eReSTIRShiftStatusRejectedHistoryAge = 7u,
 };
 
-struct ReSTIRInitialSamplingParameters
-{
-  uint numInitialSamples;
-  uint maxBounceDepth;
-  uint pad0;
-  uint pad1;
-};
-
-struct ReSTIRPTReconnectionParameters
-{
-  float roughnessThreshold;
-  float distanceThreshold;
-  uint pad0;
-  uint pad1;
-};
-
-struct ReSTIRTemporalResamplingParameters
-{
-  float depthThreshold;
-  float normalThreshold;
-  uint  maxHistoryLength;
-  uint  maxReservoirAge;
-  uint  enablePermutationSampling;
-  uint  enableFallbackSampling;
-  uint  uniformRandomNumber;
-};
-
-struct ReSTIRSpatialResamplingParameters
-{
-  uint  numSpatialSamples;
-  uint  pad0;
-  uint  pad1;
-  uint  pad2;
-  float samplingRadius;
-  float normalThreshold;
-  float depthThreshold;
-  float pad3;
-};
-
-struct ReSTIRPTPushConstant
-{
-  GltfSceneInfo* sceneInfoAddress;
-  uint           rngFrameNumber;
-  uint           accumulatedFrames;
-  uint           flags;
-  ReSTIRInitialSamplingParameters     initialSampling;
-  ReSTIRTemporalResamplingParameters  temporalResampling;
-  ReSTIRSpatialResamplingParameters   spatialResampling;
-  ReSTIRBoilingFilterParameters       boilingFilter;
-  ReSTIRPTReconnectionParameters      reconnection;
-  uint           enableVisibilityValidation;
-  uint           neighborOffsetCount;
-  uint           debugView;
-  uint           pathTraceInvocationType;
-};
-
 struct ReSTIRDIParameters
 {
   ReSTIRRuntimeParameters                runtimeParams;
@@ -255,31 +133,10 @@ struct ReSTIRDIParameters
   ReSTIRDIInitialSamplingParameters      initialSampling;
   ReSTIRDITemporalResamplingParameters   temporalResampling;
   ReSTIRDISpatialResamplingParameters    spatialResampling;
-  ReSTIRBoilingFilterParameters          boilingFilter;
   ReSTIRDIShadingParameters              shading;
 };
 
 struct ReSTIRDIPushConstant
-{
-  GltfSceneInfo* sceneInfoAddress;
-  uint           accumulatedFrames;
-  uint           flags;
-  uint           continuationMaxBounces;
-  uint           debugView;
-};
-
-struct ReSTIRGIParameters
-{
-  ReSTIRRuntimeParameters              runtimeParams;
-  ReSTIRReservoirBufferParameters      reservoirBufferParams;
-  ReSTIRGIBufferIndices                bufferIndices;
-  ReSTIRGITemporalResamplingParameters temporalResampling;
-  ReSTIRGISpatialResamplingParameters  spatialResampling;
-  ReSTIRBoilingFilterParameters        boilingFilter;
-  ReSTIRGIShadingParameters            shading;
-};
-
-struct ReSTIRGIPushConstant
 {
   GltfSceneInfo* sceneInfoAddress;
   uint           accumulatedFrames;
@@ -324,104 +181,6 @@ struct ReSTIRDISurface
   uint   pad5;
 };
 
-struct ReSTIRPTPrimarySurface
-{
-  float3 worldPosition;
-  float  linearDepth;
-  float3 shadingNormal;
-  float  roughness;
-  float3 geometricNormal;
-  float  metallic;
-  float3 tangent;
-  float  specular;
-  float3 bitangent;
-  float  specularTint;
-  float3 albedo;
-  float  transmission;
-  float3 emission;
-  float  attenuationDistance;
-  float3 attenuationColor;
-  float  volumeThickness;
-  float3 sheenColor;
-  float  refractionIndex;
-  float  clearcoat;
-  float  clearcoatRoughness;
-  float  sheenRoughness;
-  float  subsurface;
-  float  anisotropy;
-  uint   materialIndex;
-  uint   isFrontFace;
-  uint   valid;
-  uint   pad0;
-  uint   pad1;
-  float3 baseRadiance;
-  float  pad2;
-};
-
-struct ReSTIRGIPrimarySurface
-{
-  float3 worldPosition;
-  float  linearDepth;
-  float3 shadingNormal;
-  float  roughness;
-  float3 geometricNormal;
-  float  metallic;
-  float3 tangent;
-  float  specular;
-  float3 bitangent;
-  float  specularTint;
-  float3 albedo;
-  float  transmission;
-  float3 emission;
-  float  attenuationDistance;
-  float3 attenuationColor;
-  float  volumeThickness;
-  float3 sheenColor;
-  float  refractionIndex;
-  float  clearcoat;
-  float  clearcoatRoughness;
-  float  sheenRoughness;
-  float  subsurface;
-  float  anisotropy;
-  uint   materialIndex;
-  uint   isFrontFace;
-  uint   valid;
-  uint   pad0;
-  uint   pad1;
-  float3 baseRadiance;
-  float  pad2;
-};
-
-struct ReSTIRGIReservoir
-{
-  float3 samplePosition;
-  float  weightSum;
-  float3 sampleNormal;
-  uint   M;
-  float3 sampleRadiance;
-  uint   age;
-  float3 sampleDirection;
-  uint   sampleKind;
-};
-
-struct ReSTIRPTReservoir
-{
-  float3 cachedIncidentRadiance;
-  float  targetPdf;
-  float3 localOutgoingDirection;
-  float  weight;
-  float3 reconnectionPoint;
-  float  M;
-  float3 reconnectionNormal;
-  uint   age;
-  uint   continuationSeed;
-  uint   candidateKind;
-  uint   valid;
-  uint   reconnectionValid;
-  uint   pad0;
-  uint   pad1;
-};
-
 struct ReSTIRNeighborOffset
 {
   float2 offset;
@@ -443,13 +202,6 @@ struct ReSTIRDebugPixel
 CHECK_STRUCT_ALIGNMENT(ReSTIRDISurface)
 CHECK_STRUCT_ALIGNMENT(ReSTIRDIParameters)
 CHECK_STRUCT_ALIGNMENT(ReSTIRDIPushConstant)
-CHECK_STRUCT_ALIGNMENT(ReSTIRGIPrimarySurface)
-CHECK_STRUCT_ALIGNMENT(ReSTIRGIReservoir)
-CHECK_STRUCT_ALIGNMENT(ReSTIRGIParameters)
-CHECK_STRUCT_ALIGNMENT(ReSTIRGIPushConstant)
-CHECK_STRUCT_ALIGNMENT(ReSTIRPTPrimarySurface)
-CHECK_STRUCT_ALIGNMENT(ReSTIRPTReservoir)
-CHECK_STRUCT_ALIGNMENT(ReSTIRPTPushConstant)
 
 NAMESPACE_SHADERIO_END()
 
