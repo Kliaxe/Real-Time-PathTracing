@@ -223,8 +223,11 @@ void rgenMain()
     resolvedRadiance = payload.radiance;
   }
 
-  WriteDenoiserSignals(int2(pixelPosition), surface, resolvedDiffuseRadiance, diffuseHitDistance, resolvedSpecularRadiance,
-                       specularHitDistance);
+  if((pushConst.flags & uint(ReSTIRFlags::eReSTIRFlagWriteDenoiserSignals)) != 0)
+  {
+    WriteDenoiserSignals(int2(pixelPosition), surface, resolvedDiffuseRadiance, diffuseHitDistance, resolvedSpecularRadiance,
+                         specularHitDistance);
+  }
 
   resolvedRadiance = SanitizeRadiance(resolvedRadiance);
   resolvedRadiance = VisualizeReSTIRDIDebug(pixelIndex, resolvedRadiance);

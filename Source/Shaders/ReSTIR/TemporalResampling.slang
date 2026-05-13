@@ -27,8 +27,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
     StoreDIReservoir(emptyReservoir, diParams.reservoirBufferParams,
                      PixelPosToReservoirPos(pixelPosition),
                      diParams.bufferIndices.temporalResamplingOutputBufferIndex);
-    WriteDIDebugPixel(pixelIndex, emptyReservoir, 1.0, 0.0, uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface),
-                      debugBuffer[pixelIndex].spatialStatus);
+    if(IsReSTIRDebugEnabled())
+    {
+      WriteDIDebugPixel(pixelIndex, emptyReservoir, 1.0, 0.0, uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface),
+                        debugBuffer[pixelIndex].spatialStatus);
+    }
     return;
   }
 
@@ -40,8 +43,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
     StoreDIReservoir(currentReservoir, diParams.reservoirBufferParams,
                      PixelPosToReservoirPos(pixelPosition),
                      diParams.bufferIndices.temporalResamplingOutputBufferIndex);
-    WriteDIDebugPixel(pixelIndex, currentReservoir, 1.0, currentReservoir.M, uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedNoHistory),
-                      debugBuffer[pixelIndex].spatialStatus);
+    if(IsReSTIRDebugEnabled())
+    {
+      WriteDIDebugPixel(pixelIndex, currentReservoir, 1.0, currentReservoir.M, uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedNoHistory),
+                        debugBuffer[pixelIndex].spatialStatus);
+    }
     return;
   }
 
@@ -70,5 +76,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
     temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
   }
 
-  WriteDIDebugPixel(pixelIndex, temporalReservoir, 1.0, temporalReservoir.M, temporalStatus, debugBuffer[pixelIndex].spatialStatus);
+  if(IsReSTIRDebugEnabled())
+  {
+    WriteDIDebugPixel(pixelIndex, temporalReservoir, 1.0, temporalReservoir.M, temporalStatus, debugBuffer[pixelIndex].spatialStatus);
+  }
 }

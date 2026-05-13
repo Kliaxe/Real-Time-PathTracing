@@ -90,6 +90,7 @@ enum ReSTIRFlags
   eReSTIRFlagInitialWriteToHistory = 0x10u,
   eReSTIRFlagTemporalWriteToScratch = 0x20u,
   eReSTIRFlagSpatialReadFromScratch = 0x40u,
+  eReSTIRFlagWriteDenoiserSignals = 0x80u,
 };
 
 enum ReSTIRDIPassType

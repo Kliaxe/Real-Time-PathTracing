@@ -26,8 +26,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     StoreDIReservoir(emptyReservoir, diParams.reservoirBufferParams,
                      PixelPosToReservoirPos(pixelPosition),
                      diParams.bufferIndices.spatialResamplingOutputBufferIndex);
-    WriteDIDebugPixel(pixelIndex, emptyReservoir, 1.0, 0.0, debugBuffer[pixelIndex].temporalStatus,
-                      uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface));
+    if(IsReSTIRDebugEnabled())
+    {
+      WriteDIDebugPixel(pixelIndex, emptyReservoir, 1.0, 0.0, debugBuffer[pixelIndex].temporalStatus,
+                        uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface));
+    }
     return;
   }
 
@@ -46,5 +49,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                                 || spatialReservoir.age != centerReservoir.age;
   const uint spatialStatus = selectedNeighbor ? uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted)
                                               : uint(ReSTIRShiftStatus::eReSTIRShiftStatusNone);
-  WriteDIDebugPixel(pixelIndex, spatialReservoir, 1.0, spatialReservoir.M, debugBuffer[pixelIndex].temporalStatus, spatialStatus);
+  if(IsReSTIRDebugEnabled())
+  {
+    WriteDIDebugPixel(pixelIndex, spatialReservoir, 1.0, spatialReservoir.M, debugBuffer[pixelIndex].temporalStatus, spatialStatus);
+  }
 }

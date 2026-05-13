@@ -8,6 +8,11 @@ ReSTIRDebugPixel MakeDefaultDebugPixel()
   return (ReSTIRDebugPixel)0;
 }
 
+bool IsReSTIRDebugEnabled()
+{
+  return pushConst.debugView != uint(ReSTIRDebugView::eReSTIRDebugViewDisabled);
+}
+
 void WriteReSTIRDebugPixel(uint pixelIndex,
                            float targetPdf,
                            float reservoirWeight,
@@ -18,6 +23,11 @@ void WriteReSTIRDebugPixel(uint pixelIndex,
                            uint temporalStatus,
                            uint spatialStatus)
 {
+  if(!IsReSTIRDebugEnabled())
+  {
+    return;
+  }
+
   ReSTIRDebugPixel debugPixel = MakeDefaultDebugPixel();
   debugPixel.targetPdf        = targetPdf;
   debugPixel.reservoirWeight  = reservoirWeight;
@@ -124,12 +134,22 @@ void WriteDIDebugPixel(uint pixelIndex,
                        uint temporalStatus,
                        uint spatialStatus)
 {
+  if(!IsReSTIRDebugEnabled())
+  {
+    return;
+  }
+
   WriteReSTIRDebugPixel(pixelIndex, reservoir.targetPdf, reservoir.weightSum, shiftJacobian, reuseCount, DIGetReservoirDebugTag(reservoir),
                         reservoir.age, temporalStatus, spatialStatus);
 }
 
 float3 VisualizeReSTIRDIDebug(uint pixelIndex, float3 fallbackColor)
 {
+  if(!IsReSTIRDebugEnabled())
+  {
+    return fallbackColor;
+  }
+
   const ReSTIRDebugPixel debugPixel = debugBuffer[pixelIndex];
   const float maxAge = max(float(diParams.temporalResampling.maxHistoryLength), float(diParams.shading.finalVisibilityMaxAge));
   return VisualizeReSTIRDebugPixel(debugPixel, pushConst.debugView, maxAge, fallbackColor,

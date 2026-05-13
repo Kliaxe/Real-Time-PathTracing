@@ -277,7 +277,8 @@ void ReSTIRDIRenderer::Render(const RenderInput& input)
     m_NeedsHistoryClear = true;
   }
 
-  const bool restirDebugActive = m_Settings.common.debugView != shaderio::eReSTIRDebugViewDisabled;
+  const bool restirDebugActive      = m_Settings.common.debugView != shaderio::eReSTIRDebugViewDisabled;
+  const bool denoiserSignalsNeeded = denoiseEnabled && !restirDebugActive;
   if(denoiseEnabled)
   {
     m_NrdDenoiser.PrepareFrame(PathTraceNrdDenoiser::FrameInput{
@@ -312,16 +313,19 @@ void ReSTIRDIRenderer::Render(const RenderInput& input)
   UpdateParameterBuffer(frameSetIndex, parameters);
   UpdateFrameDescriptors(input);
   TransitionReSTIRDIStorageImages(input.cmd, const_cast<nvvk::Image&>(m_Resources.GetAccumulationImage()),
-                                input.gBuffers->getColorImage(input.renderedImageIndex),
-                                VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetMotionVectorsImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetNormalRoughnessImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetBaseColorMetalnessImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetViewZImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetDiffuseRadianceHitDistanceImage(),
-                                 VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetSpecularRadianceHitDistanceImage(),
-                                 VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+                                 input.gBuffers->getColorImage(input.renderedImageIndex),
+                                 VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  if(denoiserSignalsNeeded)
+  {
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetMotionVectorsImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetNormalRoughnessImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetBaseColorMetalnessImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetViewZImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetDiffuseRadianceHitDistanceImage(),
+                                   VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetSpecularRadianceHitDistanceImage(),
+                                   VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+  }
 
   if(m_NeedsHistoryClear)
   {
@@ -329,10 +333,20 @@ void ReSTIRDIRenderer::Render(const RenderInput& input)
     m_NeedsHistoryClear = false;
   }
 
+  uint32_t restirFlags = 0u;
+  if(IsAccumulationResolveMode(m_Settings.common.resolveMode))
+  {
+    restirFlags |= shaderio::eReSTIRFlagAccumulate;
+  }
+  if(denoiserSignalsNeeded)
+  {
+    restirFlags |= shaderio::eReSTIRFlagWriteDenoiserSignals;
+  }
+
   const shaderio::ReSTIRDIPushConstant pushConstant{
       .sceneInfoAddress       = (shaderio::GltfSceneInfo*)input.sceneResource->bSceneInfo.address,
       .accumulatedFrames      = IsAccumulationResolveMode(m_Settings.common.resolveMode) ? m_AccumulatedFrames : 0u,
-      .flags                  = IsAccumulationResolveMode(m_Settings.common.resolveMode) ? shaderio::eReSTIRFlagAccumulate : 0u,
+      .flags                  = restirFlags,
       .continuationMaxBounces = m_Settings.continuationMaxBounces,
       .debugView              = static_cast<uint32_t>(m_Settings.common.debugView),
   };
