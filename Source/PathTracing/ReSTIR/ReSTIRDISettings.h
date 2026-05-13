@@ -29,9 +29,7 @@ struct ReSTIRDICommonSettings
 
 inline ReSTIRDIInitialSamplingParameters GetDefaultReSTIRDIInitialSamplingParameters()
 {
-  ReSTIRDIInitialSamplingParameters parameters = restir::GetDefaultReSTIRDIInitialSamplingParams();
-  parameters.numBrdfSamples = 1;
-  return parameters;
+  return restir::GetDefaultReSTIRDIInitialSamplingParams();
 }
 
 inline ReSTIRDITemporalResamplingParameters GetDefaultReSTIRDITemporalParameters()
@@ -41,9 +39,7 @@ inline ReSTIRDITemporalResamplingParameters GetDefaultReSTIRDITemporalParameters
 
 inline ReSTIRDISpatialResamplingParameters GetDefaultReSTIRDISpatialParameters()
 {
-  ReSTIRDISpatialResamplingParameters parameters = restir::GetDefaultReSTIRDISpatialResamplingParams();
-  parameters.samplingRadius = 10.0f;
-  return parameters;
+  return restir::GetDefaultReSTIRDISpatialResamplingParams();
 }
 
 inline ReSTIRDIShadingParameters GetDefaultReSTIRDIShadingParameters()

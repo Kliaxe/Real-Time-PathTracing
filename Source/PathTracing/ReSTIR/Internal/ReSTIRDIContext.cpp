@@ -42,9 +42,9 @@ ReSTIRDIInitialSamplingParameters GetDefaultReSTIRDIInitialSamplingParams()
     params.brdfRayMinT = 0.001f;
     params.enableInitialVisibility = true;
     params.environmentMapImportanceSampling = 1;
-    params.numBrdfSamples = 1;
-    params.numEnvironmentSamples = 1;
-    params.numLocalLightSamples = 8;
+    params.numBrdfSamples = 0;
+    params.numEnvironmentSamples = 8;
+    params.numLocalLightSamples = 24;
     return params;
 }
 
@@ -65,11 +65,11 @@ ReSTIRDISpatialResamplingParameters GetDefaultReSTIRDISpatialResamplingParams()
 {
     ReSTIRDISpatialResamplingParameters params = {};
     params.numDisocclusionBoostSamples = 8;
-    params.numSamples = 1;
+    params.numSamples = 5;
     params.biasCorrectionMode = ReSTIRDI_SpatialBiasCorrectionMode::Basic;
     params.depthThreshold = 0.1f;
     params.normalThreshold = 0.5f;
-    params.samplingRadius = 32.0f;
+    params.samplingRadius = 30.0f;
     params.enableMaterialSimilarityTest = true;
     params.discountNaiveSamples = true;
     params.targetHistoryLength = 0;
@@ -90,6 +90,8 @@ void debugCheckParameters(const ReSTIRDIStaticParameters& params)
 {
     assert(params.RenderWidth > 0);
     assert(params.RenderHeight > 0);
+    assert(params.NeighborOffsetCount > 0);
+    assert((params.NeighborOffsetCount & (params.NeighborOffsetCount - 1)) == 0);
 }
 
 ReSTIRDIContext::ReSTIRDIContext(const ReSTIRDIStaticParameters& params) :

@@ -223,6 +223,18 @@ ReSTIRLightBufferParameters BuildLightBufferParameters(GltfSceneInfo sceneInfo)
   return parameters;
 }
 
+float DIEvaluateLocalLightSelectionPdf(uint lightIndex)
+{
+  const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
+  if(sceneInfo.emissiveTriangleCount == 0 || lightIndex >= sceneInfo.emissiveTriangleCount)
+  {
+    return 0.0;
+  }
+
+  const float previousCdf = lightIndex > 0 ? sceneInfo.emissiveTriangleCdf[lightIndex - 1] : 0.0;
+  return max(sceneInfo.emissiveTriangleCdf[lightIndex] - previousCdf, 0.0);
+}
+
 DISurface DIEmptySurface()
 {
   return EmptyDIPrimarySurface();
@@ -627,8 +639,7 @@ bool DITraceRayForLocalLight(float3 origin, float3 direction, float minT, float 
 
 float DIEvaluateLocalLightSourcePdf(uint lightIndex)
 {
-  const uint lightCount = BuildLightBufferParameters(pushConst.sceneInfoAddress[0]).localLightBufferRegion.numLights;
-  return (lightIndex < lightCount && lightCount > 0) ? (1.0 / lightCount) : 0.0;
+  return DIEvaluateLocalLightSelectionPdf(lightIndex);
 }
 
 float2 DIGetEnvironmentMapUvFromDirection(float3 direction)

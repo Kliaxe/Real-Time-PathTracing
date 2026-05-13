@@ -33,7 +33,7 @@ namespace restir
     // Changing any of these requires recreating the context.
     struct ReSTIRDIStaticParameters
     {
-        uint32_t NeighborOffsetCount = 8192;
+        uint32_t NeighborOffsetCount = 16;
         uint32_t RenderWidth = 0;
         uint32_t RenderHeight = 0;
     };

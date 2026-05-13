@@ -103,8 +103,12 @@ void SelectNextLocalLight(
     out uint lightIndex,
     out float invSourcePdf)
 {
-    invSourcePdf = float(ctx.lightBufferRegion.numLights);
-    lightIndex = ctx.lightBufferRegion.firstLightIndex + min(uint(floor(rnd * ctx.lightBufferRegion.numLights)), ctx.lightBufferRegion.numLights - 1);
+    const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
+    const uint localLightIndex = BinarySearchCdf(sceneInfo.emissiveTriangleCdf, ctx.lightBufferRegion.numLights, saturate(rnd));
+    lightIndex = ctx.lightBufferRegion.firstLightIndex + localLightIndex;
+
+    const float sourcePdf = DIEvaluateLocalLightSourcePdf(lightIndex);
+    invSourcePdf = sourcePdf > 0.0 ? (1.0 / sourcePdf) : 0.0;
     lightInfo = DILoadLightInfo(lightIndex, false);
 }
 
@@ -171,15 +175,14 @@ ReSTIRDIReservoir SampleLocalLightsInternal(
 #endif // RESTIR_DI_STRATIFY_LOCAL_SAMPLING
 
         SelectNextLocalLight(lightSelectionContext, rnd, lightInfo, lightIndex, invSourcePdf);
-        float2 uv = SelectLocalLightUv(rng);
-        bool zeroPdf = StreamLocalLightAtUvIntoReservoir(rng, misData, surface, sampleParams.brdfCutoff, misData.localLightMisWeight, lightIndex, uv, invSourcePdf, lightInfo, state, o_selectedSample);
-
-        if (zeroPdf)
+        if(invSourcePdf <= 0.0)
             continue;
+
+        float2 uv = SelectLocalLightUv(rng);
+        StreamLocalLightAtUvIntoReservoir(rng, misData, surface, sampleParams.brdfCutoff, misData.localLightMisWeight, lightIndex, uv, invSourcePdf, lightInfo, state, o_selectedSample);
     }
 
-    FinalizeDIResampling(state, 1.0, misData.numMisSamples);
-    state.M = 1;
+    FinalizeDIResampling(state, 1.0, state.M);
 
     return state;
 }
@@ -276,8 +279,7 @@ ReSTIRDIReservoir SampleEnvironmentLight(
         StreamEnvironmentLightIntoReservoir(rng, sampleParams, misData, surface, lightInfo, params.lightIndex, state, o_selectedSample);
     }
 
-    FinalizeDIResampling(state, 1.0, misData.numMisSamples);
-    state.M = 1;
+    FinalizeDIResampling(state, 1.0, state.M);
     return state;
 }
 
@@ -370,8 +372,7 @@ ReSTIRDIReservoir SampleBrdfCandidates(
         }
     }
 
-    FinalizeDIResampling(state, 1.0, misData.numMisSamples);
-    state.M = 1;
+    FinalizeDIResampling(state, 1.0, state.M);
 
     return state;
 }
@@ -407,8 +408,7 @@ ReSTIRDIReservoir ReSTIRDISampleLightsForSurface(
     bool selectEnvironment = CombineDIReservoirs(state, environmentReservoir, GetNextRandom(rng), environmentReservoir.targetPdf);
     bool selectBrdf = CombineDIReservoirs(state, brdfReservoir, GetNextRandom(rng), brdfReservoir.targetPdf);
     
-    FinalizeDIResampling(state, 1.0, 1.0);
-    state.M = 1;
+    FinalizeDIResampling(state, 1.0, state.M);
 
     if (selectBrdf)
         o_lightSample = brdfSample;
