@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -24,6 +25,8 @@
 
 #include <glm/vec2.hpp>
 
+#include "Experiments/ExperimentTypes.h"
+#include "Experiments/ExperimentGpuTimer.h"
 #include "PathTracing/PathTracer.h"
 #include "PathTracing/ReSTIR/ReSTIRDIRenderer.h"
 #include "Scene/SceneAssetCatalog.h"
@@ -34,6 +37,7 @@
 
 namespace nvsamples
 {
+class ExperimentController;
 
 // Core application element role:
 // - Owns rendering/runtime systems and per-frame orchestration.
@@ -57,6 +61,8 @@ public:
   explicit Application(const std::shared_ptr<nvutils::CameraManipulator>& cameraManip);
   ~Application() override;
 
+  void SetExperimentController(std::shared_ptr<ExperimentController> experimentController);
+
   void onAttach(nvapp::Application* app) override;
   void onDetach() override;
   void onUIRender() override;
@@ -66,6 +72,12 @@ public:
   void onLastHeadlessFrame() override;
 
   std::shared_ptr<nvutils::CameraManipulator> GetCameraManipulator() const;
+  void ApplyExperimentRun(const ExperimentRun& run);
+  void SetExperimentCamera(const ExperimentCamera& camera);
+  void SaveExperimentImage(const std::filesystem::path& outputPath);
+  void RequestExperimentClose();
+  uint32_t GetExperimentAccumulatedFrameCount() const;
+  std::optional<ExperimentGpuTimings> ReadLastExperimentGpuTimings();
 
 private:
   void DiscoverAssets();
@@ -83,6 +95,15 @@ private:
   void PathTraceScene(VkCommandBuffer cmd);
   void ReSTIRDIScene(VkCommandBuffer cmd);
   void InvalidatePathTracingHistory();
+  bool SelectSceneForExperiment(const std::string& sceneLabel);
+  bool SelectHdriForExperiment(const std::string& hdriLabelOrPath);
+  void ApplyExperimentEnvironment(const ExperimentEnvironment& environment);
+  void ApplyExperimentPathTracerSettings(const ExperimentPathTracerSettings& settings);
+  void ApplyExperimentReSTIRSettings(const ExperimentReSTIRSettings& settings);
+  void BeginExperimentGpuTiming(VkCommandBuffer cmd);
+  void MarkExperimentRendererStart(VkCommandBuffer cmd);
+  void MarkExperimentRendererEnd(VkCommandBuffer cmd);
+  void EndExperimentGpuTiming(VkCommandBuffer cmd);
   bool IsPathTracerRenderMode() const;
   bool IsReSTIRDIRenderMode() const;
 
@@ -118,6 +139,8 @@ private:
   std::unique_ptr<nvsamples::SceneResolver>     m_SceneResolver;     // Scene selection resolver
   std::unique_ptr<nvsamples::SceneRenderer>     m_SceneRenderer;     // Raster scene renderer
   std::unique_ptr<nvsamples::SceneRuntime>      m_SceneRuntime;      // GPU scene runtime owner
+  nvsamples::ExperimentGpuTimer                 m_ExperimentGpuTimer; // Experiment-only timestamp queries
+  std::shared_ptr<nvsamples::ExperimentController> m_ExperimentController;
 };
 
 // Creates the core renderer app element. Main owns only the interface pointer.

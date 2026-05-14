@@ -83,6 +83,7 @@
 #include "Common/GltfUtils.hpp"
 #include "Common/PathUtils.hpp"
 #include "Common/Utils.hpp"
+#include "Experiments/ExperimentController.h"
 #include "Scene/SceneAssetCatalog.h"
 #include "Scene/SceneResolver.h"
 #include "Scene/SceneRenderer.h"
@@ -282,6 +283,37 @@ void DrawReSTIRMethodFooter(const char* description, RenderResolveMode resolveMo
   DrawResolveStatus(resolveMode, accumulatedFrames);
 }
 
+RenderResolveMode ToRenderResolveMode(ExperimentResolveMode mode)
+{
+  switch(mode)
+  {
+    case ExperimentResolveMode::eOff:
+      return RenderResolveMode::eOff;
+    case ExperimentResolveMode::eAccumulate:
+      return RenderResolveMode::eAccumulate;
+    case ExperimentResolveMode::eDenoise:
+      return RenderResolveMode::eDenoise;
+  }
+  return RenderResolveMode::eOff;
+}
+
+ReSTIRDIResamplingMode ToReSTIRResamplingMode(bool temporalReuse, bool spatialReuse)
+{
+  if(temporalReuse && spatialReuse)
+  {
+    return ReSTIRDIResamplingMode::eTemporalAndSpatial;
+  }
+  if(temporalReuse)
+  {
+    return ReSTIRDIResamplingMode::eTemporal;
+  }
+  if(spatialReuse)
+  {
+    return ReSTIRDIResamplingMode::eSpatial;
+  }
+  return ReSTIRDIResamplingMode::eNone;
+}
+
 }  // namespace
 
 Application::Application(const std::shared_ptr<nvutils::CameraManipulator>& cameraManip)
@@ -293,9 +325,15 @@ Application::Application(const std::shared_ptr<nvutils::CameraManipulator>& came
   }
 Application::~Application() = default;
 
+void Application::SetExperimentController(std::shared_ptr<ExperimentController> experimentController)
+{
+  m_ExperimentController = std::move(experimentController);
+}
+
 void Application::onAttach(nvapp::Application* app)
   {
     m_App = app;
+    m_ExperimentGpuTimer.Initialize(app->getPhysicalDevice(), app->getDevice());
 
     // VMA allocator init.
     VmaAllocatorCreateInfo allocatorInfo = {
@@ -391,6 +429,7 @@ void Application::onDetach()
     m_SceneRuntime->Destroy();
 
     m_GBuffers.deinit();
+    m_ExperimentGpuTimer.Destroy();
     m_StagingUploader.deinit();
     m_SkySimple.deinit();
     m_Tonemapper.deinit();
@@ -753,6 +792,11 @@ void Application::onRender(VkCommandBuffer cmd)
   {
     NVVK_DBG_SCOPE(cmd);
 
+    if(m_ExperimentController)
+    {
+      m_ExperimentController->BeforeRender(*this);
+    }
+
     if(m_SceneReloadRequested || m_HdriReloadRequested)
     {
       RebuildSceneFromSelection();
@@ -764,7 +808,9 @@ void Application::onRender(VkCommandBuffer cmd)
       return;
     }
 
+    BeginExperimentGpuTiming(cmd);
     UpdateSceneBuffer(cmd);
+    MarkExperimentRendererStart(cmd);
     if(IsPathTracerRenderMode() && m_PathTracer != nullptr && m_PathTracer->IsReady())
     {
       PathTraceScene(cmd);
@@ -777,7 +823,14 @@ void Application::onRender(VkCommandBuffer cmd)
     {
       RasterScene(cmd);
     }
+    MarkExperimentRendererEnd(cmd);
     PostProcess(cmd);
+    EndExperimentGpuTiming(cmd);
+
+    if(m_ExperimentController)
+    {
+      m_ExperimentController->AfterRender(*this);
+    }
   }
 
 void Application::onUIMenu()
@@ -799,6 +852,12 @@ void Application::onUIMenu()
 
 void Application::onLastHeadlessFrame()
   {
+    if(m_ExperimentController)
+    {
+      m_ExperimentController->OnLastHeadlessFrame(*this);
+      return;
+    }
+
     m_App->saveImageToFile(m_GBuffers.getColorImage(eImgTonemapped), m_GBuffers.getSize(),
                            nvutils::getExecutablePath().replace_extension(".jpg").string());
   }
@@ -807,6 +866,127 @@ std::shared_ptr<nvutils::CameraManipulator> Application::GetCameraManipulator() 
   {
     return m_CameraManip;
   }
+
+void Application::ApplyExperimentRun(const ExperimentRun& run)
+{
+  bool selectionChanged = false;
+
+  const size_t previousSceneIndex = m_SelectedSceneIndex;
+  if(!SelectSceneForExperiment(run.sceneLabel))
+  {
+    LOGE("Experiment requested unknown scene '%s'\n", run.sceneLabel.c_str());
+    RequestExperimentClose();
+    return;
+  }
+  selectionChanged = selectionChanged || m_SelectedSceneIndex != previousSceneIndex;
+
+  if(!run.environment.hdriLabelOrPath.empty())
+  {
+    const size_t previousHdriIndex = m_SelectedHdriIndex;
+    if(!SelectHdriForExperiment(run.environment.hdriLabelOrPath))
+    {
+      LOGE("Experiment requested unknown HDRI '%s'\n", run.environment.hdriLabelOrPath.c_str());
+      RequestExperimentClose();
+      return;
+    }
+    selectionChanged = selectionChanged || m_SelectedHdriIndex != previousHdriIndex;
+  }
+
+  if(selectionChanged)
+  {
+    RebuildSceneFromSelection();
+  }
+
+  switch(run.renderMode)
+  {
+    case ExperimentRenderMode::ePathTracing:
+      m_RenderMode = RenderMode::ePathTracing;
+      break;
+    case ExperimentRenderMode::eReSTIRDI:
+      m_RenderMode = RenderMode::eReSTIRDI;
+      break;
+  }
+
+  ApplyExperimentEnvironment(run.environment);
+  ApplyExperimentPathTracerSettings(run.pathTracing);
+  ApplyExperimentReSTIRSettings(run.restir);
+  SetExperimentCamera(run.camera);
+  InvalidatePathTracingHistory();
+}
+
+void Application::SetExperimentCamera(const ExperimentCamera& camera)
+{
+  m_CameraManip->setLookat(camera.eye, camera.center, camera.up);
+}
+
+void Application::SaveExperimentImage(const std::filesystem::path& outputPath)
+{
+  if(m_App == nullptr)
+  {
+    return;
+  }
+
+  std::filesystem::create_directories(outputPath.parent_path());
+  m_App->saveImageToFile(m_GBuffers.getColorImage(eImgTonemapped), m_GBuffers.getSize(), outputPath);
+}
+
+void Application::RequestExperimentClose()
+{
+  if(m_App != nullptr)
+  {
+    m_App->close();
+  }
+}
+
+uint32_t Application::GetExperimentAccumulatedFrameCount() const
+{
+  if(IsPathTracerRenderMode() && m_PathTracer != nullptr)
+  {
+    return m_PathTracer->GetAccumulatedFrameCount();
+  }
+  if(IsReSTIRDIRenderMode() && m_ReSTIRDI != nullptr)
+  {
+    return m_ReSTIRDI->GetAccumulatedFrameCount();
+  }
+  return 0;
+}
+
+std::optional<ExperimentGpuTimings> Application::ReadLastExperimentGpuTimings()
+{
+  return m_ExperimentGpuTimer.ReadLastFrameTimings();
+}
+
+void Application::BeginExperimentGpuTiming(VkCommandBuffer cmd)
+{
+  if(m_ExperimentController)
+  {
+    m_ExperimentGpuTimer.BeginFrame(cmd);
+  }
+}
+
+void Application::MarkExperimentRendererStart(VkCommandBuffer cmd)
+{
+  if(m_ExperimentController)
+  {
+    m_ExperimentGpuTimer.MarkRendererStart(cmd);
+  }
+}
+
+void Application::MarkExperimentRendererEnd(VkCommandBuffer cmd)
+{
+  if(m_ExperimentController)
+  {
+    m_ExperimentGpuTimer.MarkRendererEnd(cmd);
+  }
+}
+
+void Application::EndExperimentGpuTiming(VkCommandBuffer cmd)
+{
+  if(m_ExperimentController)
+  {
+    m_ExperimentGpuTimer.EndFrame(cmd);
+  }
+}
 
 void Application::DiscoverAssets()
   {
@@ -1046,6 +1226,85 @@ void Application::InvalidatePathTracingHistory()
       m_ReSTIRDI->InvalidateHistory();
     }
   }
+
+bool Application::SelectSceneForExperiment(const std::string& sceneLabel)
+{
+  for(size_t i = 0; i < m_SceneDefinitions.size(); ++i)
+  {
+    if(m_SceneDefinitions[i].label == sceneLabel)
+    {
+      m_SelectedSceneIndex = i;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Application::SelectHdriForExperiment(const std::string& hdriLabelOrPath)
+{
+  for(size_t i = 0; i < m_HdriAssets.size(); ++i)
+  {
+    const AssetEntry& asset = m_HdriAssets[i];
+    if(asset.label == hdriLabelOrPath || asset.relativePath.generic_string() == hdriLabelOrPath)
+    {
+      m_SelectedHdriIndex = i;
+      return true;
+    }
+  }
+  return false;
+}
+
+void Application::ApplyExperimentEnvironment(const ExperimentEnvironment& environment)
+{
+  if(m_SceneRuntime == nullptr || !m_SceneRuntime->IsReady())
+  {
+    return;
+  }
+
+  shaderio::GltfSceneInfo& sceneInfo = m_SceneRuntime->GetSceneInfo();
+  sceneInfo.useHdrEnv                = environment.useHdri ? 1 : 0;
+  sceneInfo.useSky                   = environment.useSky ? 1 : 0;
+  sceneInfo.backgroundColor          = environment.backgroundColor;
+}
+
+void Application::ApplyExperimentPathTracerSettings(const ExperimentPathTracerSettings& settings)
+{
+  if(m_PathTracer == nullptr)
+  {
+    return;
+  }
+
+  PathTracer::Settings& pathSettings = m_PathTracer->GetSettings();
+  pathSettings.resolveMode           = ToRenderResolveMode(settings.resolveMode);
+  pathSettings.maxBounces            = std::min(settings.maxBounces, m_PathTracer->GetPipelineBounceLimit());
+}
+
+void Application::ApplyExperimentReSTIRSettings(const ExperimentReSTIRSettings& settings)
+{
+  if(m_ReSTIRDI == nullptr)
+  {
+    return;
+  }
+
+  ReSTIRDISettings& restirSettings = m_ReSTIRDI->GetSettings();
+  restirSettings.common.resolveMode = ToRenderResolveMode(settings.resolveMode);
+  restirSettings.common.resamplingMode = ToReSTIRResamplingMode(settings.temporalReuse, settings.spatialReuse);
+  restirSettings.common.debugView      = shaderio::eReSTIRDebugViewDisabled;
+  restirSettings.common.denoiserDebugView = DenoiserDebugView::eFinal;
+
+  restirSettings.initialSampling.numLocalLightSamples  = settings.localLightSamples;
+  restirSettings.initialSampling.numEnvironmentSamples = settings.environmentSamples;
+  restirSettings.initialSampling.numBrdfSamples        = settings.brdfSamples;
+  restirSettings.initialSampling.enableInitialVisibility = settings.initialVisibility ? 1u : 0u;
+
+  restirSettings.spatialResampling.numSamples = settings.spatialSamples;
+  restirSettings.spatialResampling.numDisocclusionBoostSamples = settings.spatialSamples;
+  restirSettings.spatialResampling.samplingRadius = settings.spatialRadius;
+
+  restirSettings.shading.enableFinalVisibility = settings.finalVisibility ? 1u : 0u;
+  restirSettings.shading.reuseFinalVisibility  = settings.reuseFinalVisibility ? 1u : 0u;
+  restirSettings.continuationMaxBounces = std::min(settings.continuationMaxBounces, m_ReSTIRDI->GetPipelineBounceLimit());
+}
 
 bool Application::IsPathTracerRenderMode() const
   {

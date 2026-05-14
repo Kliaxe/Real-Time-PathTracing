@@ -25,8 +25,14 @@
 // #define USE_NSIGHT_AFTERMATH
 
 #include <memory>
+#include <optional>
+#include <filesystem>
+#include <string>
+#include <string_view>
 
 #include "Application.h"
+#include "Experiments/ExperimentController.h"
+#include "Experiments/ExperimentPlan.h"
 
 #include <nvaftermath/aftermath.hpp>
 #include <nvapp/application.hpp>
@@ -46,9 +52,52 @@ int main(int argc, char** argv)
   // Parse CLI switches shared by all app elements.
   nvutils::ParameterParser   cli(nvutils::getExecutablePath().stem().string());
   nvutils::ParameterRegistry reg;
+  std::string           experimentName;
+  std::filesystem::path experimentOutput;
+  bool                  listExperiments = false;
   reg.add({"headless", "Run in headless mode"}, &appInfo.headless, true);
+  reg.add({"experiment", "Run a named thesis experiment plan"}, &experimentName);
+  reg.add({"experiment-output", "Output folder for experiment captures and metadata"}, &experimentOutput);
+  reg.add({"list-experiments", "Print available thesis experiment plans"}, &listExperiments, true);
   cli.add(reg);
   cli.parse(argc, argv);
+
+  if(listExperiments)
+  {
+    LOGI("Available experiments:\n");
+    for(std::string_view name : nvsamples::GetAvailableExperimentPlanNames())
+    {
+      LOGI("  %.*s\n", static_cast<int>(name.size()), name.data());
+    }
+    return 0;
+  }
+
+  std::shared_ptr<nvsamples::ExperimentController> experimentController;
+  if(!experimentName.empty())
+  {
+    appInfo.headless = true;
+    if(experimentOutput.empty())
+    {
+      experimentOutput = std::filesystem::path("Results") / experimentName;
+    }
+
+    std::optional<nvsamples::ExperimentPlan> experimentPlan =
+        nvsamples::CreateNamedExperimentPlan(experimentName, experimentOutput);
+    if(!experimentPlan)
+    {
+      LOGE("Unknown experiment '%s'\n", experimentName.c_str());
+      LOGE("Available experiments:\n");
+      for(std::string_view name : nvsamples::GetAvailableExperimentPlanNames())
+      {
+        LOGE("  %.*s\n", static_cast<int>(name.size()), name.data());
+      }
+      return 1;
+    }
+
+    experimentController      = std::make_shared<nvsamples::ExperimentController>(std::move(*experimentPlan));
+    appInfo.headlessFrameCount = experimentController->GetRequiredHeadlessFrameCount();
+    appInfo.windowSize         = {1280, 720};
+  }
 
   VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
@@ -114,17 +163,18 @@ int main(int argc, char** argv)
 
   // Build app elements in one place so Main stays orchestration-only.
   auto cameraManip = std::make_shared<nvutils::CameraManipulator>();
-  auto rasterizer  = nvsamples::CreateApplicationElement(cameraManip);
+  auto renderer    = std::make_shared<nvsamples::Application>(cameraManip);
   auto elemCamera  = std::make_shared<nvapp::ElementCamera>();
   auto windowTitle = std::make_shared<nvapp::ElementDefaultWindowTitle>();
   auto windowMenu  = std::make_shared<nvapp::ElementDefaultMenu>();
 
   elemCamera->setCameraManipulator(cameraManip);
+  renderer->SetExperimentController(experimentController);
 
   application.addElement(windowMenu);
   application.addElement(windowTitle);
   application.addElement(elemCamera);
-  application.addElement(rasterizer);
+  application.addElement(renderer);
 
   application.run();
 
