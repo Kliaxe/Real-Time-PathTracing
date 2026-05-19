@@ -375,7 +375,7 @@ void BuildEmissiveTriangleSamplingData(GltfSceneResource& sceneResource)
   double              totalWeight = 0.0;
   for(size_t i = 0; i < sceneResource.emissiveTriangles.size(); ++i)
   {
-    const shaderio::PathTraceEmissiveTriangle& light = sceneResource.emissiveTriangles[i];
+    const shaderio::EmissiveTriangleLight& light = sceneResource.emissiveTriangles[i];
     if(light.materialIndex >= sceneResource.materials.size())
     {
       continue;
@@ -406,7 +406,7 @@ void AppendEmissiveTrianglesFromModel(const tinygltf::Model& model,
                                       const GltfSceneResource& sceneResource,
                                       uint32_t instanceStart,
                                       uint32_t instanceCount,
-                                      std::vector<shaderio::PathTraceEmissiveTriangle>& outTriangles)
+                                      std::vector<shaderio::EmissiveTriangleLight>& outTriangles)
 {
   if(model.buffers.empty())
   {
@@ -452,7 +452,7 @@ void AppendEmissiveTrianglesFromModel(const tinygltf::Model& model,
         continue;
       }
 
-      shaderio::PathTraceEmissiveTriangle light{};
+      shaderio::EmissiveTriangleLight light{};
       light.position0       = worldPosition0;
       light.position1       = worldPosition1;
       light.position2       = worldPosition2;

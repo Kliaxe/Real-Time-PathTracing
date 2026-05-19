@@ -35,11 +35,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
   }
 
   ReSTIRRandomSamplerState rng = InitRandomSampler(pixelPosition, diParams.runtimeParams.frameIndex, 3u);
-  DILightSample selectedLightSample = DIEmptyLightSample();
   const ReSTIRDIReservoir spatialReservoir =
       ReSTIRDIRunSpatialResampling(pixelPosition, surface, centerReservoir, rng, diParams.runtimeParams,
                                    diParams.reservoirBufferParams, diParams.bufferIndices.spatialResamplingInputBufferIndex,
-                                   diParams.spatialResampling, selectedLightSample);
+                                   diParams.spatialResampling);
 
   StoreDIReservoir(spatialReservoir, diParams.reservoirBufferParams,
                    PixelPosToReservoirPos(pixelPosition),

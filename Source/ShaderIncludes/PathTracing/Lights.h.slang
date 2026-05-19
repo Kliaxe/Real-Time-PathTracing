@@ -30,7 +30,7 @@ float EvaluateEmissiveTriangleCosine(GltfMetallicRoughness material, float3 geom
   return material.doubleSided != 0 ? abs(cosine) : max(cosine, 0.0);
 }
 
-float3 EvaluateEmissiveTriangleRadiance(GltfSceneInfo sceneInfo, PathTraceEmissiveTriangle light, float2 texCoord)
+float3 EvaluateEmissiveTriangleRadiance(GltfSceneInfo sceneInfo, EmissiveTriangleLight light, float2 texCoord)
 {
   // Uses the same material resolution path as regular hits so sampled light and visible emissive surfaces stay consistent.
   const GltfMetallicRoughness material = sceneInfo.materials[light.materialIndex];
@@ -45,7 +45,7 @@ float3 EvaluateEmissiveTriangleRadiance(GltfSceneInfo sceneInfo, PathTraceEmissi
 
 float EvaluateEmissiveTriangleSolidAnglePdf(GltfSceneInfo sceneInfo,
                                             uint lightIndex,
-                                            PathTraceEmissiveTriangle light,
+                                            EmissiveTriangleLight light,
                                             float3 receiverPosition,
                                             float3 sampledPosition)
 {
@@ -80,7 +80,7 @@ float EvaluateCurrentEmissiveHitPdf(GltfSceneInfo sceneInfo, uint instanceIndex,
   // Used when a BSDF path lands on an emissive triangle so the hit can be MIS-weighted against direct-light sampling.
   for(uint i = 0; i < sceneInfo.emissiveTriangleCount; ++i)
   {
-    const PathTraceEmissiveTriangle light = sceneInfo.emissiveTriangles[i];
+    const EmissiveTriangleLight light = sceneInfo.emissiveTriangles[i];
     if(light.instanceIndex == instanceIndex && light.primitiveIndex == primitiveIndex)
     {
       return EvaluateEmissiveTriangleSolidAnglePdf(sceneInfo, i, light, receiverPosition, hitPosition);
@@ -99,7 +99,7 @@ void AccumulateEmissiveDirectLight(inout PathPayload payload, SurfaceData surfac
   }
 
   const uint sampleIndex = BinarySearchCdf(sceneInfo.emissiveTriangleCdf, sceneInfo.emissiveTriangleCount, NextRandom(payload.seed));
-  const PathTraceEmissiveTriangle light = sceneInfo.emissiveTriangles[sampleIndex];
+  const EmissiveTriangleLight light = sceneInfo.emissiveTriangles[sampleIndex];
   if(light.instanceIndex == InstanceIndex() && light.primitiveIndex == PrimitiveIndex())
   {
     // Prevent a surface from explicitly re-sampling itself as a direct light.

@@ -37,7 +37,8 @@ MaterialAttributes DiffuseMaterial(const glm::vec3& albedo)
 {
   MaterialAttributes mat{};
   mat.albedo      = albedo;
-  mat.roughness   = 0.75f;
+  mat.specular    = 0.0f;
+  mat.roughness   = 1.0f;
   mat.doubleSided = true;
   return mat;
 }
@@ -172,7 +173,7 @@ void AddManyCornellLights(SceneDefinition& scene)
   }
 }
 
-// Material presets used by the old demo scenes.
+// Material presets used by the built-in thesis scenes.
 MaterialAttributes DielectricPreset()
 {
   MaterialAttributes mat{};

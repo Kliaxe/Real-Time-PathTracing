@@ -39,8 +39,8 @@ PathTracer::PathTracer(const CreateInfo& createInfo)
     : m_App(createInfo.app)
     , m_Allocator(createInfo.allocator)
     , m_MaxTextureDescriptors(createInfo.maxTextureDescriptors)
-    , m_DenoiserResources(PathTraceDenoiserResources::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
-    , m_NrdDenoiser(PathTraceNrdDenoiser::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
+    , m_DenoiserResources(DenoiserResources::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
+    , m_NrdDenoiser(NrdDenoiser::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
 {
 }
 
@@ -141,44 +141,84 @@ const nvvk::DescriptorPack& PathTracer::GetDescriptorPack() const
 
 void PathTracer::Render(const RenderInput& input)
 {
-  if(!IsReady() || input.cmd == VK_NULL_HANDLE || input.sceneResource == nullptr || input.sceneInfo == nullptr || input.topLevelAS == nullptr
-     || input.topLevelAS->accel == VK_NULL_HANDLE || input.gBuffers == nullptr)
+  if(!CanRender(input))
   {
     return;
   }
 
-  const VkExtent2D size = input.gBuffers->getSize();
-  if(size.width == 0 || size.height == 0)
+  const VkExtent2D viewportSize = input.gBuffers->getSize();
+  if(viewportSize.width == 0 || viewportSize.height == 0)
   {
     return;
   }
 
-  CreateOrResizeAccumulationImage(size);
-  m_DenoiserResources.EnsureForViewport(size);
+  // Path tracing is a frame algorithm: prepare history, trace, optionally denoise.
+  EnsureViewportResources(viewportSize);
+  FrameState frameState = BeginPathTraceFrame(input, viewportSize);
+  PrepareDenoiser(input, frameState);
+  UpdateFrameDescriptors(input);
+  PrepareStorageImages(input);
 
-  const AccumulationSignature currentSignature = MakeAccumulationSignature(input, size);
-  const bool accumulationHistoryInvalidated = m_AccumulationInvalidated || !m_HasAccumulationSignature
-                                  || std::memcmp(&currentSignature, &m_LastAccumulationSignature, sizeof(AccumulationSignature)) != 0;
+  const shaderio::PathTracePushConstant pushConstant = BuildPushConstant(input, frameState);
+  RecordPathTracePass(input, pushConstant);
+  RunDenoiserIfNeeded(input, frameState);
+  FinishFrame(frameState);
+}
+
+bool PathTracer::CanRender(const RenderInput& input) const
+{
+  return IsReady() && input.cmd != VK_NULL_HANDLE && input.sceneResource != nullptr && input.sceneInfo != nullptr
+         && input.topLevelAS != nullptr && input.topLevelAS->accel != VK_NULL_HANDLE && input.gBuffers != nullptr;
+}
+
+void PathTracer::EnsureViewportResources(VkExtent2D viewportSize)
+{
+  // Viewport-sized resources must exist before descriptors point at them.
+  CreateOrResizeAccumulationImage(viewportSize);
+  m_DenoiserResources.EnsureForViewport(viewportSize);
+}
+
+PathTracer::FrameState PathTracer::BeginPathTraceFrame(const RenderInput& input, VkExtent2D viewportSize)
+{
+  FrameState frameState{};
+  frameState.viewportSize              = viewportSize;
+  frameState.finalAccumulationEnabled  = IsFinalRadianceAccumulationEnabled(m_Settings);
+  frameState.accumulationSignature     = MakeAccumulationSignature(input, viewportSize);
+  frameState.denoiserSignature         = MakeDenoiserSignature(input, viewportSize);
+
+  // Accumulation history is only valid while the camera, scene, and environment match.
+  const bool accumulationHistoryInvalidated =
+      m_AccumulationInvalidated || !m_HasAccumulationSignature
+      || std::memcmp(&frameState.accumulationSignature, &m_LastAccumulationSignature, sizeof(AccumulationSignature)) != 0;
   if(accumulationHistoryInvalidated)
   {
     m_AccumulatedFrames = 0;
   }
 
-  const DenoiserSignature currentDenoiserSignature = MakeDenoiserSignature(input, size);
-  const bool denoiserHistoryInvalidated = m_AccumulationInvalidated || !m_HasDenoiserSignature
-                                          || std::memcmp(&currentDenoiserSignature, &m_LastDenoiserSignature, sizeof(DenoiserSignature)) != 0;
+  // NRD history tracks a slightly smaller set of state than final radiance accumulation.
+  frameState.denoiserHistoryInvalidated =
+      m_AccumulationInvalidated || !m_HasDenoiserSignature
+      || std::memcmp(&frameState.denoiserSignature, &m_LastDenoiserSignature, sizeof(DenoiserSignature)) != 0;
 
-  m_NrdDenoiser.PrepareFrame(PathTraceNrdDenoiser::FrameInput{
+  return frameState;
+}
+
+void PathTracer::PrepareDenoiser(const RenderInput& input, const FrameState& frameState)
+{
+  // NRD needs guide buffers and matching camera history before the path trace pass writes signals.
+  m_NrdDenoiser.PrepareFrame(NrdDenoiser::FrameInput{
                                  .sceneInfo          = input.sceneInfo,
-                                 .viewportSize       = size,
-                                 .historyInvalidated = denoiserHistoryInvalidated,
+                                 .viewportSize       = frameState.viewportSize,
+                                 .historyInvalidated = frameState.denoiserHistoryInvalidated,
                                  .enableMaterialDemodulation = true,
                                  .settings           = &m_Settings.denoiserSettings,
                              },
                              m_DenoiserResources);
+}
 
-  UpdateFrameDescriptors(input);
-
+void PathTracer::PrepareStorageImages(const RenderInput& input)
+{
+  // The ray generation shader writes beauty, accumulation, and denoiser guide images.
   TransitionStorageImageForWrite(input.cmd, m_AccumulationImage, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
   TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetMotionVectorsImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
   TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetNormalRoughnessImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
@@ -203,50 +243,67 @@ void PathTracer::Render(const RenderInput& input)
   const VkDependencyInfo outputDependency{
       .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &outputBarrier};
   vkCmdPipelineBarrier2(input.cmd, &outputDependency);
+}
 
+shaderio::PathTracePushConstant PathTracer::BuildPushConstant(const RenderInput& input, const FrameState& frameState)
+{
+  const uint32_t clampedMaxBounces      = std::min(m_Settings.maxBounces, m_MaxBounceLimit);
+  const uint32_t pipelineSafeMaxBounces = std::min(clampedMaxBounces, m_PipelineBounceLimit);
+  uint32_t       pathTraceFlags         = 0;
+  if(frameState.finalAccumulationEnabled)
+  {
+    pathTraceFlags |= shaderio::ePathTraceFlagAccumulate;
+  }
+
+  // Push constants carry per-dispatch data that changes more often than descriptors.
+  return shaderio::PathTracePushConstant{
+      .sceneInfoAddress  = (shaderio::GltfSceneInfo*)input.sceneResource->bSceneInfo.address,
+      .rngFrameNumber    = m_RngFrameNumber++,
+      .accumulatedFrames = frameState.finalAccumulationEnabled ? m_AccumulatedFrames : 0,
+      .maxBounces        = pipelineSafeMaxBounces,
+      .flags             = pathTraceFlags,
+  };
+}
+
+void PathTracer::RecordPathTracePass(const RenderInput& input, const shaderio::PathTracePushConstant& pushConstant)
+{
+  // The path tracer is a single ray tracing dispatch.
+  const VkExtent2D viewportSize = input.gBuffers->getSize();
   vkCmdBindPipeline(input.cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_Pipeline);
   const uint32_t frameSetIndex = std::min(m_App->getFrameCycleIndex(), uint32_t(m_DescPack.getSets().size() - 1));
   vkCmdBindDescriptorSets(input.cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_PipelineLayout, 0, 1, m_DescPack.getSetPtr(frameSetIndex), 0,
                           nullptr);
 
-  const uint32_t clampedMaxBounces        = std::min(m_Settings.maxBounces, m_MaxBounceLimit);
-  const uint32_t pipelineSafeMaxBounces   = std::min(clampedMaxBounces, m_PipelineBounceLimit);
-  const bool     finalAccumulationEnabled = IsFinalRadianceAccumulationEnabled(m_Settings);
-  uint32_t       pathTraceFlags           = 0;
-  if(finalAccumulationEnabled)
-  {
-    pathTraceFlags |= shaderio::ePathTraceFlagAccumulate;
-  }
-
-  const shaderio::PathTracePushConstant pushConstant{
-      .sceneInfoAddress  = (shaderio::GltfSceneInfo*)input.sceneResource->bSceneInfo.address,
-      .rngFrameNumber    = m_RngFrameNumber++,
-      .accumulatedFrames = finalAccumulationEnabled ? m_AccumulatedFrames : 0,
-      .maxBounces        = pipelineSafeMaxBounces,
-      .flags             = pathTraceFlags,
-  };
   vkCmdPushConstants(input.cmd, m_PipelineLayout,
                      VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
                          | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
                      0, sizeof(shaderio::PathTracePushConstant), &pushConstant);
 
-  vkCmdTraceRaysKHR(input.cmd, &m_SbtRegions.raygen, &m_SbtRegions.miss, &m_SbtRegions.hit, &m_SbtRegions.callable, size.width,
-                    size.height, 1);
+  vkCmdTraceRaysKHR(input.cmd, &m_SbtRegions.raygen, &m_SbtRegions.miss, &m_SbtRegions.hit, &m_SbtRegions.callable, viewportSize.width,
+                    viewportSize.height, 1);
 
   nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+}
 
+void PathTracer::RunDenoiserIfNeeded(const RenderInput& input, const FrameState& frameState)
+{
   if(IsDenoiseResolveMode(m_Settings.resolveMode))
   {
     m_NrdDenoiser.Denoise(input.cmd, m_DenoiserResources, m_AccumulationImage.descriptor.imageView,
-                          input.gBuffers->getColorImageView(input.renderedImageIndex), m_Settings.denoiserDebugView, size);
+                          input.gBuffers->getColorImageView(input.renderedImageIndex), m_Settings.denoiserDebugView,
+                          frameState.viewportSize);
   }
+}
 
-  m_LastAccumulationSignature = currentSignature;
-  m_LastDenoiserSignature     = currentDenoiserSignature;
+void PathTracer::FinishFrame(const FrameState& frameState)
+{
+  // Store history signatures after all passes used the current frame state.
+  m_LastAccumulationSignature = frameState.accumulationSignature;
+  m_LastDenoiserSignature     = frameState.denoiserSignature;
   m_HasAccumulationSignature  = true;
   m_HasDenoiserSignature      = true;
   m_AccumulationInvalidated   = false;
-  m_AccumulatedFrames         = finalAccumulationEnabled ? (m_AccumulatedFrames + 1) : 0;
+  m_AccumulatedFrames         = frameState.finalAccumulationEnabled ? (m_AccumulatedFrames + 1) : 0;
 }
 
 void PathTracer::QueryRayTracingProperties()

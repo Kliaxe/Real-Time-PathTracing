@@ -21,7 +21,7 @@ void SceneRenderer::Render(const RenderInput& input) const
   const nvsamples::GltfSceneResource& sceneResource = *input.sceneResource;
   const shaderio::GltfSceneInfo&      sceneInfo     = *input.sceneInfo;
 
-  shaderio::TutoPushConstant pushValues = {
+  shaderio::RasterPushConstant pushValues = {
       .sceneInfoAddress          = (shaderio::GltfSceneInfo*)sceneResource.bSceneInfo.address,
       .metallicRoughnessOverride = *input.metallicRoughnessOverride,
   };
@@ -30,7 +30,7 @@ void SceneRenderer::Render(const RenderInput& input) const
       .layout     = input.graphicsPipelineLayout,
       .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
       .offset     = 0,
-      .size       = sizeof(shaderio::TutoPushConstant),
+      .size       = sizeof(shaderio::RasterPushConstant),
       .pValues    = &pushValues,
   };
 
@@ -125,4 +125,3 @@ void SceneRenderer::Render(const RenderInput& input) const
 }
 
 }  // namespace nvsamples
-

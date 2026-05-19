@@ -1,4 +1,4 @@
-#include "PathTraceDenoiserResources.h"
+#include "DenoiserResources.h"
 
 #include <nvapp/application.hpp>
 #include <nvvk/check_error.hpp>
@@ -18,13 +18,13 @@ constexpr VkFormat kRadianceHitDistFormat  = VK_FORMAT_R16G16B16A16_SFLOAT;
 
 }  // namespace
 
-PathTraceDenoiserResources::PathTraceDenoiserResources(const CreateInfo& createInfo)
+DenoiserResources::DenoiserResources(const CreateInfo& createInfo)
     : m_App(createInfo.app)
     , m_Allocator(createInfo.allocator)
 {
 }
 
-void PathTraceDenoiserResources::Destroy()
+void DenoiserResources::Destroy()
 {
   m_Allocator->destroyImage(m_MotionVectorsImage);
   m_Allocator->destroyImage(m_NormalRoughnessImage);
@@ -42,77 +42,77 @@ void PathTraceDenoiserResources::Destroy()
   m_ViewportSize                     = {};
 }
 
-void PathTraceDenoiserResources::EnsureForViewport(VkExtent2D viewportSize)
+void DenoiserResources::EnsureForViewport(VkExtent2D viewportSize)
 {
   CreateOrResizeViewportResources(viewportSize);
 }
 
-VkExtent2D PathTraceDenoiserResources::GetViewportSize() const
+VkExtent2D DenoiserResources::GetViewportSize() const
 {
   return m_ViewportSize;
 }
 
-const nvvk::Image& PathTraceDenoiserResources::GetMotionVectorsImage() const
+const nvvk::Image& DenoiserResources::GetMotionVectorsImage() const
 {
   return m_MotionVectorsImage;
 }
 
-nvvk::Image& PathTraceDenoiserResources::GetMotionVectorsImage()
+nvvk::Image& DenoiserResources::GetMotionVectorsImage()
 {
   return m_MotionVectorsImage;
 }
 
-const nvvk::Image& PathTraceDenoiserResources::GetNormalRoughnessImage() const
+const nvvk::Image& DenoiserResources::GetNormalRoughnessImage() const
 {
   return m_NormalRoughnessImage;
 }
 
-nvvk::Image& PathTraceDenoiserResources::GetNormalRoughnessImage()
+nvvk::Image& DenoiserResources::GetNormalRoughnessImage()
 {
   return m_NormalRoughnessImage;
 }
 
-const nvvk::Image& PathTraceDenoiserResources::GetBaseColorMetalnessImage() const
+const nvvk::Image& DenoiserResources::GetBaseColorMetalnessImage() const
 {
   return m_BaseColorMetalnessImage;
 }
 
-nvvk::Image& PathTraceDenoiserResources::GetBaseColorMetalnessImage()
+nvvk::Image& DenoiserResources::GetBaseColorMetalnessImage()
 {
   return m_BaseColorMetalnessImage;
 }
 
-const nvvk::Image& PathTraceDenoiserResources::GetViewZImage() const
+const nvvk::Image& DenoiserResources::GetViewZImage() const
 {
   return m_ViewZImage;
 }
 
-nvvk::Image& PathTraceDenoiserResources::GetViewZImage()
+nvvk::Image& DenoiserResources::GetViewZImage()
 {
   return m_ViewZImage;
 }
 
-const nvvk::Image& PathTraceDenoiserResources::GetDiffuseRadianceHitDistanceImage() const
+const nvvk::Image& DenoiserResources::GetDiffuseRadianceHitDistanceImage() const
 {
   return m_DiffuseRadianceHitDistanceImage;
 }
 
-nvvk::Image& PathTraceDenoiserResources::GetDiffuseRadianceHitDistanceImage()
+nvvk::Image& DenoiserResources::GetDiffuseRadianceHitDistanceImage()
 {
   return m_DiffuseRadianceHitDistanceImage;
 }
 
-const nvvk::Image& PathTraceDenoiserResources::GetSpecularRadianceHitDistanceImage() const
+const nvvk::Image& DenoiserResources::GetSpecularRadianceHitDistanceImage() const
 {
   return m_SpecularRadianceHitDistanceImage;
 }
 
-nvvk::Image& PathTraceDenoiserResources::GetSpecularRadianceHitDistanceImage()
+nvvk::Image& DenoiserResources::GetSpecularRadianceHitDistanceImage()
 {
   return m_SpecularRadianceHitDistanceImage;
 }
 
-void PathTraceDenoiserResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
+void DenoiserResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
 {
   if(viewportSize.width == 0 || viewportSize.height == 0)
   {
@@ -138,7 +138,7 @@ void PathTraceDenoiserResources::CreateOrResizeViewportResources(VkExtent2D view
       CreateStorageImage(viewportSize, kRadianceHitDistFormat, "PathTraceSpecularRadianceHitDistanceImage");
 }
 
-void PathTraceDenoiserResources::DestroyViewportResources()
+void DenoiserResources::DestroyViewportResources()
 {
   ScheduleImageDestroy(m_MotionVectorsImage);
   ScheduleImageDestroy(m_NormalRoughnessImage);
@@ -155,7 +155,7 @@ void PathTraceDenoiserResources::DestroyViewportResources()
   m_SpecularRadianceHitDistanceImage = {};
 }
 
-void PathTraceDenoiserResources::ScheduleImageDestroy(nvvk::Image image)
+void DenoiserResources::ScheduleImageDestroy(nvvk::Image image)
 {
   if(image.image == VK_NULL_HANDLE)
   {
@@ -171,7 +171,7 @@ void PathTraceDenoiserResources::ScheduleImageDestroy(nvvk::Image image)
   });
 }
 
-nvvk::Image PathTraceDenoiserResources::CreateStorageImage(VkExtent2D viewportSize, VkFormat format, const char* debugName) const
+nvvk::Image DenoiserResources::CreateStorageImage(VkExtent2D viewportSize, VkFormat format, const char* debugName) const
 {
   nvvk::Image image;
 

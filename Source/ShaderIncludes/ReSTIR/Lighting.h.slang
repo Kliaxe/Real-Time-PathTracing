@@ -84,7 +84,7 @@ float EvaluateEmissiveTriangleCosine(GltfMetallicRoughness material, float3 geom
   return material.doubleSided != 0 ? abs(cosine) : max(cosine, 0.0);
 }
 
-float3 EvaluateEmissiveTriangleRadiance(GltfSceneInfo sceneInfo, PathTraceEmissiveTriangle light, float2 texCoord)
+float3 EvaluateEmissiveTriangleRadiance(GltfSceneInfo sceneInfo, EmissiveTriangleLight light, float2 texCoord)
 {
   const GltfMetallicRoughness material = sceneInfo.materials[light.materialIndex];
   const float4 baseColor = ResolveDIBaseColor(material, texCoord);
@@ -98,7 +98,7 @@ float3 EvaluateEmissiveTriangleRadiance(GltfSceneInfo sceneInfo, PathTraceEmissi
 #endif
 
 float EvaluateEmissiveTriangleSolidAnglePdf(GltfSceneInfo sceneInfo,
-                                            PathTraceEmissiveTriangle light,
+                                            EmissiveTriangleLight light,
                                             float3 receiverPosition,
                                             float3 sampledPosition)
 {
@@ -337,13 +337,15 @@ DISurface DILoadGBufferSurface(int2 pixelPosition, bool previousFrame)
   return previousFrame ? previousSurfaceBuffer[pixelIndex] : currentSurfaceBuffer[pixelIndex];
 }
 
-bool IsSelfEmissiveSample(DISurface surface, PathTraceEmissiveTriangle light)
+bool IsSelfEmissiveSample(DISurface surface, EmissiveTriangleLight light)
 {
   return surface.instanceIndex == light.instanceIndex && surface.primitiveIndex == light.primitiveIndex;
 }
 
 DILightInfo DILoadLightInfo(uint lightIndex, bool previousFrame)
 {
+  // Scene geometry and emissive-light indexing are static during thesis experiments,
+  // so previous-frame light references map directly to the current light list.
   const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
   const uint localLightCount    = sceneInfo.emissiveTriangleCount;
   const uint environmentPresent = HasEnvironmentLight(sceneInfo) ? 1u : 0u;
@@ -369,7 +371,7 @@ DILightSample DISampleLight(DILightInfo lightInfo, DISurface surface, float2 uv)
 
   if(lightInfo.kind == kReSTIRDILightKindEmissiveTriangle)
   {
-    const PathTraceEmissiveTriangle light = sceneInfo.emissiveTriangles[lightInfo.sourceIndex];
+    const EmissiveTriangleLight light = sceneInfo.emissiveTriangles[lightInfo.sourceIndex];
     if(IsSelfEmissiveSample(surface, light))
     {
       return sample;
@@ -616,7 +618,7 @@ bool DITraceRayForLocalLight(float3 origin, float3 direction, float minT, float 
   const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
   for(uint i = 0; i < sceneInfo.emissiveTriangleCount; ++i)
   {
-    const PathTraceEmissiveTriangle light = sceneInfo.emissiveTriangles[i];
+    const EmissiveTriangleLight light = sceneInfo.emissiveTriangles[i];
     if(light.instanceIndex == committedInstance && light.primitiveIndex == committedPrimitive)
     {
       lightIndex = i;

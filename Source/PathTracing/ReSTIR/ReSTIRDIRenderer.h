@@ -7,23 +7,18 @@
 
 #include <vulkan/vulkan_core.h>
 
+#include "Denoising/DenoiserResources.h"
+#include "Denoising/NrdDenoiser.h"
 #include "PathTracing/ReSTIR/ReSTIRDIFrameContext.h"
 #include "PathTracing/ReSTIR/ReSTIRDIRendererTypes.h"
 #include "PathTracing/ReSTIR/ReSTIRDIRenderPassUtils.h"
 #include "PathTracing/ReSTIR/ReSTIRDIResources.h"
 #include "PathTracing/ReSTIR/ReSTIRDISettings.h"
-#include "PathTracing/PathTraceDenoiserResources.h"
-#include "PathTracing/PathTraceNrdDenoiser.h"
 #include "nvvk/descriptors.hpp"
 
 namespace nvapp
 {
 class Application;
-}
-
-namespace restir
-{
-class ReSTIRDIContext;
 }
 
 namespace nvsamples
@@ -54,9 +49,20 @@ public:
   void Render(const RenderInput& input);
 
 private:
-  using HistorySignature    = ReSTIRDIHistorySignature;
-  using DenoiserSignature   = ReSTIRDIDenoiserHistorySignature;
-  using RayTracingPassState = ReSTIRDIRayTracingPassState;
+  using AccumulationSignature = ReSTIRDIAccumulationSignature;
+  using DenoiserSignature     = ReSTIRDIDenoiserHistorySignature;
+  using RayTracingPassState   = ReSTIRDIRayTracingPassState;
+
+  struct FrameState
+  {
+    VkExtent2D            viewportSize{};
+    AccumulationSignature accumulationSignature{};
+    DenoiserSignature     denoiserSignature{};
+    bool                  denoiseEnabled = false;
+    bool                  restirDebugActive = false;
+    bool                  denoiserSignalsNeeded = false;
+    bool                  denoiserHistoryInvalidated = false;
+  };
 
   enum class ComputePass : uint32_t
   {
@@ -72,7 +78,18 @@ private:
   void CreateInitialSamplingPipeline();
   void CreateFinalShadingPipeline();
   void CreateComputePipelines();
-  void EnsureDIContext(VkExtent2D viewportSize);
+  bool CanRender(const RenderInput& input) const;
+  void EnsureViewportResources(VkExtent2D viewportSize);
+  FrameState BeginReSTIRFrame(const RenderInput& input, VkExtent2D viewportSize);
+  void PrepareDenoiser(const RenderInput& input, const FrameState& frameState);
+  shaderio::ReSTIRDIParameters BuildShaderParameters();
+  void PrepareStorageImages(const RenderInput& input, bool denoiserSignalsNeeded);
+  void ClearHistoryIfNeeded(VkCommandBuffer cmd);
+  shaderio::ReSTIRDIPushConstant BuildPushConstant(const RenderInput& input, bool denoiserSignalsNeeded) const;
+  void RecordReSTIRPasses(const RenderInput& input, const shaderio::ReSTIRDIPushConstant& pushConstant);
+  void RunDenoiserIfNeeded(const RenderInput& input, const FrameState& frameState);
+  void FinishFrame(const FrameState& frameState);
+  void EnsureParameterContext(VkExtent2D viewportSize);
   void UpdateFrameDescriptors(const RenderInput& input);
   void ClearHistoryBuffers(VkCommandBuffer cmd);
   void RunInitialSamplingPass(const RenderInput& input, const shaderio::ReSTIRDIPushConstant& pushConstant);
@@ -81,26 +98,32 @@ private:
   void RunFinalShadingPass(const RenderInput& input, const shaderio::ReSTIRDIPushConstant& pushConstant);
   void UpdateParameterBuffer(uint32_t frameSetIndex, const shaderio::ReSTIRDIParameters& parameters);
 
-  nvapp::Application*      m_App       = nullptr;
-  nvvk::ResourceAllocator* m_Allocator = nullptr;
+  // External owners give us the Vulkan application and allocator.
+  nvapp::Application*      m_App                   = nullptr;
+  nvvk::ResourceAllocator* m_Allocator             = nullptr;
   uint32_t                 m_MaxTextureDescriptors = 0;
-  uint32_t                 m_MaxBounceLimit        = 0;
-  uint32_t                 m_PipelineBounceLimit   = 0;
-  uint32_t                 m_AccumulatedFrames     = 0;
-  bool                     m_HistoryInvalidated    = true;
-  bool                     m_HasHistorySignature   = false;
-  bool                     m_HasDenoiserSignature  = false;
-  bool                     m_NeedsHistoryClear     = true;
 
-  ReSTIRDISettings         m_Settings{};
-  HistorySignature         m_LastHistorySignature{};
-  DenoiserSignature        m_LastDenoiserSignature{};
-  ReSTIRDIFrameContext            m_Context;
-  ReSTIRDIResources        m_Resources;
-  PathTraceDenoiserResources m_DenoiserResources;
-  PathTraceNrdDenoiser       m_NrdDenoiser;
-  std::unique_ptr<restir::ReSTIRDIContext> m_DiContext;
-  std::vector<nvvk::Buffer> m_ParameterBuffers;
+  // Render state that changes as the camera, scene, or settings change.
+  uint32_t m_PipelineBounceLimit      = 0;
+  uint32_t m_AccumulatedFrames        = 0;
+  bool     m_HistoryInvalidated       = true;
+  bool     m_HasAccumulationSignature = false;
+  bool     m_HasDenoiserSignature     = false;
+  bool     m_NeedsHistoryClear        = true;
+
+  ReSTIRDISettings      m_Settings{};
+  AccumulationSignature m_LastAccumulationSignature{};
+  DenoiserSignature     m_LastDenoiserSignature{};
+
+  // ReSTIR owns one frame context, one parameter context, and the GPU buffers.
+  ReSTIRDIFrameContext                      m_FrameContext;
+  ReSTIRDIResources                         m_Resources;
+  std::unique_ptr<ReSTIRDIParameterContext> m_ParameterContext;
+  std::vector<nvvk::Buffer>                 m_ParameterBuffers;
+
+  // NRD is optional output processing, shared with the path tracer.
+  DenoiserResources m_DenoiserResources;
+  NrdDenoiser       m_NrdDenoiser;
 
   nvvk::DescriptorPack     m_DescPack;
   VkPipelineLayout         m_PipelineLayout = VK_NULL_HANDLE;

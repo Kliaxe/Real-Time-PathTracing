@@ -43,7 +43,7 @@ enum ReSTIRDIBindingPoints
 {
   eReSTIRDITextures            = 0,
   eReSTIRDITlas                = 1,
-  eReSTIRDIOuputImage          = 2,
+  eReSTIRDIOutputImage         = 2,
   eReSTIRDIAccumulationImage   = 3,
   eReSTIRDILightReservoirBuffer = 4,
   eReSTIRDICurrentSurfaceBuffer = 5,
@@ -59,7 +59,7 @@ enum ReSTIRDIBindingPoints
   eReSTIRDISpecularRadianceHitDistanceImage = 15,
 };
 
-struct TutoPushConstant
+struct RasterPushConstant
 {
   float3x3       normalMatrix;
   int            instanceIndex;
@@ -83,22 +83,8 @@ struct PathTracePushConstant
 
 enum ReSTIRFlags
 {
-  eReSTIRFlagAccumulate            = 0x1u,
-  eReSTIRFlagEnableTemporal        = 0x2u,
-  eReSTIRFlagEnableSpatial         = 0x4u,
-  eReSTIRFlagHasHistory            = 0x8u,
-  eReSTIRFlagInitialWriteToHistory = 0x10u,
-  eReSTIRFlagTemporalWriteToScratch = 0x20u,
-  eReSTIRFlagSpatialReadFromScratch = 0x40u,
-  eReSTIRFlagWriteDenoiserSignals = 0x80u,
-};
-
-enum ReSTIRDIPassType
-{
-  eReSTIRDIPassTypeInitialSampling = 0u,
-  eReSTIRDIPassTypeTemporal        = 1u,
-  eReSTIRDIPassTypeSpatial         = 2u,
-  eReSTIRDIPassTypeFinalShading    = 3u,
+  eReSTIRFlagAccumulate           = 0x1u,
+  eReSTIRFlagWriteDenoiserSignals = 0x2u,
 };
 
 enum ReSTIRDebugView
@@ -112,6 +98,7 @@ enum ReSTIRDebugView
   eReSTIRDebugViewSpatialStatus = 6u,
   eReSTIRDebugViewShiftJacobian = 7u,
   eReSTIRDebugViewReuseCount = 8u,
+  eReSTIRDebugViewDepthDisocclusion = 9u,
 };
 
 enum ReSTIRShiftStatus
@@ -120,10 +107,7 @@ enum ReSTIRShiftStatus
   eReSTIRShiftStatusAccepted = 1u,
   eReSTIRShiftStatusRejectedNoHistory = 2u,
   eReSTIRShiftStatusRejectedSurface = 3u,
-  eReSTIRShiftStatusRejectedDirection = 4u,
-  eReSTIRShiftStatusRejectedVisibility = 5u,
-  eReSTIRShiftStatusRejectedTargetPdf = 6u,
-  eReSTIRShiftStatusRejectedHistoryAge = 7u,
+  eReSTIRShiftStatusRejectedTargetPdf = 4u,
 };
 
 struct ReSTIRDIParameters
@@ -194,7 +178,7 @@ struct ReSTIRDebugPixel
   float reservoirWeight;
   float shiftJacobian;
   float reuseCount;
-  uint  candidateKind;
+  uint  lightKind;
   uint  reservoirAge;
   uint  temporalStatus;
   uint  spatialStatus;
@@ -203,6 +187,9 @@ struct ReSTIRDebugPixel
 CHECK_STRUCT_ALIGNMENT(ReSTIRDISurface)
 CHECK_STRUCT_ALIGNMENT(ReSTIRDIParameters)
 CHECK_STRUCT_ALIGNMENT(ReSTIRDIPushConstant)
+#ifdef __cplusplus
+static_assert(sizeof(ReSTIRPackedDIReservoir) == 24, "Packed ReSTIR DI reservoir layout must match the shader storage buffer.");
+#endif
 
 NAMESPACE_SHADERIO_END()
 

@@ -142,7 +142,7 @@ void SceneRuntime::RebuildScene(VkQueue queue, const SceneUploader::UploadInput&
   sceneInfo.punctualLights[0].direction = glm::vec3(1.0f, 1.0f, 1.0f);
   sceneInfo.punctualLights[0].type      = shaderio::GltfLightType::ePoint;
   sceneInfo.punctualLights[0].coneAngle = 0.9f;
-  sceneInfo.emissiveTriangles           = (shaderio::PathTraceEmissiveTriangle*)m_SceneResource.bEmissiveTriangles.address;
+  sceneInfo.emissiveTriangles           = (shaderio::EmissiveTriangleLight*)m_SceneResource.bEmissiveTriangles.address;
   sceneInfo.emissiveTriangleCdf         = (float*)m_SceneResource.bEmissiveTriangleCdf.address;
   sceneInfo.environmentCdf              = (float*)m_SceneResource.bEnvironmentCdf.address;
   sceneInfo.environmentPdf              = (float*)m_SceneResource.bEnvironmentPdf.address;
@@ -237,7 +237,7 @@ void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewM
   m_SceneResource.sceneInfo.instances      = (shaderio::GltfInstance*)m_SceneResource.bInstances.address;
   m_SceneResource.sceneInfo.meshes         = (shaderio::GltfMesh*)m_SceneResource.bMeshes.address;
   m_SceneResource.sceneInfo.materials      = (shaderio::GltfMetallicRoughness*)m_SceneResource.bMaterials.address;
-  m_SceneResource.sceneInfo.emissiveTriangles   = (shaderio::PathTraceEmissiveTriangle*)m_SceneResource.bEmissiveTriangles.address;
+  m_SceneResource.sceneInfo.emissiveTriangles   = (shaderio::EmissiveTriangleLight*)m_SceneResource.bEmissiveTriangles.address;
   m_SceneResource.sceneInfo.emissiveTriangleCdf = (float*)m_SceneResource.bEmissiveTriangleCdf.address;
   m_SceneResource.sceneInfo.environmentCdf      = (float*)m_SceneResource.bEnvironmentCdf.address;
   m_SceneResource.sceneInfo.environmentPdf      = (float*)m_SceneResource.bEnvironmentPdf.address;

@@ -74,6 +74,50 @@ void WriteDenoiserSignals(int2 pixelPosition,
       PackReblurRadianceHitDistance(max(specularRadiance, float3(0.0)), specularHitDistance, viewZ, surface.roughness, false);
 }
 
+bool IsDepthDisoccluded(uint2 pixelPosition, DISurface surface)
+{
+  if(diParams.runtimeParams.frameIndex == 0u || !DIIsSurfaceValid(surface))
+  {
+    return false;
+  }
+
+  const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
+  const float2 pixelCenter = float2(pixelPosition) + 0.5;
+
+  float3 temporalMotionVector = float3(0.0);
+  if(!TryComputeReSTIRTemporalMotionVector(pixelCenter, surface.worldPosition, surface.linearDepth, sceneInfo, temporalMotionVector))
+  {
+    return true;
+  }
+
+  const float3 screenSpaceMotion = ConvertMotionVectorToPixelSpace(pixelCenter, temporalMotionVector, sceneInfo);
+  const int2 previousPixelPosition = int2(round(float2(pixelPosition) + screenSpaceMotion.xy));
+  const DISurface previousSurface = DILoadGBufferSurface(previousPixelPosition, true);
+  if(!DIIsSurfaceValid(previousSurface))
+  {
+    return true;
+  }
+
+  const float expectedPreviousDepth = DIGetSurfaceLinearDepth(surface) + screenSpaceMotion.z;
+  const float previousDepth = DIGetSurfaceLinearDepth(previousSurface);
+  return !CompareRelativeDifference(expectedPreviousDepth, previousDepth, diParams.temporalResampling.depthThreshold);
+}
+
+float3 OverlayDepthDisocclusion(uint2 pixelPosition, DISurface surface, float3 fallbackColor)
+{
+  if(pushConst.debugView != uint(ReSTIRDebugView::eReSTIRDebugViewDepthDisocclusion))
+  {
+    return fallbackColor;
+  }
+
+  if(!IsDepthDisoccluded(pixelPosition, surface))
+  {
+    return fallbackColor;
+  }
+
+  return lerp(fallbackColor, float3(1.0, 0.04, 0.02), 0.30);
+}
+
 bool BeginHybridDIContinuationRay(SurfaceData surface, inout PathPayload payload, out RayDesc bounceRay)
 {
   bounceRay = (RayDesc)0;
@@ -231,6 +275,7 @@ void rgenMain()
 
   resolvedRadiance = SanitizeRadiance(resolvedRadiance);
   resolvedRadiance = VisualizeReSTIRDIDebug(pixelIndex, resolvedRadiance);
+  resolvedRadiance = OverlayDepthDisocclusion(pixelPosition, surface, resolvedRadiance);
   if(pushConst.debugView == uint(ReSTIRDebugView::eReSTIRDebugViewDisabled)
      && (pushConst.flags & uint(ReSTIRFlags::eReSTIRFlagAccumulate)) != 0 && pushConst.accumulatedFrames > 0)
   {

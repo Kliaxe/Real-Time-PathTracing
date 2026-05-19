@@ -12,7 +12,7 @@
 #include <nvvk/debug_util.hpp>
 
 #include "Common/Utils.hpp"
-#include "PathTracing/ReSTIR/ReSTIRDIContext.h"
+#include "PathTracing/ReSTIR/ReSTIRDIParameterContext.h"
 
 #include "_autogen/FinalShading.slang.h"
 #include "_autogen/GenerateInitialSamples.slang.h"
@@ -101,22 +101,6 @@ VkShaderModuleCreateInfo GetFinalShadingShaderCode()
   return nvsamples::GetShaderModuleCreateInfo(std::span(FinalShading_slang));
 }
 
-restir::ReSTIRDI_ResamplingMode MapResamplingMode(ReSTIRDIResamplingMode mode)
-{
-  switch(mode)
-  {
-    case ReSTIRDIResamplingMode::eTemporal:
-      return restir::ReSTIRDI_ResamplingMode::Temporal;
-    case ReSTIRDIResamplingMode::eSpatial:
-      return restir::ReSTIRDI_ResamplingMode::Spatial;
-    case ReSTIRDIResamplingMode::eTemporalAndSpatial:
-      return restir::ReSTIRDI_ResamplingMode::TemporalAndSpatial;
-    case ReSTIRDIResamplingMode::eNone:
-    default:
-      return restir::ReSTIRDI_ResamplingMode::None;
-  }
-}
-
 }  // namespace
 
 ReSTIRDIRenderer::ReSTIRDIRenderer(const CreateInfo& createInfo)
@@ -124,8 +108,8 @@ ReSTIRDIRenderer::ReSTIRDIRenderer(const CreateInfo& createInfo)
     , m_Allocator(createInfo.allocator)
     , m_MaxTextureDescriptors(createInfo.maxTextureDescriptors)
     , m_Resources(ReSTIRDIResources::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
-    , m_DenoiserResources(PathTraceDenoiserResources::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
-    , m_NrdDenoiser(PathTraceNrdDenoiser::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
+    , m_DenoiserResources(DenoiserResources::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
+    , m_NrdDenoiser(NrdDenoiser::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
 {
 }
 
@@ -181,10 +165,10 @@ void ReSTIRDIRenderer::Destroy()
   m_PipelineLayout = VK_NULL_HANDLE;
 
   m_DescPack.deinit();
-  m_DiContext.reset();
+  m_ParameterContext.reset();
   m_AccumulatedFrames   = 0;
   m_HistoryInvalidated  = true;
-  m_HasHistorySignature = false;
+  m_HasAccumulationSignature = false;
   m_HasDenoiserSignature = false;
   m_NeedsHistoryClear   = true;
 }
@@ -220,11 +204,11 @@ void ReSTIRDIRenderer::InvalidateHistory()
 {
   m_AccumulatedFrames   = 0;
   m_HistoryInvalidated  = true;
-  m_HasHistorySignature = false;
+  m_HasAccumulationSignature = false;
   m_HasDenoiserSignature = false;
   m_NeedsHistoryClear   = true;
-  m_Context.InvalidateHistory();
-  m_DiContext.reset();
+  m_FrameContext.InvalidateHistory();
+  m_ParameterContext.reset();
   m_NrdDenoiser.InvalidateHistory();
 }
 
@@ -240,8 +224,7 @@ const nvvk::DescriptorPack& ReSTIRDIRenderer::GetDescriptorPack() const
 
 void ReSTIRDIRenderer::Render(const RenderInput& input)
 {
-  if(!IsReady() || input.cmd == VK_NULL_HANDLE || input.sceneResource == nullptr || input.sceneInfo == nullptr || input.topLevelAS == nullptr
-     || input.topLevelAS->accel == VK_NULL_HANDLE || input.gBuffers == nullptr)
+  if(!CanRender(input))
   {
     return;
   }
@@ -252,71 +235,116 @@ void ReSTIRDIRenderer::Render(const RenderInput& input)
     return;
   }
 
-  m_Context.EnsureViewport(viewportSize);
+  // ReSTIR is a frame algorithm: prepare state, upload parameters, record passes.
+  EnsureViewportResources(viewportSize);
+  FrameState frameState = BeginReSTIRFrame(input, viewportSize);
+  PrepareDenoiser(input, frameState);
+
+  const uint32_t frameSetIndex = GetReSTIRDIFrameSetIndex(m_App->getFrameCycleIndex(), m_ParameterBuffers.size());
+  UpdateParameterBuffer(frameSetIndex, BuildShaderParameters());
+  UpdateFrameDescriptors(input);
+  PrepareStorageImages(input, frameState.denoiserSignalsNeeded);
+  ClearHistoryIfNeeded(input.cmd);
+
+  const shaderio::ReSTIRDIPushConstant pushConstant = BuildPushConstant(input, frameState.denoiserSignalsNeeded);
+  RecordReSTIRPasses(input, pushConstant);
+  RunDenoiserIfNeeded(input, frameState);
+  FinishFrame(frameState);
+}
+
+bool ReSTIRDIRenderer::CanRender(const RenderInput& input) const
+{
+  return IsReady() && input.cmd != VK_NULL_HANDLE && input.sceneResource != nullptr && input.sceneInfo != nullptr
+         && input.topLevelAS != nullptr && input.topLevelAS->accel != VK_NULL_HANDLE && input.gBuffers != nullptr;
+}
+
+void ReSTIRDIRenderer::EnsureViewportResources(VkExtent2D viewportSize)
+{
+  // Viewport-sized resources must exist before descriptors point at them.
+  m_FrameContext.EnsureViewport(viewportSize);
   m_Resources.EnsureForViewport(viewportSize);
   m_DenoiserResources.EnsureForViewport(viewportSize);
-  EnsureDIContext(viewportSize);
+  EnsureParameterContext(viewportSize);
+}
 
-  const HistorySignature currentSignature = MakeReSTIRDIHistorySignature(*input.sceneInfo, input.topLevelAS->address, viewportSize);
-  const bool signatureChanged = !m_HasHistorySignature
-                                || std::memcmp(&currentSignature, &m_LastHistorySignature, sizeof(HistorySignature)) != 0;
-  const bool denoiseEnabled = IsDenoiseResolveMode(m_Settings.common.resolveMode);
+ReSTIRDIRenderer::FrameState ReSTIRDIRenderer::BeginReSTIRFrame(const RenderInput& input, VkExtent2D viewportSize)
+{
+  FrameState frameState{};
+  frameState.viewportSize            = viewportSize;
+  frameState.denoiseEnabled          = IsDenoiseResolveMode(m_Settings.common.resolveMode);
+  frameState.restirDebugActive       = m_Settings.common.debugView != shaderio::eReSTIRDebugViewDisabled;
+  frameState.denoiserSignalsNeeded   = frameState.denoiseEnabled && !frameState.restirDebugActive;
+  frameState.accumulationSignature   = MakeReSTIRDIAccumulationSignature(*input.sceneInfo, input.topLevelAS->address, viewportSize);
+  frameState.denoiserSignature       = MakeReSTIRDIDenoiserHistorySignature(*input.sceneInfo, input.topLevelAS->address, viewportSize);
+
+  // Signatures tell us when old temporal or accumulation history no longer matches the scene.
+  const bool accumulationSignatureChanged =
+      !m_HasAccumulationSignature
+      || std::memcmp(&frameState.accumulationSignature, &m_LastAccumulationSignature, sizeof(AccumulationSignature)) != 0;
   const bool restirHistoryInvalidated =
-      m_HistoryInvalidated || (IsAccumulationResolveMode(m_Settings.common.resolveMode) && signatureChanged);
-  const DenoiserSignature currentDenoiserSignature =
-      MakeReSTIRDIDenoiserHistorySignature(*input.sceneInfo, input.topLevelAS->address, viewportSize);
-  const bool denoiserSignatureChanged = !m_HasDenoiserSignature
-                                        || std::memcmp(&currentDenoiserSignature, &m_LastDenoiserSignature, sizeof(DenoiserSignature)) != 0;
-  const bool denoiserHistoryInvalidated = m_HistoryInvalidated || (denoiseEnabled && denoiserSignatureChanged);
+      m_HistoryInvalidated || (IsAccumulationResolveMode(m_Settings.common.resolveMode) && accumulationSignatureChanged);
+  const bool denoiserSignatureChanged =
+      !m_HasDenoiserSignature || std::memcmp(&frameState.denoiserSignature, &m_LastDenoiserSignature, sizeof(DenoiserSignature)) != 0;
+  frameState.denoiserHistoryInvalidated = m_HistoryInvalidated || (frameState.denoiseEnabled && denoiserSignatureChanged);
   if(restirHistoryInvalidated)
   {
     m_AccumulatedFrames = 0;
-    m_Context.InvalidateHistory();
-    m_DiContext.reset();
-    EnsureDIContext(viewportSize);
+    m_FrameContext.InvalidateHistory();
+    m_ParameterContext.reset();
+    EnsureParameterContext(viewportSize);
     m_NeedsHistoryClear = true;
   }
 
-  const bool restirDebugActive      = m_Settings.common.debugView != shaderio::eReSTIRDebugViewDisabled;
-  const bool denoiserSignalsNeeded = denoiseEnabled && !restirDebugActive;
-  if(denoiseEnabled)
+  return frameState;
+}
+
+void ReSTIRDIRenderer::PrepareDenoiser(const RenderInput& input, const FrameState& frameState)
+{
+  if(frameState.denoiseEnabled)
   {
-    m_NrdDenoiser.PrepareFrame(PathTraceNrdDenoiser::FrameInput{
+    // NRD needs guide buffers and matching camera history before the ReSTIR passes write signals.
+    m_NrdDenoiser.PrepareFrame(NrdDenoiser::FrameInput{
                                    .sceneInfo          = input.sceneInfo,
-                                   .viewportSize       = viewportSize,
-                                   .historyInvalidated = denoiserHistoryInvalidated,
+                                   .viewportSize       = frameState.viewportSize,
+                                   .historyInvalidated = frameState.denoiserHistoryInvalidated,
                                    .enableMaterialDemodulation = true,
                                    .settings           = &m_Settings.common.denoiserSettings,
                                },
                                m_DenoiserResources);
   }
+}
 
-  m_DiContext->SetFrameIndex(m_Context.GetFrameIndex());
-  m_DiContext->SetResamplingMode(MapResamplingMode(m_Settings.common.resamplingMode));
-  ReSTIRDIInitialSamplingParameters initialSampling = m_Settings.initialSampling;
-  m_DiContext->SetInitialSamplingParameters(initialSampling);
-  m_DiContext->SetTemporalResamplingParameters(m_Settings.temporalResampling);
-  m_DiContext->SetSpatialResamplingParameters(m_Settings.spatialResampling);
-  m_DiContext->SetShadingParameters(m_Settings.shading);
+shaderio::ReSTIRDIParameters ReSTIRDIRenderer::BuildShaderParameters()
+{
+  // The parameter context converts UI/settings state into the one GPU uniform block.
+  m_ParameterContext->SetFrameIndex(m_FrameContext.GetFrameIndex());
+  m_ParameterContext->SetResamplingMode(m_Settings.common.resamplingMode);
+  m_ParameterContext->SetInitialSamplingParameters(m_Settings.initialSampling);
+  m_ParameterContext->SetTemporalResamplingParameters(m_Settings.temporalResampling);
+  m_ParameterContext->SetSpatialResamplingParameters(m_Settings.spatialResampling);
+  m_ParameterContext->SetShadingParameters(m_Settings.shading);
   m_Settings.continuationMaxBounces = std::min(m_Settings.continuationMaxBounces, m_PipelineBounceLimit);
 
-  const uint32_t frameSetIndex = GetReSTIRDIFrameSetIndex(m_App->getFrameCycleIndex(), m_ParameterBuffers.size());
-  const shaderio::ReSTIRDIParameters parameters{
-      .runtimeParams         = m_DiContext->GetRuntimeParams(),
-      .reservoirBufferParams = m_DiContext->GetReservoirBufferParameters(),
-      .bufferIndices         = m_DiContext->GetBufferIndices(),
-      .initialSampling       = m_DiContext->GetInitialSamplingParameters(),
-      .temporalResampling    = m_DiContext->GetTemporalResamplingParameters(),
-      .spatialResampling     = m_DiContext->GetSpatialResamplingParameters(),
-      .shading               = m_DiContext->GetShadingParameters(),
+  return shaderio::ReSTIRDIParameters{
+      .runtimeParams         = m_ParameterContext->GetRuntimeParameters(),
+      .reservoirBufferParams = m_ParameterContext->GetReservoirBufferParameters(),
+      .bufferIndices         = m_ParameterContext->GetBufferIndices(),
+      .initialSampling       = m_ParameterContext->GetInitialSamplingParameters(),
+      .temporalResampling    = m_ParameterContext->GetTemporalResamplingParameters(),
+      .spatialResampling     = m_ParameterContext->GetSpatialResamplingParameters(),
+      .shading               = m_ParameterContext->GetShadingParameters(),
   };
-  UpdateParameterBuffer(frameSetIndex, parameters);
-  UpdateFrameDescriptors(input);
+}
+
+void ReSTIRDIRenderer::PrepareStorageImages(const RenderInput& input, bool denoiserSignalsNeeded)
+{
+  // The ray tracing passes write directly into the accumulation and output images.
   TransitionReSTIRDIStorageImages(input.cmd, const_cast<nvvk::Image&>(m_Resources.GetAccumulationImage()),
                                  input.gBuffers->getColorImage(input.renderedImageIndex),
                                  VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
   if(denoiserSignalsNeeded)
   {
+    // Denoiser guide buffers are storage images written by the final ReSTIR shading pass.
     TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetMotionVectorsImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
     TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetNormalRoughnessImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
     TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetBaseColorMetalnessImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
@@ -326,13 +354,20 @@ void ReSTIRDIRenderer::Render(const RenderInput& input)
     TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetSpecularRadianceHitDistanceImage(),
                                    VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
   }
+}
 
+void ReSTIRDIRenderer::ClearHistoryIfNeeded(VkCommandBuffer cmd)
+{
   if(m_NeedsHistoryClear)
   {
-    ClearHistoryBuffers(input.cmd);
+    // Reset reservoirs and surface history after scene, camera, or viewport changes.
+    ClearHistoryBuffers(cmd);
     m_NeedsHistoryClear = false;
   }
+}
 
+shaderio::ReSTIRDIPushConstant ReSTIRDIRenderer::BuildPushConstant(const RenderInput& input, bool denoiserSignalsNeeded) const
+{
   uint32_t restirFlags = 0u;
   if(IsAccumulationResolveMode(m_Settings.common.resolveMode))
   {
@@ -343,14 +378,19 @@ void ReSTIRDIRenderer::Render(const RenderInput& input)
     restirFlags |= shaderio::eReSTIRFlagWriteDenoiserSignals;
   }
 
-  const shaderio::ReSTIRDIPushConstant pushConstant{
+  // Push constants carry per-dispatch data that changes more often than descriptors.
+  return shaderio::ReSTIRDIPushConstant{
       .sceneInfoAddress       = (shaderio::GltfSceneInfo*)input.sceneResource->bSceneInfo.address,
       .accumulatedFrames      = IsAccumulationResolveMode(m_Settings.common.resolveMode) ? m_AccumulatedFrames : 0u,
       .flags                  = restirFlags,
       .continuationMaxBounces = m_Settings.continuationMaxBounces,
       .debugView              = static_cast<uint32_t>(m_Settings.common.debugView),
   };
+}
 
+void ReSTIRDIRenderer::RecordReSTIRPasses(const RenderInput& input, const shaderio::ReSTIRDIPushConstant& pushConstant)
+{
+  // The pass order mirrors the ReSTIR DI algorithm: candidate, temporal, spatial, shade.
   RunInitialSamplingPass(input, pushConstant);
 
   const bool enableTemporal = IsReSTIRDITemporalResamplingEnabled(m_Settings.common.resamplingMode);
@@ -374,23 +414,32 @@ void ReSTIRDIRenderer::Render(const RenderInput& input)
   nvvk::cmdMemoryBarrier(input.cmd, lastStage, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
   RunFinalShadingPass(input, pushConstant);
   nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+}
 
-  if(denoiseEnabled && !restirDebugActive && m_NrdDenoiser.IsReady())
+void ReSTIRDIRenderer::RunDenoiserIfNeeded(const RenderInput& input, const FrameState& frameState)
+{
+  if(frameState.denoiseEnabled && !frameState.restirDebugActive && m_NrdDenoiser.IsReady())
   {
     m_NrdDenoiser.Denoise(input.cmd, m_DenoiserResources, m_Resources.GetAccumulationImage().descriptor.imageView,
-                          input.gBuffers->getColorImageView(input.renderedImageIndex), m_Settings.common.denoiserDebugView, viewportSize);
+                          input.gBuffers->getColorImageView(input.renderedImageIndex), m_Settings.common.denoiserDebugView,
+                          frameState.viewportSize);
   }
-  else if(denoiseEnabled && restirDebugActive)
+  else if(frameState.denoiseEnabled && frameState.restirDebugActive)
   {
+    // Debug views replace the beauty image, so NRD history should not continue through them.
     m_NrdDenoiser.InvalidateHistory();
   }
+}
 
-  m_LastHistorySignature = currentSignature;
-  m_LastDenoiserSignature = currentDenoiserSignature;
-  m_HasHistorySignature  = true;
+void ReSTIRDIRenderer::FinishFrame(const FrameState& frameState)
+{
+  // Store history signatures after all passes used the current frame state.
+  m_LastAccumulationSignature = frameState.accumulationSignature;
+  m_LastDenoiserSignature = frameState.denoiserSignature;
+  m_HasAccumulationSignature = true;
   m_HasDenoiserSignature = true;
   m_HistoryInvalidated   = false;
-  m_Context.AdvanceFrame();
+  m_FrameContext.AdvanceFrame();
   m_AccumulatedFrames = IsAccumulationResolveMode(m_Settings.common.resolveMode) ? (m_AccumulatedFrames + 1u) : 0u;
 }
 
@@ -398,8 +447,8 @@ void ReSTIRDIRenderer::QueryRayTracingProperties()
 {
   VkPhysicalDeviceProperties2 props{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &m_RtProperties};
   vkGetPhysicalDeviceProperties2(m_Allocator->getPhysicalDevice(), &props);
-  m_MaxBounceLimit                  = (m_RtProperties.maxRayRecursionDepth > 0) ? (m_RtProperties.maxRayRecursionDepth - 1u) : 0u;
-  m_PipelineBounceLimit             = std::min(kRequestedMaxBounces, m_MaxBounceLimit);
+  const uint32_t maxBounceLimit     = (m_RtProperties.maxRayRecursionDepth > 0) ? (m_RtProperties.maxRayRecursionDepth - 1u) : 0u;
+  m_PipelineBounceLimit             = std::min(kRequestedMaxBounces, maxBounceLimit);
   m_Settings.continuationMaxBounces = std::min(m_Settings.continuationMaxBounces, m_PipelineBounceLimit);
 }
 
@@ -417,7 +466,7 @@ void ReSTIRDIRenderer::CreateDescriptorSetLayout()
                       VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
                           | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDITlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDIOuputImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDIOutputImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDIAccumulationImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDILightReservoirBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDICurrentSurfaceBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
@@ -491,32 +540,32 @@ void ReSTIRDIRenderer::CreateComputePipelines()
       CreateReSTIRDIComputePipeline(m_Allocator, m_PipelineLayout, GetSpatialShaderCode());
 }
 
-void ReSTIRDIRenderer::EnsureDIContext(VkExtent2D viewportSize)
+void ReSTIRDIRenderer::EnsureParameterContext(VkExtent2D viewportSize)
 {
-  if(m_DiContext != nullptr)
+  if(m_ParameterContext != nullptr)
   {
-    const restir::ReSTIRDIStaticParameters& staticParameters = m_DiContext->GetStaticParameters();
-    if(staticParameters.RenderWidth == viewportSize.width && staticParameters.RenderHeight == viewportSize.height
-       && staticParameters.NeighborOffsetCount == m_Resources.GetNeighborOffsetCount())
+    const ReSTIRDIStaticParameters& staticParameters = m_ParameterContext->GetStaticParameters();
+    if(staticParameters.renderWidth == viewportSize.width && staticParameters.renderHeight == viewportSize.height
+       && staticParameters.neighborOffsetCount == m_Resources.GetNeighborOffsetCount())
     {
       return;
     }
   }
 
-  const restir::ReSTIRDIStaticParameters staticParameters{
-      .NeighborOffsetCount      = m_Resources.GetNeighborOffsetCount(),
-      .RenderWidth              = viewportSize.width,
-      .RenderHeight             = viewportSize.height,
+  const ReSTIRDIStaticParameters staticParameters{
+      .neighborOffsetCount      = m_Resources.GetNeighborOffsetCount(),
+      .renderWidth              = viewportSize.width,
+      .renderHeight             = viewportSize.height,
   };
-  m_DiContext = std::make_unique<restir::ReSTIRDIContext>(staticParameters);
+  m_ParameterContext = std::make_unique<ReSTIRDIParameterContext>(staticParameters);
   m_NeedsHistoryClear = true;
 }
 
 void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
 {
   const uint32_t frameSetIndex        = GetReSTIRDIFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
-  const uint32_t currentHistoryIndex  = m_Context.GetCurrentHistoryIndex();
-  const uint32_t previousHistoryIndex = m_Context.GetPreviousHistoryIndex();
+  const uint32_t currentHistoryIndex  = m_FrameContext.GetCurrentHistoryIndex();
+  const uint32_t previousHistoryIndex = m_FrameContext.GetPreviousHistoryIndex();
 
   VkDescriptorImageInfo outputImageInfo = input.gBuffers->getDescriptorImageInfo(input.renderedImageIndex);
   outputImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
@@ -558,7 +607,7 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
   writes[writeCount].pNext = &accelerationInfo;
   ++writeCount;
 
-  writes[writeCount]            = m_DescPack.makeWrite(shaderio::ReSTIRDIBindingPoints::eReSTIRDIOuputImage, frameSetIndex);
+  writes[writeCount]            = m_DescPack.makeWrite(shaderio::ReSTIRDIBindingPoints::eReSTIRDIOutputImage, frameSetIndex);
   writes[writeCount].pImageInfo = &outputImageInfo;
   ++writeCount;
 

@@ -4,6 +4,7 @@
 
 #include <vulkan/vulkan_core.h>
 
+#include "ReSTIR/Parameters.h"
 #include "Shaders/ShaderIo.h"
 #include "nvvk/resource_allocator.hpp"
 #include "nvvk/resources.hpp"
@@ -16,6 +17,7 @@ class Application;
 namespace nvsamples
 {
 
+// Owns the ReSTIR DI buffers/images whose size depends on the viewport.
 class ReSTIRDIResources
 {
 public:
@@ -30,13 +32,13 @@ public:
   void Destroy();
   void EnsureForViewport(VkExtent2D viewportSize);
 
-  VkExtent2D                          GetViewportSize() const;
-  const nvvk::Buffer&                 GetLightReservoirBuffer() const;
-  const nvvk::Buffer&                 GetSurfaceBuffer(uint32_t historyIndex) const;
-  const nvvk::Buffer&                 GetNeighborOffsetBuffer() const;
-  const nvvk::Buffer&                 GetDebugBuffer() const;
-  const nvvk::Image&                  GetAccumulationImage() const;
-  uint32_t                            GetNeighborOffsetCount() const;
+  VkExtent2D                             GetViewportSize() const;
+  const nvvk::Buffer&                    GetLightReservoirBuffer() const;
+  const nvvk::Buffer&                    GetSurfaceBuffer(uint32_t historyIndex) const;
+  const nvvk::Buffer&                    GetNeighborOffsetBuffer() const;
+  const nvvk::Buffer&                    GetDebugBuffer() const;
+  const nvvk::Image&                     GetAccumulationImage() const;
+  uint32_t                               GetNeighborOffsetCount() const;
   const ReSTIRReservoirBufferParameters& GetReservoirBufferParameters() const;
 
 private:
@@ -46,15 +48,15 @@ private:
   void ScheduleImageDestroy(nvvk::Image image);
   nvvk::Buffer CreateStorageBuffer(VkDeviceSize size, const char* debugName) const;
 
-  nvapp::Application*      m_App       = nullptr;
-  nvvk::ResourceAllocator* m_Allocator = nullptr;
-  VkExtent2D               m_ViewportSize{};
+  nvapp::Application*             m_App       = nullptr;
+  nvvk::ResourceAllocator*        m_Allocator = nullptr;
+  VkExtent2D                      m_ViewportSize{};
   std::array<nvvk::Buffer, 2> m_SurfaceBuffers{};
-  nvvk::Buffer             m_LightReservoirBuffer;
-  nvvk::Buffer             m_NeighborOffsetBuffer;
-  nvvk::Buffer             m_DebugBuffer;
-  nvvk::Image              m_AccumulationImage;
-  uint32_t                 m_NeighborOffsetCount = 0;
+  nvvk::Buffer                    m_LightReservoirBuffer;
+  nvvk::Buffer                    m_NeighborOffsetBuffer;
+  nvvk::Buffer                    m_DebugBuffer;
+  nvvk::Image                     m_AccumulationImage;
+  uint32_t                        m_NeighborOffsetCount = 0;
   ReSTIRReservoirBufferParameters m_ReservoirBufferParameters{};
 };
 

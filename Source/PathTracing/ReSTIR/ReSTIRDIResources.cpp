@@ -8,7 +8,7 @@
 #include <nvvk/check_error.hpp>
 #include <nvvk/debug_util.hpp>
 
-#include "PathTracing/ReSTIR/ReSTIRDIContext.h"
+#include "PathTracing/ReSTIR/ReSTIRDIParameterContext.h"
 
 namespace nvsamples
 {
@@ -148,10 +148,10 @@ void ReSTIRDIResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
     return;
   }
 
-  m_ReservoirBufferParameters = restir::CalculateReservoirBufferParameters(viewportSize.width, viewportSize.height);
+  m_ReservoirBufferParameters = CalculateReservoirBufferParameters(viewportSize.width, viewportSize.height);
 
   const VkDeviceSize reservoirElementCount =
-      VkDeviceSize(m_ReservoirBufferParameters.reservoirArrayPitch) * VkDeviceSize(restir::c_NumReSTIRDIReservoirBuffers);
+      VkDeviceSize(m_ReservoirBufferParameters.reservoirArrayPitch) * VkDeviceSize(kReSTIRDIReservoirBufferCount);
   const VkDeviceSize reservoirBufferSize = reservoirElementCount * sizeof(ReSTIRPackedDIReservoir);
   const VkDeviceSize pixelCount          = VkDeviceSize(viewportSize.width) * VkDeviceSize(viewportSize.height);
   const VkDeviceSize surfaceBufferSize   = pixelCount * sizeof(shaderio::ReSTIRDISurface);

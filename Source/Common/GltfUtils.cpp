@@ -376,7 +376,7 @@ void CreateGltfSceneInfoBuffer(GltfSceneResource& sceneResource, nvvk::StagingUp
                             VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT | VK_BUFFER_USAGE_2_TRANSFER_SRC_BIT);
     NVVK_DBG_NAME(sceneResource.bEmissiveTriangles.buffer);
     NVVK_CHECK(stagingUploader.appendBuffer(sceneResource.bEmissiveTriangles, 0,
-                                            std::span<const shaderio::PathTraceEmissiveTriangle>(sceneResource.emissiveTriangles)));
+                                            std::span<const shaderio::EmissiveTriangleLight>(sceneResource.emissiveTriangles)));
   }
 
   if(!sceneResource.emissiveTriangleCdf.empty())

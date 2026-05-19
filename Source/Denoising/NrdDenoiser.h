@@ -8,7 +8,7 @@
 #include <vulkan/vulkan_core.h>
 
 #include "PathTracing/Common/ResolveMode.h"
-#include "PathTraceDenoiserResources.h"
+#include "DenoiserResources.h"
 #include "Shaders/ShaderIo.h"
 #include "nvvk/resource_allocator.hpp"
 #include "nvvk/resources.hpp"
@@ -35,8 +35,8 @@ namespace nvsamples
 
 // Owns the native NRD instance, the Vulkan resources that mirror NRD's image
 // model, and the small compose step that resolves denoised diffuse/specular
-// outputs back into a path-traced renderer's HDR target.
-class PathTraceNrdDenoiser
+// outputs back into the active renderer's HDR target.
+class NrdDenoiser
 {
 public:
   struct CreateInfo
@@ -54,16 +54,16 @@ public:
     const DenoiserSettings*        settings            = nullptr;
   };
 
-  explicit PathTraceNrdDenoiser(const CreateInfo& createInfo);
+  explicit NrdDenoiser(const CreateInfo& createInfo);
 
   void Initialize();
   void Destroy();
   bool IsReady() const;
 
   void InvalidateHistory();
-  void PrepareFrame(const FrameInput& input, const PathTraceDenoiserResources& denoiserInputs);
+  void PrepareFrame(const FrameInput& input, const DenoiserResources& denoiserInputs);
   void Denoise(VkCommandBuffer cmd,
-               const PathTraceDenoiserResources& denoiserInputs,
+               const DenoiserResources& denoiserInputs,
                VkImageView rawBeautyImageView,
                VkImageView outputImageView,
                DenoiserDebugView debugView,
@@ -102,16 +102,16 @@ private:
   void UpdateFrameSet(FrameResources& frameResources);
   VkDescriptorSet AllocateDescriptorSet(FrameResources& frameResources, VkDescriptorSetLayout layout);
   uint32_t UploadConstantData(FrameResources& frameResources, const void* constantData, uint32_t constantDataSize, bool reusePreviousData);
-  void UpdateResourceSet(VkDescriptorSet resourceSet, const nrd::DispatchDesc& dispatchDesc, const PathTraceDenoiserResources& denoiserInputs);
-  void DispatchNrd(VkCommandBuffer cmd, FrameResources& frameResources, const PathTraceDenoiserResources& denoiserInputs);
+  void UpdateResourceSet(VkDescriptorSet resourceSet, const nrd::DispatchDesc& dispatchDesc, const DenoiserResources& denoiserInputs);
+  void DispatchNrd(VkCommandBuffer cmd, FrameResources& frameResources, const DenoiserResources& denoiserInputs);
   void ComposeDenoisedResult(VkCommandBuffer cmd,
                              FrameResources& frameResources,
-                             const PathTraceDenoiserResources& denoiserInputs,
+                             const DenoiserResources& denoiserInputs,
                              VkImageView rawBeautyImageView,
                              VkImageView outputImageView,
                              DenoiserDebugView debugView,
                              VkExtent2D viewportSize);
-  const nvvk::Image& ResolveDispatchImage(nrd::ResourceType resourceType, uint16_t poolIndex, const PathTraceDenoiserResources& denoiserInputs) const;
+  const nvvk::Image& ResolveDispatchImage(nrd::ResourceType resourceType, uint16_t poolIndex, const DenoiserResources& denoiserInputs) const;
   void TransitionImageToGeneral(VkCommandBuffer cmd, nvvk::Image& image, VkPipelineStageFlags2 dstStageMask) const;
   void InsertComputeBarrier(VkCommandBuffer cmd) const;
 

@@ -18,7 +18,7 @@ void WriteReSTIRDebugPixel(uint pixelIndex,
                            float reservoirWeight,
                            float shiftJacobian,
                            float reuseCount,
-                           uint methodTag,
+                           uint lightKind,
                            uint reservoirAge,
                            uint temporalStatus,
                            uint spatialStatus)
@@ -33,7 +33,7 @@ void WriteReSTIRDebugPixel(uint pixelIndex,
   debugPixel.reservoirWeight  = reservoirWeight;
   debugPixel.shiftJacobian    = shiftJacobian;
   debugPixel.reuseCount       = reuseCount;
-  debugPixel.candidateKind    = methodTag;
+  debugPixel.lightKind        = lightKind;
   debugPixel.reservoirAge     = reservoirAge;
   debugPixel.temporalStatus   = temporalStatus;
   debugPixel.spatialStatus    = spatialStatus;
@@ -48,14 +48,8 @@ float3 GetShiftStatusDebugColor(uint status)
     return float3(0.15, 0.45, 0.95);
   if(status == uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface))
     return float3(0.95, 0.3, 0.2);
-  if(status == uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedDirection))
-    return float3(0.95, 0.75, 0.2);
-  if(status == uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedVisibility))
-    return float3(0.85, 0.2, 0.85);
   if(status == uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedTargetPdf))
     return float3(0.85, 0.85, 0.2);
-  if(status == uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedHistoryAge))
-    return float3(0.5, 0.5, 0.5);
   return float3(0.0);
 }
 
@@ -102,6 +96,10 @@ float3 VisualizeReSTIRDebugPixel(ReSTIRDebugPixel debugPixel,
     const float value = saturate(abs(log2(max(debugPixel.shiftJacobian, 1.0e-5))) / 6.0);
     return debugPixel.shiftJacobian >= 1.0 ? lerp(float3(0.1, 0.1, 0.1), float3(0.15, 0.95, 0.25), value)
                                            : lerp(float3(0.1, 0.1, 0.1), float3(0.95, 0.25, 0.2), value);
+  }
+  if(debugView == uint(ReSTIRDebugView::eReSTIRDebugViewDepthDisocclusion))
+  {
+    return fallbackColor;
   }
 
   const float reuse = saturate(debugPixel.reuseCount / 8.0);
@@ -153,7 +151,7 @@ float3 VisualizeReSTIRDIDebug(uint pixelIndex, float3 fallbackColor)
   const ReSTIRDebugPixel debugPixel = debugBuffer[pixelIndex];
   const float maxAge = max(float(diParams.temporalResampling.maxHistoryLength), float(diParams.shading.finalVisibilityMaxAge));
   return VisualizeReSTIRDebugPixel(debugPixel, pushConst.debugView, maxAge, fallbackColor,
-                                   GetDILightKindDebugColor(debugPixel.candidateKind));
+                                   GetDILightKindDebugColor(debugPixel.lightKind));
 }
 
 #endif

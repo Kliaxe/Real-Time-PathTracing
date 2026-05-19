@@ -98,6 +98,7 @@ void ExperimentMetadataWriter::WriteManifest(const ExperimentPlan& plan)
 
   std::ofstream file(plan.outputRoot / "manifest.json", std::ios::trunc);
   file << "{\n";
+  file << "  \"schemaVersion\": 2,\n";
   file << "  \"plan\": \"" << EscapeJson(plan.name) << "\",\n";
   file << "  \"runCount\": " << plan.runs.size() << ",\n";
   file << "  \"runs\": [\n";
@@ -116,7 +117,10 @@ void ExperimentMetadataWriter::WriteManifest(const ExperimentPlan& plan)
   file << "}\n";
 
   std::ofstream summary(plan.outputRoot / "summary.csv", std::ios::trunc);
-  summary << "run,scene,render_mode,capture_frame,image,accumulated_frames,total_frames,warmup_frames,gpu_frame_ms,gpu_renderer_ms,gpu_post_process_ms\n";
+  summary << "run,scene,render_mode,resolve_mode,capture_frame,image,accumulated_frames,total_frames,warmup_frames,"
+             "restir_local_light_samples,restir_environment_samples,restir_brdf_samples,restir_temporal_reuse,"
+             "restir_spatial_reuse,restir_spatial_samples,restir_spatial_radius,restir_continuation_bounces,"
+             "restir_debug_view,path_tracing_max_bounces,gpu_frame_ms,gpu_renderer_ms,gpu_post_process_ms\n";
 }
 
 void ExperimentMetadataWriter::WriteCaptureMetadata(const ExperimentPlan& plan,
@@ -132,6 +136,7 @@ void ExperimentMetadataWriter::WriteCaptureMetadata(const ExperimentPlan& plan,
   const std::filesystem::path metadataPath = runFolder / (imagePath.stem().string() + ".metadata.json");
   std::ofstream               file(metadataPath, std::ios::trunc);
   file << "{\n";
+  file << "  \"schemaVersion\": 2,\n";
   file << "  \"plan\": \"" << EscapeJson(plan.name) << "\",\n";
   file << "  \"run\": \"" << EscapeJson(run.runName) << "\",\n";
   file << "  \"scene\": \"" << EscapeJson(run.sceneLabel) << "\",\n";
@@ -144,7 +149,11 @@ void ExperimentMetadataWriter::WriteCaptureMetadata(const ExperimentPlan& plan,
   file << "  \"environment\": {\n";
   file << "    \"useHdri\": " << (run.environment.useHdri ? "true" : "false") << ",\n";
   file << "    \"useSky\": " << (run.environment.useSky ? "true" : "false") << ",\n";
+  file << "    \"hdriLabelOrPath\": \"" << EscapeJson(run.environment.hdriLabelOrPath) << "\",\n";
   WriteVec3(file, "backgroundColor", run.environment.backgroundColor, "\n");
+  file << "  },\n";
+  file << "  \"tonemapper\": {\n";
+  file << "    \"exposure\": " << run.tonemapperExposure << "\n";
   file << "  },\n";
   const ExperimentCamera endCamera = run.animateCamera ? run.endCamera : run.camera;
   file << "  \"camera\": {\n";
@@ -156,21 +165,39 @@ void ExperimentMetadataWriter::WriteCaptureMetadata(const ExperimentPlan& plan,
   WriteVec3(file, "endCenter", endCamera.center, ",");
   WriteVec3(file, "endUp", endCamera.up, "\n");
   file << "  },\n";
-  file << "  \"pathTracing\": {\n";
-  file << "    \"resolveMode\": \"" << ToString(run.pathTracing.resolveMode) << "\",\n";
-  file << "    \"maxBounces\": " << run.pathTracing.maxBounces << "\n";
-  file << "  },\n";
-  file << "  \"restir\": {\n";
-  file << "    \"resolveMode\": \"" << ToString(run.restir.resolveMode) << "\",\n";
-  file << "    \"localLightSamples\": " << run.restir.localLightSamples << ",\n";
-  file << "    \"environmentSamples\": " << run.restir.environmentSamples << ",\n";
-  file << "    \"brdfSamples\": " << run.restir.brdfSamples << ",\n";
-  file << "    \"temporalReuse\": " << (run.restir.temporalReuse ? "true" : "false") << ",\n";
-  file << "    \"spatialReuse\": " << (run.restir.spatialReuse ? "true" : "false") << ",\n";
-  file << "    \"spatialSamples\": " << run.restir.spatialSamples << ",\n";
-  file << "    \"spatialRadius\": " << run.restir.spatialRadius << ",\n";
-  file << "    \"continuationMaxBounces\": " << run.restir.continuationMaxBounces << "\n";
-  file << "  },\n";
+  if(run.renderMode == ExperimentRenderMode::ePathTracing)
+  {
+    file << "  \"pathTracing\": {\n";
+    file << "    \"resolveMode\": \"" << ToString(run.pathTracing.resolveMode) << "\",\n";
+    file << "    \"maxBounces\": " << run.pathTracing.maxBounces << "\n";
+    file << "  },\n";
+  }
+  else
+  {
+    file << "  \"pathTracing\": null,\n";
+  }
+  if(run.renderMode == ExperimentRenderMode::eReSTIRDI)
+  {
+    file << "  \"restir\": {\n";
+    file << "    \"resolveMode\": \"" << ToString(run.restir.resolveMode) << "\",\n";
+    file << "    \"localLightSamples\": " << run.restir.localLightSamples << ",\n";
+    file << "    \"environmentSamples\": " << run.restir.environmentSamples << ",\n";
+    file << "    \"brdfSamples\": " << run.restir.brdfSamples << ",\n";
+    file << "    \"temporalReuse\": " << (run.restir.temporalReuse ? "true" : "false") << ",\n";
+    file << "    \"spatialReuse\": " << (run.restir.spatialReuse ? "true" : "false") << ",\n";
+    file << "    \"spatialSamples\": " << run.restir.spatialSamples << ",\n";
+    file << "    \"spatialRadius\": " << run.restir.spatialRadius << ",\n";
+    file << "    \"initialVisibility\": " << (run.restir.initialVisibility ? "true" : "false") << ",\n";
+    file << "    \"finalVisibility\": " << (run.restir.finalVisibility ? "true" : "false") << ",\n";
+    file << "    \"reuseFinalVisibility\": " << (run.restir.reuseFinalVisibility ? "true" : "false") << ",\n";
+    file << "    \"debugView\": " << run.restir.debugView << ",\n";
+    file << "    \"continuationMaxBounces\": " << run.restir.continuationMaxBounces << "\n";
+    file << "  },\n";
+  }
+  else
+  {
+    file << "  \"restir\": null,\n";
+  }
   file << "  \"gpuTimings\": {\n";
   WriteTimingValue(file, "frameMs", gpuTimings, &ExperimentGpuTimings::frameMs, ",");
   WriteTimingValue(file, "rendererMs", gpuTimings, &ExperimentGpuTimings::rendererMs, ",");
@@ -190,11 +217,22 @@ void ExperimentMetadataWriter::AppendSummaryRow(const ExperimentPlan& plan,
   summary << '"' << EscapeJson(run.runName) << "\",";
   summary << '"' << EscapeJson(run.sceneLabel) << "\",";
   summary << ToString(run.renderMode) << ",";
+  summary << (run.renderMode == ExperimentRenderMode::ePathTracing ? ToString(run.pathTracing.resolveMode) : ToString(run.restir.resolveMode)) << ",";
   summary << capture.frameIndex << ",";
   summary << '"' << EscapeJson(GenericPath(imagePath)) << "\",";
   summary << accumulatedFrames << ",";
   summary << run.totalFrames << ",";
   summary << run.warmupFrames << ",";
+  summary << run.restir.localLightSamples << ",";
+  summary << run.restir.environmentSamples << ",";
+  summary << run.restir.brdfSamples << ",";
+  summary << (run.restir.temporalReuse ? "true" : "false") << ",";
+  summary << (run.restir.spatialReuse ? "true" : "false") << ",";
+  summary << run.restir.spatialSamples << ",";
+  summary << run.restir.spatialRadius << ",";
+  summary << run.restir.continuationMaxBounces << ",";
+  summary << run.restir.debugView << ",";
+  summary << run.pathTracing.maxBounces << ",";
   WriteCsvTimingValue(summary, gpuTimings, &ExperimentGpuTimings::frameMs);
   summary << ",";
   WriteCsvTimingValue(summary, gpuTimings, &ExperimentGpuTimings::rendererMs);

@@ -149,8 +149,8 @@ struct GltfInstance
 };
 CHECK_STRUCT_ALIGNMENT(GltfInstance)
 
-// Emissive triangle used by the path tracer's direct-light sampler.
-struct PathTraceEmissiveTriangle
+// Emissive triangle light shared by the ray-traced renderers.
+struct EmissiveTriangleLight
 {
   float3 position0;
   float  area;
@@ -165,7 +165,7 @@ struct PathTraceEmissiveTriangle
   float2 texCoord2;
   float2 _pad0;
 };
-CHECK_STRUCT_ALIGNMENT(PathTraceEmissiveTriangle)
+CHECK_STRUCT_ALIGNMENT(EmissiveTriangleLight)
 
 // Scene-wide parameters passed to shaders.
 struct GltfSceneInfo
@@ -195,7 +195,7 @@ struct GltfSceneInfo
   GltfInstance*          instances;          // GPU address of instances
   GltfMesh*              meshes;             // GPU address of meshes
   GltfMetallicRoughness* materials;          // GPU address of materials
-  PathTraceEmissiveTriangle* emissiveTriangles;   // Emissive triangle light list
+  EmissiveTriangleLight* emissiveTriangles;   // Emissive triangle light list
   float*                 emissiveTriangleCdf;     // Normalized CDF for emissive triangle sampling
   float*                 environmentCdf;          // Normalized CDF for HDRI texel sampling
   float*                 environmentPdf;          // Normalized discrete HDRI texel probabilities

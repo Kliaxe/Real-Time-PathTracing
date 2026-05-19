@@ -1,2 +1,20 @@
+* text=auto eol=lf
+
+# Content assets are binary or LFS-managed and should not be line-normalized.
 Content/**/*.gltf filter=lfs diff=lfs merge=lfs -text
+Content/**/*.glb filter=lfs diff=lfs merge=lfs -text
+Content/**/*.bin filter=lfs diff=lfs merge=lfs -text
 Content/**/*.png filter=lfs diff=lfs merge=lfs -text
+Content/**/*.jpg filter=lfs diff=lfs merge=lfs -text
+Content/**/*.jpeg filter=lfs diff=lfs merge=lfs -text
+Content/**/*.hdr filter=lfs diff=lfs merge=lfs -text
+Content/**/*.exr filter=lfs diff=lfs merge=lfs -text
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.hdr binary
+*.exr binary
+*.glb binary
+*.spv binary
+*.pdf binary

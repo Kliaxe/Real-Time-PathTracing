@@ -8,8 +8,8 @@
 
 #include "Common/GltfUtils.hpp"
 #include "PathTracing/Common/ResolveMode.h"
-#include "PathTraceDenoiserResources.h"
-#include "PathTraceNrdDenoiser.h"
+#include "Denoising/DenoiserResources.h"
+#include "Denoising/NrdDenoiser.h"
 #include "Shaders/ShaderIo.h"
 #include "nvvk/descriptors.hpp"
 #include "nvvk/gbuffers.hpp"
@@ -101,11 +101,29 @@ private:
     VkExtent2D                  viewportSize{};
   };
 
+  struct FrameState
+  {
+    VkExtent2D            viewportSize{};
+    AccumulationSignature accumulationSignature{};
+    DenoiserSignature     denoiserSignature{};
+    bool                  finalAccumulationEnabled = false;
+    bool                  denoiserHistoryInvalidated = false;
+  };
+
   void QueryRayTracingProperties();
   void CreateDescriptorSetLayout();
   void CreatePipelineLayout();
   void CreateRayTracingPipeline();
   void CreateShaderBindingTable();
+  bool CanRender(const RenderInput& input) const;
+  void EnsureViewportResources(VkExtent2D viewportSize);
+  FrameState BeginPathTraceFrame(const RenderInput& input, VkExtent2D viewportSize);
+  void PrepareDenoiser(const RenderInput& input, const FrameState& frameState);
+  void PrepareStorageImages(const RenderInput& input);
+  shaderio::PathTracePushConstant BuildPushConstant(const RenderInput& input, const FrameState& frameState);
+  void RecordPathTracePass(const RenderInput& input, const shaderio::PathTracePushConstant& pushConstant);
+  void RunDenoiserIfNeeded(const RenderInput& input, const FrameState& frameState);
+  void FinishFrame(const FrameState& frameState);
   void UpdateFrameDescriptors(const RenderInput& input);
   void CreateOrResizeAccumulationImage(VkExtent2D size);
   void DestroyAccumulationImage();
@@ -134,15 +152,14 @@ private:
   nvvk::SBTGenerator          m_SbtGenerator;
   nvvk::Buffer                m_SbtBuffer;
   nvvk::Image                 m_AccumulationImage;
-  PathTraceDenoiserResources  m_DenoiserResources;
-  PathTraceNrdDenoiser        m_NrdDenoiser;
+  DenoiserResources  m_DenoiserResources;
+  NrdDenoiser        m_NrdDenoiser;
   nvvk::SBTGenerator::Regions m_SbtRegions{};
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_RtProperties{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
 };
 
 }  // namespace nvsamples
-
 
 
 

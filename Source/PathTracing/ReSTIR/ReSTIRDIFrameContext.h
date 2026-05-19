@@ -17,12 +17,10 @@ public:
   uint32_t GetFrameIndex() const;
   uint32_t GetCurrentHistoryIndex() const;
   uint32_t GetPreviousHistoryIndex() const;
-  bool     HasHistory() const;
 
 private:
   VkExtent2D m_ViewportSize{};
   uint32_t   m_FrameIndex = 0;
-  bool       m_HasHistory = false;
 };
 
 }  // namespace nvsamples

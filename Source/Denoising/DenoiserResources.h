@@ -13,9 +13,9 @@ class Application;
 namespace nvsamples
 {
 
-// Owns the NRD input images shared by the path-traced renderers:
+// Owns the NRD input images shared by ray-traced renderers:
 // primary-hit guide buffers plus diffuse/specular split noisy signals.
-class PathTraceDenoiserResources
+class DenoiserResources
 {
 public:
   struct CreateInfo
@@ -24,7 +24,7 @@ public:
     nvvk::ResourceAllocator* allocator = nullptr;
   };
 
-  explicit PathTraceDenoiserResources(const CreateInfo& createInfo);
+  explicit DenoiserResources(const CreateInfo& createInfo);
 
   void Destroy();
   void EnsureForViewport(VkExtent2D viewportSize);

@@ -62,6 +62,7 @@ struct ExperimentReSTIRSettings
   bool                  initialVisibility     = true;
   bool                  finalVisibility       = true;
   bool                  reuseFinalVisibility  = true;
+  uint32_t              debugView             = 0;
   uint32_t              continuationMaxBounces = 0;
 };
 
@@ -86,6 +87,7 @@ struct ExperimentRun
 
   uint32_t totalFrames  = 16;
   uint32_t warmupFrames = 15;
+  float    tonemapperExposure = 1.0f;
 
   ExperimentPathTracerSettings pathTracing;
   ExperimentReSTIRSettings     restir;

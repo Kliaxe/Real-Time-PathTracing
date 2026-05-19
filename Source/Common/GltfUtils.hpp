@@ -40,7 +40,7 @@ struct GltfSceneResource
   std::vector<shaderio::GltfMesh>              meshes;     // Mesh descriptions
   std::vector<shaderio::GltfInstance>          instances;  // Instances
   std::vector<shaderio::GltfMetallicRoughness> materials;  // Materials
-  std::vector<shaderio::PathTraceEmissiveTriangle> emissiveTriangles; // Direct-light emissive triangles
+  std::vector<shaderio::EmissiveTriangleLight> emissiveTriangles; // Direct-light emissive triangles
   std::vector<float>                          emissiveTriangleCdf; // Normalized CDF for emissive triangle sampling
   std::vector<float>                          environmentCdf; // Normalized CDF for HDRI texel sampling
   std::vector<float>                          environmentPdf; // Normalized discrete HDRI texel probabilities

@@ -10,22 +10,19 @@
 // Tries to match the surfaces in the current frame to surfaces in the previous frame.
 // If a match is found for a given pixel, the current and previous reservoirs are 
 // combined. An optional visibility ray may be cast if enabled, to reduce the resampling bias.
-// That visibility ray should ideally be traced through the previous frame BVH, but
-// can also use the current frame BVH if the previous is not available - that will produce more bias.
-// The selectedLightSample parameter is used to update and return the selected sample; it's optional,
-// and it's safe to pass a null structure there and ignore the result.
+// This project keeps one current TLAS. Temporal reuse therefore reprojects into
+// the previous surface buffer, but any optional visibility check is approximate.
 ReSTIRDIReservoir ReSTIRDIRunTemporalResampling(
     uint2 pixelPosition,
     DISurface surface,
     ReSTIRDIReservoir curSample,
     inout ReSTIRRandomSamplerState rng,
-    ReSTIRRuntimeParameters params,
     ReSTIRReservoirBufferParameters reservoirParams,
 	float3 screenSpaceMotion,
 	uint sourceBufferIndex,
     ReSTIRDITemporalResamplingParameters tparams,
     out int2 temporalSamplePixelPos,
-    inout DILightSample selectedLightSample)
+    out uint temporalStatus)
 {
     uint historyLimit = min(ReSTIRPackedDIReservoirMaxM, uint(tparams.maxHistoryLength * curSample.M));
 
@@ -37,6 +34,7 @@ ReSTIRDIReservoir ReSTIRDIRunTemporalResampling(
     }
 
     temporalSamplePixelPos = int2(-1, -1);
+    temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusNone);
 
     ReSTIRDIReservoir state = EmptyDIReservoir();
     CombineDIReservoirs(state, curSample, /* random = */ 0.5, curSample.targetPdf);
@@ -97,6 +95,11 @@ ReSTIRDIReservoir ReSTIRDIRunTemporalResampling(
     bool selectedPreviousSample = false;
     float previousM = 0;
 
+    if (!foundNeighbor)
+    {
+        temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface);
+    }
+
     if (foundNeighbor)
     {
         // Resample the previous frame sample into the current reservoir, but reduce the light's weight
@@ -111,6 +114,8 @@ ReSTIRDIReservoir ReSTIRDIRunTemporalResampling(
         uint originalPrevLightID = GetDIReservoirLightIndex(prevSample);
 
         // Map the light ID from the previous frame into the current frame, if it still exists
+        bool hasUsablePreviousReservoir = false;
+
         if (IsValidDIReservoir(prevSample))
         {
             if (prevSample.age <= 1)
@@ -130,6 +135,7 @@ ReSTIRDIReservoir ReSTIRDIRunTemporalResampling(
             {
                 // Sample is valid - modify the light ID stored
                 prevSample.lightData = mappedLightID | ReSTIRDIReservoirLightValidBit;
+                hasUsablePreviousReservoir = true;
             }
         }
 
@@ -147,19 +153,27 @@ ReSTIRDIReservoir ReSTIRDIRunTemporalResampling(
             weightAtCurrent = DIGetLightSampleTargetPdf(candidateLightSample, surface);
         }
 
+        if (hasUsablePreviousReservoir && weightAtCurrent > 0.0)
+        {
+            temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
+        }
+        else if (hasUsablePreviousReservoir)
+        {
+            temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedTargetPdf);
+        }
+
         bool sampleSelected = CombineDIReservoirs(state, prevSample, GetNextRandom(rng), weightAtCurrent);
         if(sampleSelected)
         {
             selectedPreviousSample = true;
             selectedLightPrevID = int(originalPrevLightID);
-            selectedLightSample = candidateLightSample;
         }
     }
 
 #if RESTIR_ALLOWED_BIAS_CORRECTION >= RESTIR_BIAS_CORRECTION_BASIC
     if (tparams.biasCorrectionMode >= RESTIR_BIAS_CORRECTION_BASIC)
     {
-        // Compute the unbiased normalization term (instead of using 1/M)
+        // Compute the MIS-like normalization term instead of using 1/M.
         float pi = state.targetPdf;
         float piSum = state.targetPdf * curSample.M;
         

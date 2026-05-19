@@ -6,8 +6,13 @@
 #include <ReSTIR/ReservoirStorage.hlsli>
 
 #ifndef RESTIR_NEIGHBOR_OFFSETS_BUFFER
-#error "RESTIR_NEIGHBOR_OFFSETS_BUFFER must be defined to point to a Buffer<float2> type resource"
+#error "RESTIR_NEIGHBOR_OFFSETS_BUFFER must be defined to point to a StructuredBuffer<ReSTIRNeighborOffset> type resource"
 #endif
+
+float2 LoadReSTIRNeighborOffset(uint sampleIdx)
+{
+    return RESTIR_NEIGHBOR_OFFSETS_BUFFER[sampleIdx].offset;
+}
 
 // This macro can be defined in the including shader file to reduce code bloat
 // and/or remove ray tracing calls from temporal and spatial resampling shaders
@@ -21,8 +26,6 @@
 // For each pixel, considers a number of its neighbors and, if their surfaces are 
 // similar enough to the current pixel, combines their light reservoirs.
 // Optionally, one visibility ray is traced for each neighbor being considered, to reduce bias.
-// The selectedLightSample parameter is used to update and return the selected sample; it's optional,
-// and it's safe to pass a null structure there and ignore the result.
 ReSTIRDIReservoir ReSTIRDIRunSpatialResampling(
     uint2 pixelPosition,
     DISurface centerSurface,
@@ -31,12 +34,11 @@ ReSTIRDIReservoir ReSTIRDIRunSpatialResampling(
     ReSTIRRuntimeParameters params,
     ReSTIRReservoirBufferParameters reservoirParams,
     uint sourceBufferIndex,
-    ReSTIRDISpatialResamplingParameters sparams,
-    inout DILightSample selectedLightSample)
+    ReSTIRDISpatialResamplingParameters sparams)
 {
     ReSTIRDIReservoir state = EmptyDIReservoir();
 
-    // This is the weight we'll use (instead of 1/M) to make our estimate unbaised (see paper).
+    // This normalization weight reduces the bias compared to the simple 1/M normalization.
     float normalizationWeight = 1.0f;
 
     // Since we're using our bias correction scheme, we need to remember which light selection we made
@@ -51,7 +53,8 @@ ReSTIRDIReservoir ReSTIRDIRunSpatialResampling(
 
     CombineDIReservoirs(state, centerSample, /* random = */ 0.5f, centerSample.targetPdf);
 
-    uint startIdx = uint(GetNextRandom(rng) * params.neighborOffsetMask);
+    uint neighborOffsetCount = params.neighborOffsetMask + 1u;
+    uint startIdx = uint(GetNextRandom(rng) * float(neighborOffsetCount)) & params.neighborOffsetMask;
     
     uint i;
     uint numSpatialSamples = sparams.numSamples;
@@ -70,7 +73,7 @@ ReSTIRDIReservoir ReSTIRDIRunSpatialResampling(
     {
         // Get screen-space location of neighbor
         uint sampleIdx = (startIdx + i) & params.neighborOffsetMask;
-        int2 spatialOffset = int2(float2(RESTIR_NEIGHBOR_OFFSETS_BUFFER[sampleIdx].xy) * sparams.samplingRadius);
+        int2 spatialOffset = int2(LoadReSTIRNeighborOffset(sampleIdx) * sparams.samplingRadius);
         int2 idx = int2(pixelPosition) + spatialOffset;
 
         idx = DIClampSamplePositionIntoView(idx, false);
@@ -118,7 +121,6 @@ ReSTIRDIReservoir ReSTIRDIRunSpatialResampling(
         {
             selected = int(i);
             selectedLight = candidateLight;
-            selectedLightSample = candidateLightSample;
         }
     }
 
@@ -127,7 +129,7 @@ ReSTIRDIReservoir ReSTIRDIRunSpatialResampling(
 #if RESTIR_ALLOWED_BIAS_CORRECTION >= RESTIR_BIAS_CORRECTION_BASIC
         if (sparams.biasCorrectionMode >= RESTIR_BIAS_CORRECTION_BASIC)
         {
-            // Compute the unbiased normalization term (instead of using 1/M)
+            // Compute the MIS-like normalization term instead of using 1/M.
             float pi = state.targetPdf;
             float piSum = state.targetPdf * centerSample.M;
 
@@ -140,7 +142,7 @@ ReSTIRDIReservoir ReSTIRDIRunSpatialResampling(
                 uint sampleIdx = (startIdx + i) & params.neighborOffsetMask;
 
                 // Get the screen-space location of our neighbor
-                int2 idx = int2(pixelPosition) + int2(float2(RESTIR_NEIGHBOR_OFFSETS_BUFFER[sampleIdx].xy) * sparams.samplingRadius);
+                int2 idx = int2(pixelPosition) + int2(LoadReSTIRNeighborOffset(sampleIdx) * sparams.samplingRadius);
 
                 idx = DIClampSamplePositionIntoView(idx, false);
 

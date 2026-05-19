@@ -20,7 +20,7 @@ struct ReSTIRDIReservoir
     // Target PDF of the selected sample
     float targetPdf;
 
-    // Number of samples considered for this reservoir (pairwise MIS makes this a float)
+    // Effective number of candidates represented by this reservoir.
     float M;
 
     // Visibility information stored in the reservoir for reuse

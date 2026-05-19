@@ -1,11 +1,15 @@
 #include "Experiments/ExperimentController.h"
 
 #include <algorithm>
+#include <set>
+#include <string>
 #include <utility>
 
 #include "Application.h"
 #include "Experiments/ExperimentMetadataWriter.h"
 #include "Experiments/ExperimentPlan.h"
+
+#include <nvutils/logger.hpp>
 
 namespace nvsamples
 {
@@ -26,6 +30,46 @@ ExperimentCamera InterpolateCamera(const ExperimentRun& run, uint32_t frameInRun
   camera.center = run.camera.center + (run.endCamera.center - run.camera.center) * t;
   camera.up     = run.camera.up + (run.endCamera.up - run.camera.up) * t;
   return camera;
+}
+
+bool ValidateExperimentPlan(const ExperimentPlan& plan)
+{
+  std::set<std::string> runNames;
+  for(const ExperimentRun& run : plan.runs)
+  {
+    if(run.runName.empty() || run.sceneLabel.empty())
+    {
+      LOGE("Experiment plan '%s' contains an empty run name or scene label.\n", plan.name.c_str());
+      return false;
+    }
+    if(!runNames.insert(run.runName).second)
+    {
+      LOGE("Experiment plan '%s' contains duplicate run name '%s'.\n", plan.name.c_str(), run.runName.c_str());
+      return false;
+    }
+    if(run.totalFrames == 0)
+    {
+      LOGE("Experiment run '%s' has totalFrames = 0.\n", run.runName.c_str());
+      return false;
+    }
+
+    std::set<std::string> outputNames;
+    for(const ExperimentCaptureFrame& capture : run.captures)
+    {
+      if(capture.frameIndex >= run.totalFrames)
+      {
+        LOGE("Experiment run '%s' captures frame %u, but totalFrames is %u.\n", run.runName.c_str(), capture.frameIndex,
+             run.totalFrames);
+        return false;
+      }
+      if(!outputNames.insert(capture.outputName).second)
+      {
+        LOGE("Experiment run '%s' writes duplicate capture '%s'.\n", run.runName.c_str(), capture.outputName.c_str());
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 }  // namespace
@@ -94,6 +138,13 @@ void ExperimentController::EnsureStarted(Application& app)
 {
   if(m_Started)
   {
+    return;
+  }
+
+  if(!ValidateExperimentPlan(m_Plan))
+  {
+    m_Complete = true;
+    app.RequestExperimentClose();
     return;
   }
 

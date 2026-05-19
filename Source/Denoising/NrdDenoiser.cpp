@@ -1,4 +1,4 @@
-#include "PathTraceNrdDenoiser.h"
+#include "NrdDenoiser.h"
 
 #include <algorithm>
 #include <array>
@@ -15,7 +15,7 @@
 #include "Common/Utils.hpp"
 
 #ifdef THESIS_ENABLE_NRD
-#include "_autogen/PathTraceNrdCompose.slang.h"
+#include "_autogen/NrdCompose.slang.h"
 #endif
 
 namespace nvsamples
@@ -41,7 +41,7 @@ uint32_t DivideUp(uint32_t x, uint16_t y)
 #ifdef THESIS_ENABLE_NRD
 VkShaderModuleCreateInfo GetComposeShaderCode()
 {
-  return nvsamples::GetShaderModuleCreateInfo(std::span(PathTraceNrdCompose_slang));
+  return nvsamples::GetShaderModuleCreateInfo(std::span(NrdCompose_slang));
 }
 
 bool IsNrdSuccess(nrd::Result result)
@@ -52,13 +52,13 @@ bool IsNrdSuccess(nrd::Result result)
 
 }  // namespace
 
-PathTraceNrdDenoiser::PathTraceNrdDenoiser(const CreateInfo& createInfo)
+NrdDenoiser::NrdDenoiser(const CreateInfo& createInfo)
     : m_App(createInfo.app)
     , m_Allocator(createInfo.allocator)
 {
 }
 
-void PathTraceNrdDenoiser::Initialize()
+void NrdDenoiser::Initialize()
 {
 #ifndef THESIS_ENABLE_NRD
   return;
@@ -101,7 +101,7 @@ void PathTraceNrdDenoiser::Initialize()
 #endif
 }
 
-void PathTraceNrdDenoiser::Destroy()
+void NrdDenoiser::Destroy()
 {
 #ifndef THESIS_ENABLE_NRD
   return;
@@ -128,7 +128,7 @@ void PathTraceNrdDenoiser::Destroy()
 #endif
 }
 
-bool PathTraceNrdDenoiser::IsReady() const
+bool NrdDenoiser::IsReady() const
 {
 #ifndef THESIS_ENABLE_NRD
   return false;
@@ -137,7 +137,7 @@ bool PathTraceNrdDenoiser::IsReady() const
 #endif
 }
 
-void PathTraceNrdDenoiser::InvalidateHistory()
+void NrdDenoiser::InvalidateHistory()
 {
 #ifdef THESIS_ENABLE_NRD
   m_HistoryInvalidated   = true;
@@ -146,7 +146,7 @@ void PathTraceNrdDenoiser::InvalidateHistory()
 #endif
 }
 
-void PathTraceNrdDenoiser::PrepareFrame(const FrameInput& input, const PathTraceDenoiserResources& denoiserInputs)
+void NrdDenoiser::PrepareFrame(const FrameInput& input, const DenoiserResources& denoiserInputs)
 {
 #ifndef THESIS_ENABLE_NRD
   (void)input;
@@ -179,7 +179,7 @@ void PathTraceNrdDenoiser::PrepareFrame(const FrameInput& input, const PathTrace
 #endif
 }
 
-void PathTraceNrdDenoiser::ApplyDenoiserSettings(const DenoiserSettings& settings)
+void NrdDenoiser::ApplyDenoiserSettings(const DenoiserSettings& settings)
 {
 #ifdef THESIS_ENABLE_NRD
   m_ReblurSettings.maxAccumulatedFrameNum      = settings.maxAccumulatedFrames;
@@ -192,8 +192,8 @@ void PathTraceNrdDenoiser::ApplyDenoiserSettings(const DenoiserSettings& setting
 #endif
 }
 
-void PathTraceNrdDenoiser::Denoise(VkCommandBuffer cmd,
-                                   const PathTraceDenoiserResources& denoiserInputs,
+void NrdDenoiser::Denoise(VkCommandBuffer cmd,
+                                   const DenoiserResources& denoiserInputs,
                                    VkImageView rawBeautyImageView,
                                    VkImageView outputImageView,
                                    DenoiserDebugView debugView,
@@ -246,17 +246,17 @@ void PathTraceNrdDenoiser::Denoise(VkCommandBuffer cmd,
 #endif
 }
 
-const nvvk::Image& PathTraceNrdDenoiser::GetDiffuseOutputImage() const
+const nvvk::Image& NrdDenoiser::GetDiffuseOutputImage() const
 {
   return m_DiffuseOutputImage;
 }
 
-const nvvk::Image& PathTraceNrdDenoiser::GetSpecularOutputImage() const
+const nvvk::Image& NrdDenoiser::GetSpecularOutputImage() const
 {
   return m_SpecularOutputImage;
 }
 
-void PathTraceNrdDenoiser::CreateVulkanState()
+void NrdDenoiser::CreateVulkanState()
 {
 #ifndef THESIS_ENABLE_NRD
   return;
@@ -269,7 +269,7 @@ void PathTraceNrdDenoiser::CreateVulkanState()
 #endif
 }
 
-void PathTraceNrdDenoiser::DestroyVulkanState()
+void NrdDenoiser::DestroyVulkanState()
 {
   if(m_Allocator == nullptr)
   {
@@ -306,7 +306,7 @@ void PathTraceNrdDenoiser::DestroyVulkanState()
   m_LinearSampler         = VK_NULL_HANDLE;
 }
 
-void PathTraceNrdDenoiser::CreateSamplers()
+void NrdDenoiser::CreateSamplers()
 {
 #ifndef THESIS_ENABLE_NRD
   return;
@@ -339,7 +339,7 @@ void PathTraceNrdDenoiser::CreateSamplers()
 #endif
 }
 
-void PathTraceNrdDenoiser::CreateDescriptorSetLayouts()
+void NrdDenoiser::CreateDescriptorSetLayouts()
 {
 #ifndef THESIS_ENABLE_NRD
   return;
@@ -495,7 +495,7 @@ void PathTraceNrdDenoiser::CreateDescriptorSetLayouts()
 #endif
 }
 
-void PathTraceNrdDenoiser::CreatePipelineLayout()
+void NrdDenoiser::CreatePipelineLayout()
 {
   VkDevice device = m_Allocator->getDevice();
 
@@ -530,7 +530,7 @@ void PathTraceNrdDenoiser::CreatePipelineLayout()
   NVVK_CHECK(vkCreatePipelineLayout(device, &composePipelineLayoutInfo, nullptr, &m_ComposePipelineLayout));
 }
 
-void PathTraceNrdDenoiser::CreatePipelines()
+void NrdDenoiser::CreatePipelines()
 {
 #ifndef THESIS_ENABLE_NRD
   return;
@@ -588,7 +588,7 @@ void PathTraceNrdDenoiser::CreatePipelines()
 #endif
 }
 
-void PathTraceNrdDenoiser::CreateFrameResources()
+void NrdDenoiser::CreateFrameResources()
 {
 #ifndef THESIS_ENABLE_NRD
   return;
@@ -629,7 +629,7 @@ void PathTraceNrdDenoiser::CreateFrameResources()
 #endif
 }
 
-void PathTraceNrdDenoiser::DestroyFrameResources()
+void NrdDenoiser::DestroyFrameResources()
 {
   if(m_Allocator == nullptr)
   {
@@ -647,7 +647,7 @@ void PathTraceNrdDenoiser::DestroyFrameResources()
   m_FrameResources.clear();
 }
 
-void PathTraceNrdDenoiser::DestroyViewportResources(bool deferDestruction)
+void NrdDenoiser::DestroyViewportResources(bool deferDestruction)
 {
   auto releaseImage = [&](nvvk::Image& image) {
     if(image.image == VK_NULL_HANDLE)
@@ -684,7 +684,7 @@ void PathTraceNrdDenoiser::DestroyViewportResources(bool deferDestruction)
   m_ViewportSize = {};
 }
 
-void PathTraceNrdDenoiser::ScheduleImageDestroy(nvvk::Image image)
+void NrdDenoiser::ScheduleImageDestroy(nvvk::Image image)
 {
   if(image.image == VK_NULL_HANDLE || m_App == nullptr || m_Allocator == nullptr)
   {
@@ -700,7 +700,7 @@ void PathTraceNrdDenoiser::ScheduleImageDestroy(nvvk::Image image)
   });
 }
 
-void PathTraceNrdDenoiser::EnsureForViewport(VkExtent2D viewportSize)
+void NrdDenoiser::EnsureForViewport(VkExtent2D viewportSize)
 {
   if(viewportSize.width == 0 || viewportSize.height == 0)
   {
@@ -716,15 +716,15 @@ void PathTraceNrdDenoiser::EnsureForViewport(VkExtent2D viewportSize)
   RecreateViewportResources(viewportSize);
 }
 
-void PathTraceNrdDenoiser::RecreateViewportResources(VkExtent2D viewportSize)
+void NrdDenoiser::RecreateViewportResources(VkExtent2D viewportSize)
 {
   DestroyViewportResources(true);
 
   m_ViewportSize       = viewportSize;
   m_HistoryInvalidated = true;
 
-  m_DiffuseOutputImage  = CreateStorageImage(viewportSize, kDenoisedRadianceFormat, "PathTraceNrdDiffuseOutput");
-  m_SpecularOutputImage = CreateStorageImage(viewportSize, kDenoisedRadianceFormat, "PathTraceNrdSpecularOutput");
+  m_DiffuseOutputImage  = CreateStorageImage(viewportSize, kDenoisedRadianceFormat, "NrdDiffuseOutput");
+  m_SpecularOutputImage = CreateStorageImage(viewportSize, kDenoisedRadianceFormat, "NrdSpecularOutput");
 
 #ifdef THESIS_ENABLE_NRD
   m_PermanentPoolImages.reserve(m_InstanceDesc->permanentPoolSize);
@@ -735,7 +735,7 @@ void PathTraceNrdDenoiser::RecreateViewportResources(VkExtent2D viewportSize)
         .height = DivideUp(viewportSize.height, m_InstanceDesc->permanentPool[imageIndex].downsampleFactor),
     };
     m_PermanentPoolImages.push_back(CreateStorageImage(imageSize, ToVkFormat(m_InstanceDesc->permanentPool[imageIndex].format),
-                                                       "PathTraceNrdPermanentPool"));
+                                                       "NrdPermanentPool"));
   }
 
   m_TransientPoolImages.reserve(m_InstanceDesc->transientPoolSize);
@@ -746,12 +746,12 @@ void PathTraceNrdDenoiser::RecreateViewportResources(VkExtent2D viewportSize)
         .height = DivideUp(viewportSize.height, m_InstanceDesc->transientPool[imageIndex].downsampleFactor),
     };
     m_TransientPoolImages.push_back(CreateStorageImage(imageSize, ToVkFormat(m_InstanceDesc->transientPool[imageIndex].format),
-                                                       "PathTraceNrdTransientPool"));
+                                                       "NrdTransientPool"));
   }
 #endif
 }
 
-nvvk::Image PathTraceNrdDenoiser::CreateStorageImage(VkExtent2D viewportSize, VkFormat format, const char* debugName) const
+nvvk::Image NrdDenoiser::CreateStorageImage(VkExtent2D viewportSize, VkFormat format, const char* debugName) const
 {
   nvvk::Image image;
 
@@ -784,7 +784,7 @@ nvvk::Image PathTraceNrdDenoiser::CreateStorageImage(VkExtent2D viewportSize, Vk
   return image;
 }
 
-void PathTraceNrdDenoiser::UpdateCommonSettings(const FrameInput& input)
+void NrdDenoiser::UpdateCommonSettings(const FrameInput& input)
 {
 #ifndef THESIS_ENABLE_NRD
   (void)input;
@@ -839,14 +839,14 @@ void PathTraceNrdDenoiser::UpdateCommonSettings(const FrameInput& input)
 #endif
 }
 
-PathTraceNrdDenoiser::FrameResources& PathTraceNrdDenoiser::GetCurrentFrameResources()
+NrdDenoiser::FrameResources& NrdDenoiser::GetCurrentFrameResources()
 {
   assert(!m_FrameResources.empty());
   const uint32_t frameIndex = std::min(m_App->getFrameCycleIndex(), uint32_t(m_FrameResources.size() - 1));
   return m_FrameResources[frameIndex];
 }
 
-void PathTraceNrdDenoiser::BeginFrame(FrameResources& frameResources)
+void NrdDenoiser::BeginFrame(FrameResources& frameResources)
 {
   frameResources.constantBufferOffset        = 0;
   frameResources.previousConstantBufferOffset = 0;
@@ -856,7 +856,7 @@ void PathTraceNrdDenoiser::BeginFrame(FrameResources& frameResources)
   frameResources.frameSet = AllocateDescriptorSet(frameResources, m_FrameSetLayout);
 }
 
-void PathTraceNrdDenoiser::UpdateFrameSet(FrameResources& frameResources)
+void NrdDenoiser::UpdateFrameSet(FrameResources& frameResources)
 {
 #ifndef THESIS_ENABLE_NRD
   (void)frameResources;
@@ -879,7 +879,7 @@ void PathTraceNrdDenoiser::UpdateFrameSet(FrameResources& frameResources)
 #endif
 }
 
-VkDescriptorSet PathTraceNrdDenoiser::AllocateDescriptorSet(FrameResources& frameResources, VkDescriptorSetLayout layout)
+VkDescriptorSet NrdDenoiser::AllocateDescriptorSet(FrameResources& frameResources, VkDescriptorSetLayout layout)
 {
   const VkDescriptorSetAllocateInfo allocInfo{
       .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -893,7 +893,7 @@ VkDescriptorSet PathTraceNrdDenoiser::AllocateDescriptorSet(FrameResources& fram
   return descriptorSet;
 }
 
-uint32_t PathTraceNrdDenoiser::UploadConstantData(FrameResources& frameResources,
+uint32_t NrdDenoiser::UploadConstantData(FrameResources& frameResources,
                                                   const void*     constantData,
                                                   uint32_t        constantDataSize,
                                                   bool            reusePreviousData)
@@ -931,9 +931,9 @@ uint32_t PathTraceNrdDenoiser::UploadConstantData(FrameResources& frameResources
 #endif
 }
 
-void PathTraceNrdDenoiser::UpdateResourceSet(VkDescriptorSet                      resourceSet,
+void NrdDenoiser::UpdateResourceSet(VkDescriptorSet                      resourceSet,
                                              const nrd::DispatchDesc&            dispatchDesc,
-                                             const PathTraceDenoiserResources&   denoiserInputs)
+                                             const DenoiserResources&   denoiserInputs)
 {
 #ifndef THESIS_ENABLE_NRD
   (void)resourceSet;
@@ -994,7 +994,7 @@ void PathTraceNrdDenoiser::UpdateResourceSet(VkDescriptorSet                    
 #endif
 }
 
-void PathTraceNrdDenoiser::DispatchNrd(VkCommandBuffer cmd, FrameResources& frameResources, const PathTraceDenoiserResources& denoiserInputs)
+void NrdDenoiser::DispatchNrd(VkCommandBuffer cmd, FrameResources& frameResources, const DenoiserResources& denoiserInputs)
 {
 #ifndef THESIS_ENABLE_NRD
   (void)cmd;
@@ -1030,9 +1030,9 @@ void PathTraceNrdDenoiser::DispatchNrd(VkCommandBuffer cmd, FrameResources& fram
 #endif
 }
 
-void PathTraceNrdDenoiser::ComposeDenoisedResult(VkCommandBuffer cmd,
+void NrdDenoiser::ComposeDenoisedResult(VkCommandBuffer cmd,
                                                  FrameResources& frameResources,
-                                                 const PathTraceDenoiserResources& denoiserInputs,
+                                                 const DenoiserResources& denoiserInputs,
                                                  VkImageView rawBeautyImageView,
                                                  VkImageView outputImageView,
                                                  DenoiserDebugView debugView,
@@ -1194,9 +1194,9 @@ void PathTraceNrdDenoiser::ComposeDenoisedResult(VkCommandBuffer cmd,
   InsertComputeBarrier(cmd);
 }
 
-const nvvk::Image& PathTraceNrdDenoiser::ResolveDispatchImage(nrd::ResourceType                 resourceType,
+const nvvk::Image& NrdDenoiser::ResolveDispatchImage(nrd::ResourceType                 resourceType,
                                                               uint16_t                          poolIndex,
-                                                              const PathTraceDenoiserResources& denoiserInputs) const
+                                                              const DenoiserResources& denoiserInputs) const
 {
 #ifndef THESIS_ENABLE_NRD
   (void)resourceType;
@@ -1234,7 +1234,7 @@ const nvvk::Image& PathTraceNrdDenoiser::ResolveDispatchImage(nrd::ResourceType 
 #endif
 }
 
-void PathTraceNrdDenoiser::TransitionImageToGeneral(VkCommandBuffer cmd, nvvk::Image& image, VkPipelineStageFlags2 dstStageMask) const
+void NrdDenoiser::TransitionImageToGeneral(VkCommandBuffer cmd, nvvk::Image& image, VkPipelineStageFlags2 dstStageMask) const
 {
   if(image.image == VK_NULL_HANDLE || image.descriptor.imageLayout == VK_IMAGE_LAYOUT_GENERAL)
   {
@@ -1261,7 +1261,7 @@ void PathTraceNrdDenoiser::TransitionImageToGeneral(VkCommandBuffer cmd, nvvk::I
   image.descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 }
 
-void PathTraceNrdDenoiser::InsertComputeBarrier(VkCommandBuffer cmd) const
+void NrdDenoiser::InsertComputeBarrier(VkCommandBuffer cmd) const
 {
   const VkMemoryBarrier2 memoryBarrier{
       .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
@@ -1279,7 +1279,7 @@ void PathTraceNrdDenoiser::InsertComputeBarrier(VkCommandBuffer cmd) const
 }
 
 #ifdef THESIS_ENABLE_NRD
-VkDescriptorType PathTraceNrdDenoiser::ToVkDescriptorType(nrd::DescriptorType descriptorType)
+VkDescriptorType NrdDenoiser::ToVkDescriptorType(nrd::DescriptorType descriptorType)
 {
   switch(descriptorType)
   {
@@ -1293,7 +1293,7 @@ VkDescriptorType PathTraceNrdDenoiser::ToVkDescriptorType(nrd::DescriptorType de
   }
 }
 
-VkFormat PathTraceNrdDenoiser::ToVkFormat(nrd::Format format)
+VkFormat NrdDenoiser::ToVkFormat(nrd::Format format)
 {
   switch(format)
   {
@@ -1391,7 +1391,7 @@ VkFormat PathTraceNrdDenoiser::ToVkFormat(nrd::Format format)
   }
 }
 
-void PathTraceNrdDenoiser::CopyMatrix(glm::mat4 matrix, float (&destination)[16])
+void NrdDenoiser::CopyMatrix(glm::mat4 matrix, float (&destination)[16])
 {
   std::memcpy(destination, glm::value_ptr(matrix), sizeof(destination));
 }

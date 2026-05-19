@@ -28,7 +28,7 @@
 #include "ShaderIo.h"
 
 // clang-format off
-[[vk::push_constant]]                       ConstantBuffer<TutoPushConstant> pushConst;
+[[vk::push_constant]]                       ConstantBuffer<RasterPushConstant> pushConst;
 [[vk::binding(BindingPoints::eTextures)]]   Sampler2D textures[];
 // clang-format on
 

@@ -17,7 +17,7 @@
 #define RESTIR_BIAS_CORRECTION_OFF 0
 // Use MIS-like normalization but assume that every sample is visible.
 #define RESTIR_BIAS_CORRECTION_BASIC 1
-// Use MIS-like normalization with visibility rays. Unbiased.
+// Use MIS-like normalization with visibility rays. This is the strongest bias-reduction mode in this implementation.
 #define RESTIR_BIAS_CORRECTION_RAY_TRACED 2
 
 // When neighboring samples have less than the naive sampling M threshold, they are ignored during spatial resampling.
@@ -135,7 +135,7 @@ struct ReSTIRDITemporalResamplingParameters
 
     // Controls the bias correction math for temporal reuse. Depending on the setting, it can add
     // some shader cost and one approximate shadow ray per pixel.
-    // Ideally, these rays should be traced through the previous frame's BVH to get fully unbiased results.
+    // Ideally, these rays should be traced through the previous frame's BVH for a stricter temporal visibility test.
     ReSTIRDI_TemporalBiasCorrectionMode biasCorrectionMode;
 
     // Surface depth similarity threshold for temporal reuse.
@@ -154,8 +154,7 @@ struct ReSTIRDITemporalResamplingParameters
     // on the previous frame, then any sample coming from the previous frame can be assumed visible.
     uint32_t enableVisibilityShortcut;
 
-    // Enables permuting the pixels sampled from the previous frame in order to add temporal
-    // variation to the output signal and make it more denoiser friendly.
+    // Enables permuting the pixels sampled from the previous frame in order to decorrelate temporal reuse.
     uint32_t enablePermutationSampling;
 
     // Random number for permutation sampling that is the same for all pixels in the frame.

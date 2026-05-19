@@ -79,9 +79,8 @@ void rchitMain(inout DIPrimaryPayload payload, in BuiltInTriangleIntersectionAtt
   payload.surface = PackDIPrimarySurface(surface, pushConst.sceneInfoAddress[0].instances[InstanceIndex()].materialIndex, InstanceIndex(),
                                          PrimitiveIndex(), RayTCurrent());
 
-  ReSTIRRandomSamplerState rng         = InitRandomSampler(payload.pixelPosition, diParams.runtimeParams.frameIndex, 0u);
-  ReSTIRRandomSamplerState coherentRng = InitRandomSampler(payload.pixelPosition, diParams.runtimeParams.frameIndex, 1u);
-  DILightSample            selectedSample;
-  payload.reservoir = ReSTIRDISampleLightsForSurface(rng, coherentRng, payload.surface, diParams.initialSampling,
+  ReSTIRRandomSamplerState rng = InitRandomSampler(payload.pixelPosition, diParams.runtimeParams.frameIndex, 0u);
+  DILightSample selectedSample;
+  payload.reservoir = ReSTIRDISampleLightsForSurface(rng, payload.surface, diParams.initialSampling,
                                                      BuildLightBufferParameters(pushConst.sceneInfoAddress[0]), selectedSample);
 }

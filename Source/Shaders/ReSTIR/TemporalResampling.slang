@@ -5,7 +5,7 @@
 #include "ReSTIR/TemporalResampling.hlsli"
 
 [numthreads(8, 8, 1)]
-void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV_GroupThreadID)
+void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
   const uint2 pixelPosition = dispatchThreadID.xy;
   const uint2 viewportSize  = uint2(pushConst.sceneInfoAddress[0].viewportSize);
@@ -29,7 +29,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
                      diParams.bufferIndices.temporalResamplingOutputBufferIndex);
     if(IsReSTIRDebugEnabled())
     {
-      WriteDIDebugPixel(pixelIndex, emptyReservoir, 1.0, 0.0, uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedSurface),
+      WriteDIDebugPixel(pixelIndex, emptyReservoir, 1.0, 0.0, uint(ReSTIRShiftStatus::eReSTIRShiftStatusNone),
                         debugBuffer[pixelIndex].spatialStatus);
     }
     return;
@@ -55,25 +55,19 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupThreadID : SV
 
   ReSTIRRandomSamplerState rng = InitRandomSampler(pixelPosition, diParams.runtimeParams.frameIndex, 2u);
   int2 temporalSamplePixelPos;
-  DILightSample selectedLightSample = DIEmptyLightSample();
+  uint temporalStatus;
   const ReSTIRDIReservoir temporalReservoir =
-      ReSTIRDIRunTemporalResampling(pixelPosition, surface, currentReservoir, rng, diParams.runtimeParams,
-                                    diParams.reservoirBufferParams, screenSpaceMotion,
+      ReSTIRDIRunTemporalResampling(pixelPosition, surface, currentReservoir, rng, diParams.reservoirBufferParams, screenSpaceMotion,
                                     diParams.bufferIndices.temporalResamplingInputBufferIndex, diParams.temporalResampling,
-                                    temporalSamplePixelPos, selectedLightSample);
+                                    temporalSamplePixelPos, temporalStatus);
 
   StoreDIReservoir(temporalReservoir, diParams.reservoirBufferParams,
                    PixelPosToReservoirPos(pixelPosition),
                    diParams.bufferIndices.temporalResamplingOutputBufferIndex);
 
-  uint temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusNone);
   if(diParams.runtimeParams.frameIndex == 0u)
   {
     temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedNoHistory);
-  }
-  else if(temporalReservoir.age > currentReservoir.age)
-  {
-    temporalStatus = uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted);
   }
 
   if(IsReSTIRDebugEnabled())

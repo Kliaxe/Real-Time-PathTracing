@@ -17,9 +17,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// RealTimePathTracing - Rasterizer
-// - Simple rasterized GLTF scene (teapot + plane)
-// - Offscreen HDR render + tonemapping
+// RealTimePathTracing app element
+// - Scene UI, raster preview, path tracing reference, and ReSTIR DI renderer
+// - Offscreen HDR render target plus tonemapping
 // - Slang hot reload (F5) with precompiled fallback
 
 // Enable the use of Nsight Aftermath for crash tracking and shader debugging
@@ -181,7 +181,8 @@ bool DrawReSTIRDebugViewControl(shaderio::ReSTIRDebugView& debugView, const char
 {
   int view = static_cast<int>(debugView);
   const char* debugViews[] = {"Disabled", methodTagLabel, "Target PDF", "Reservoir Weight", "Reservoir Age",
-                              "Temporal Status", "Spatial Status", "Shift Jacobian", "Reuse Count"};
+                              "Temporal Status", "Spatial Status", "Shift Jacobian", "Reuse Count",
+                              "Depth Disocclusion"};
   if(!ImGui::Combo("Debug View", &view, debugViews, IM_ARRAYSIZE(debugViews)))
   {
     return false;
@@ -452,7 +453,7 @@ void Application::onUIRender()
     if(ImGui::Begin("Settings"))
     {
       shaderio::GltfSceneInfo& sceneInfo = m_SceneRuntime->GetSceneInfo();
-      bool                     invalidatePathTracingHistory = false;
+      bool                     invalidateRenderHistory = false;
 
       if(ImGui::CollapsingHeader("Renderer", ImGuiTreeNodeFlags_DefaultOpen))
       {
@@ -461,7 +462,7 @@ void Application::onUIRender()
         if(ImGui::Combo("Mode", &renderMode, renderModes, IM_ARRAYSIZE(renderModes)))
         {
           m_RenderMode = static_cast<RenderMode>(renderMode);
-          invalidatePathTracingHistory = true;
+          invalidateRenderHistory = true;
         }
 
         if(m_RenderMode == RenderMode::eRasterizer)
@@ -481,12 +482,12 @@ void Application::onUIRender()
 
             if(DrawResolveModeControl(pathTracingSettings.resolveMode))
             {
-              invalidatePathTracingHistory = true;
+              invalidateRenderHistory = true;
             }
 
             if(DrawBounceLimitControl("Max Bounces", pathTracingSettings.maxBounces, bounceLimit))
             {
-              invalidatePathTracingHistory   = true;
+              invalidateRenderHistory   = true;
             }
 
             DrawTransmissionBounceHint(pathTracingSettings.maxBounces);
@@ -494,7 +495,7 @@ void Application::onUIRender()
             ImGui::SameLine();
             if(ImGui::Button("Reset Resolve History"))
             {
-              invalidatePathTracingHistory = true;
+              invalidateRenderHistory = true;
             }
 
             DrawResolveStatus(pathTracingSettings.resolveMode, m_PathTracer->GetAccumulatedFrameCount());
@@ -502,11 +503,11 @@ void Application::onUIRender()
             {
               if(DrawDenoiserDebugViewControl(pathTracingSettings.denoiserDebugView))
               {
-                invalidatePathTracingHistory = true;
+                invalidateRenderHistory = true;
               }
-              invalidatePathTracingHistory |= DrawDenoiserSettingsSection("Denoiser Settings", pathTracingSettings.denoiserSettings);
+              invalidateRenderHistory |= DrawDenoiserSettingsSection("Denoiser Settings", pathTracingSettings.denoiserSettings);
               ImGui::TextDisabled(
-                  "NRD currently runs on the ground-truth path tracer with packed guide buffers plus diffuse/specular REBLUR inputs. ReSTIR integration can build on this path later.");
+                  "NRD runs on packed guide buffers plus diffuse/specular REBLUR inputs. The path tracer keeps this path available as a reference denoising setup.");
             }
           }
         }
@@ -520,8 +521,8 @@ void Application::onUIRender()
           {
             nvsamples::ReSTIRDISettings& restirDiSettings = m_ReSTIRDI->GetSettings();
 
-            invalidatePathTracingHistory |= DrawReSTIRCommonControls(restirDiSettings.common, "Resampling##ReSTIRDI_Mode");
-            invalidatePathTracingHistory |= DrawReSTIRResamplingSection("Resampling##ReSTIRDI_Settings",
+            invalidateRenderHistory |= DrawReSTIRCommonControls(restirDiSettings.common, "Resampling##ReSTIRDI_Mode");
+            invalidateRenderHistory |= DrawReSTIRResamplingSection("Resampling##ReSTIRDI_Settings",
                                                                         restirDiSettings.temporalResampling,
                                                                         restirDiSettings.spatialResampling, 128.0f);
 
@@ -531,28 +532,28 @@ void Application::onUIRender()
               if(ImGui::SliderInt("Emissive Light Samples", &localLightSamples, 0, 32))
               {
                 restirDiSettings.initialSampling.numLocalLightSamples = static_cast<uint32_t>(localLightSamples);
-                invalidatePathTracingHistory                           = true;
+                invalidateRenderHistory                           = true;
               }
 
               int environmentSamples = static_cast<int>(restirDiSettings.initialSampling.numEnvironmentSamples);
               if(ImGui::SliderInt("Environment Samples", &environmentSamples, 0, 8))
               {
                 restirDiSettings.initialSampling.numEnvironmentSamples = static_cast<uint32_t>(environmentSamples);
-                invalidatePathTracingHistory                           = true;
+                invalidateRenderHistory                           = true;
               }
 
               int brdfSamples = static_cast<int>(restirDiSettings.initialSampling.numBrdfSamples);
               if(ImGui::SliderInt("BRDF Samples", &brdfSamples, 0, 8))
               {
                 restirDiSettings.initialSampling.numBrdfSamples = static_cast<uint32_t>(brdfSamples);
-                invalidatePathTracingHistory                     = true;
+                invalidateRenderHistory                     = true;
               }
 
               bool enableInitialVisibility = (restirDiSettings.initialSampling.enableInitialVisibility != 0);
               if(ImGui::Checkbox("Initial Visibility", &enableInitialVisibility))
               {
                 restirDiSettings.initialSampling.enableInitialVisibility = enableInitialVisibility ? 1u : 0u;
-                invalidatePathTracingHistory                              = true;
+                invalidateRenderHistory                              = true;
               }
 
               ImGui::TextDisabled("Initial candidates come from emissive triangles, the environment, and BRDF-guided rays.");
@@ -566,7 +567,7 @@ void Application::onUIRender()
               if(ImGui::Checkbox("Enable Final Visibility", &enableFinalVisibility))
               {
                 restirDiSettings.shading.enableFinalVisibility = enableFinalVisibility ? 1u : 0u;
-                invalidatePathTracingHistory                   = true;
+                invalidateRenderHistory                   = true;
               }
 
               ImGui::BeginDisabled(!enableFinalVisibility);
@@ -574,17 +575,17 @@ void Application::onUIRender()
               if(ImGui::Checkbox("Reuse Final Visibility", &reuseFinalVisibility))
               {
                 restirDiSettings.shading.reuseFinalVisibility = reuseFinalVisibility ? 1u : 0u;
-                invalidatePathTracingHistory                  = true;
+                invalidateRenderHistory                  = true;
               }
 
               int finalVisibilityMaxAge = static_cast<int>(restirDiSettings.shading.finalVisibilityMaxAge);
               if(ImGui::SliderInt("Final Visibility Max Age", &finalVisibilityMaxAge, 0, 16))
               {
                 restirDiSettings.shading.finalVisibilityMaxAge = static_cast<uint32_t>(finalVisibilityMaxAge);
-                invalidatePathTracingHistory                   = true;
+                invalidateRenderHistory                   = true;
               }
 
-              invalidatePathTracingHistory |=
+              invalidateRenderHistory |=
                   ImGui::SliderFloat("Final Visibility Max Distance", &restirDiSettings.shading.finalVisibilityMaxDistance, 0.0f, 64.0f, "%.2f");
               ImGui::EndDisabled();
 
@@ -596,7 +597,7 @@ void Application::onUIRender()
               const uint32_t bounceLimit = m_ReSTIRDI->GetPipelineBounceLimit();
               if(DrawBounceLimitControl("Continuation Max Bounces", restirDiSettings.continuationMaxBounces, bounceLimit))
               {
-                invalidatePathTracingHistory            = true;
+                invalidateRenderHistory            = true;
               }
 
               ImGui::TextDisabled("Direct lighting comes from DI reservoirs, while the continuation path covers reflections and indirect transport.");
@@ -613,10 +614,10 @@ void Application::onUIRender()
             {
               if(DrawDenoiserDebugViewControl(restirDiSettings.common.denoiserDebugView))
               {
-                invalidatePathTracingHistory = true;
+                invalidateRenderHistory = true;
               }
 
-              invalidatePathTracingHistory |= DrawDenoiserSettingsSection("Denoiser Settings##ReSTIRDI",
+              invalidateRenderHistory |= DrawDenoiserSettingsSection("Denoiser Settings##ReSTIRDI",
                                                                          restirDiSettings.common.denoiserSettings);
             }
 
@@ -701,14 +702,14 @@ void Application::onUIRender()
         if(ImGui::Checkbox("Use HDRI", &useHdri))
         {
           sceneInfo.useHdrEnv          = useHdri ? 1 : 0;
-          invalidatePathTracingHistory = true;
+          invalidateRenderHistory = true;
         }
 
         bool useSky = (sceneInfo.useSky != 0);
         if(ImGui::Checkbox("Use Sky", &useSky))
         {
           sceneInfo.useSky             = useSky ? 1 : 0;
-          invalidatePathTracingHistory = true;
+          invalidateRenderHistory = true;
         }
 
         if(sceneInfo.useHdrEnv != 0)
@@ -726,12 +727,12 @@ void Application::onUIRender()
         }
         else if(sceneInfo.useSky != 0)
         {
-          invalidatePathTracingHistory |= nvgui::skySimpleParametersUI(sceneInfo.skySimpleParam);
+          invalidateRenderHistory |= nvgui::skySimpleParametersUI(sceneInfo.skySimpleParam);
         }
         else
         {
           PE::begin();
-          invalidatePathTracingHistory |= PE::ColorEdit3("Background", (float*)&sceneInfo.backgroundColor);
+          invalidateRenderHistory |= PE::ColorEdit3("Background", (float*)&sceneInfo.backgroundColor);
           PE::end();
 
           // Light.
@@ -775,9 +776,9 @@ void Application::onUIRender()
                        ImGuiSliderFlags_AlwaysClamp, "Override all material metallic and roughness");
       PE::end();
 
-      if(invalidatePathTracingHistory)
+      if(invalidateRenderHistory)
       {
-        InvalidatePathTracingHistory();
+        InvalidateRenderHistory();
       }
     }
     ImGui::End();
@@ -785,7 +786,7 @@ void Application::onUIRender()
 void Application::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
   {
     NVVK_CHECK(m_GBuffers.update(cmd, size));
-    InvalidatePathTracingHistory();
+    InvalidateRenderHistory();
   }
 
 void Application::onRender(VkCommandBuffer cmd)
@@ -908,10 +909,11 @@ void Application::ApplyExperimentRun(const ExperimentRun& run)
   }
 
   ApplyExperimentEnvironment(run.environment);
+  m_TonemapperData.exposure = run.tonemapperExposure;
   ApplyExperimentPathTracerSettings(run.pathTracing);
   ApplyExperimentReSTIRSettings(run.restir);
   SetExperimentCamera(run.camera);
-  InvalidatePathTracingHistory();
+  InvalidateRenderHistory();
 }
 
 void Application::SetExperimentCamera(const ExperimentCamera& camera)
@@ -1008,7 +1010,7 @@ void Application::RebuildSceneFromSelection()
   {
     CreateScene(false);
     UpdateTextures();
-    InvalidatePathTracingHistory();
+    InvalidateRenderHistory();
   }
 
 void Application::PostProcess(VkCommandBuffer cmd)
@@ -1046,7 +1048,7 @@ void Application::CreateScene(bool resetCamera)
         nvsamples::SceneUploader::UploadInput{.sceneDefinition = *resolved.sceneDefinition, .selectedHdriRelativePath = resolved.hdriRelativePath},
         resetCamera, m_CameraManip.get());
 
-    InvalidatePathTracingHistory();
+    InvalidateRenderHistory();
   }
 void Application::CreateGraphicsDescriptorSetLayout()
   {
@@ -1071,7 +1073,7 @@ void Application::CreateGraphicsPipelineLayout()
     const VkPushConstantRange pushConstantRange = {
         .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
         .offset     = 0,
-        .size       = sizeof(shaderio::TutoPushConstant),
+        .size       = sizeof(shaderio::RasterPushConstant),
     };
 
     const VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
@@ -1131,7 +1133,7 @@ void Application::CompileAndCreateGraphicsShaders()
     const VkPushConstantRange pushConstantRange = {
         .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
         .offset     = 0,
-        .size       = sizeof(shaderio::TutoPushConstant),
+        .size       = sizeof(shaderio::RasterPushConstant),
     };
 
     VkShaderCreateInfoEXT shaderInfo = {
@@ -1214,7 +1216,7 @@ void Application::ReSTIRDIScene(VkCommandBuffer cmd)
     });
   }
 
-void Application::InvalidatePathTracingHistory()
+void Application::InvalidateRenderHistory()
   {
     m_SceneRuntime->InvalidateFrameHistory();
     if(m_PathTracer != nullptr && m_PathTracer->IsReady())
@@ -1289,7 +1291,7 @@ void Application::ApplyExperimentReSTIRSettings(const ExperimentReSTIRSettings& 
   ReSTIRDISettings& restirSettings = m_ReSTIRDI->GetSettings();
   restirSettings.common.resolveMode = ToRenderResolveMode(settings.resolveMode);
   restirSettings.common.resamplingMode = ToReSTIRResamplingMode(settings.temporalReuse, settings.spatialReuse);
-  restirSettings.common.debugView      = shaderio::eReSTIRDebugViewDisabled;
+  restirSettings.common.debugView      = static_cast<shaderio::ReSTIRDebugView>(settings.debugView);
   restirSettings.common.denoiserDebugView = DenoiserDebugView::eFinal;
 
   restirSettings.initialSampling.numLocalLightSamples  = settings.localLightSamples;

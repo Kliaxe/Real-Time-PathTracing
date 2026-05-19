@@ -122,10 +122,9 @@ float2 SelectLocalLightUv(inout ReSTIRRandomSamplerState rng)
 
 bool StreamLocalLightAtUvIntoReservoir(
     inout ReSTIRRandomSamplerState rng,
-    DIInitialSamplingMisData misData,
+	DIInitialSamplingMisData misData,
     DISurface surface,
 	float brdfCutoff,
-	float localLightMisWeight,
     uint lightIndex,
     float2 uv,
     float invSourcePdf,
@@ -179,7 +178,7 @@ ReSTIRDIReservoir SampleLocalLightsInternal(
             continue;
 
         float2 uv = SelectLocalLightUv(rng);
-        StreamLocalLightAtUvIntoReservoir(rng, misData, surface, sampleParams.brdfCutoff, misData.localLightMisWeight, lightIndex, uv, invSourcePdf, lightInfo, state, o_selectedSample);
+        StreamLocalLightAtUvIntoReservoir(rng, misData, surface, sampleParams.brdfCutoff, lightIndex, uv, invSourcePdf, lightInfo, state, o_selectedSample);
     }
 
     FinalizeDIResampling(state, 1.0, state.M);
@@ -294,7 +293,6 @@ ReSTIRDIReservoir SampleBrdfCandidates(
 	float brdfCutoff,
 	float brdfRayMinT,
 	DIInitialSamplingMisData misData,
-	inout ReSTIRRandomSamplerState coherentRng,
     ReSTIRLightBufferParameters lightBufferParams,
     out DILightSample o_selectedSample)
 {
@@ -380,7 +378,6 @@ ReSTIRDIReservoir SampleBrdfCandidates(
 // Samples emissive triangles, the environment, and BRDF-hit candidates for a given surface.
 ReSTIRDIReservoir ReSTIRDISampleLightsForSurface(
     inout ReSTIRRandomSamplerState rng,
-    inout ReSTIRRandomSamplerState coherentRng,
     DISurface surface,
     ReSTIRDIInitialSamplingParameters sampleParams,
     ReSTIRLightBufferParameters lightBufferParams,
@@ -401,7 +398,7 @@ ReSTIRDIReservoir ReSTIRDISampleLightsForSurface(
         sampleParams, misData, lightBufferParams.environmentLightParams, environmentSample);
 
     DILightSample brdfSample = DIEmptyLightSample();
-    ReSTIRDIReservoir brdfReservoir = SampleBrdfCandidates(rng, surface, sampleParams.numBrdfSamples, sampleParams.brdfCutoff, sampleParams.brdfRayMinT, misData, coherentRng, lightBufferParams, brdfSample);
+    ReSTIRDIReservoir brdfReservoir = SampleBrdfCandidates(rng, surface, sampleParams.numBrdfSamples, sampleParams.brdfCutoff, sampleParams.brdfRayMinT, misData, lightBufferParams, brdfSample);
 
     ReSTIRDIReservoir state = EmptyDIReservoir();
     CombineDIReservoirs(state, localReservoir, 0.5, localReservoir.targetPdf);

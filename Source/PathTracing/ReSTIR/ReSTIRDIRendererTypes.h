@@ -46,7 +46,7 @@ struct ReSTIRDIRenderInput
   uint32_t                            renderedImageIndex = 0;
 };
 
-struct ReSTIRDIHistorySignature
+struct ReSTIRDIAccumulationSignature
 {
   glm::mat4                     viewProjMatrix{};
   glm::mat4                     projInvMatrix{};
@@ -76,11 +76,11 @@ struct ReSTIRDIDenoiserHistorySignature
   VkExtent2D                    viewportSize{};
 };
 
-inline ReSTIRDIHistorySignature MakeReSTIRDIHistorySignature(const shaderio::GltfSceneInfo& sceneInfo,
-                                                         VkDeviceAddress topLevelAsAddress,
-                                                         VkExtent2D viewportSize)
+inline ReSTIRDIAccumulationSignature MakeReSTIRDIAccumulationSignature(const shaderio::GltfSceneInfo& sceneInfo,
+                                                                       VkDeviceAddress topLevelAsAddress,
+                                                                       VkExtent2D viewportSize)
 {
-  ReSTIRDIHistorySignature signature{};
+  ReSTIRDIAccumulationSignature signature{};
   signature.viewProjMatrix          = sceneInfo.viewProjMatrix;
   signature.projInvMatrix           = sceneInfo.projInvMatrix;
   signature.viewInvMatrix           = sceneInfo.viewInvMatrix;

@@ -117,12 +117,12 @@ int main(int argc, char** argv)
           {
               {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME},
               {VK_EXT_SHADER_OBJECT_EXTENSION_NAME, &shaderObjectFeatures},
-              // Request the core ray tracing pieces up front so the device is
-              // born with the capabilities our future path tracing module needs.
+              // Request the core ray tracing pieces used by the path tracer
+              // reference and the current ReSTIR DI ray tracing passes.
               {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, &accelerationStructureFeatures},
               {VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, &rayTracingPipelineFeatures},
-              // ReSTIR PT's compute resampling passes use inline visibility tests
-              // during candidate shifting, which requires the ray query feature.
+              // ReSTIR DI uses inline visibility tests when evaluating and
+              // rechecking selected light samples.
               {VK_KHR_RAY_QUERY_EXTENSION_NAME, &rayQueryFeatures},
               {VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME},
           },

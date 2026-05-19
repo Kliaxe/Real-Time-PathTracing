@@ -3,50 +3,43 @@
 #include <cstdint>
 
 #include "PathTracing/Common/ResolveMode.h"
-#include "PathTracing/ReSTIR/ReSTIRDIContext.h"
+#include "PathTracing/ReSTIR/ReSTIRDIParameterContext.h"
 #include "Shaders/ShaderIo.h"
 
 namespace nvsamples
 {
 
-// ReSTIR DI can run without reuse, with temporal reuse, with spatial reuse, or with both.
-enum class ReSTIRDIResamplingMode : uint32_t
-{
-  eNone = 0,
-  eTemporal,
-  eSpatial,
-  eTemporalAndSpatial,
-};
-
+// User-facing switches for the whole ReSTIR DI renderer.
 struct ReSTIRDICommonSettings
 {
   RenderResolveMode          resolveMode    = RenderResolveMode::eOff;
   ReSTIRDIResamplingMode     resamplingMode = ReSTIRDIResamplingMode::eTemporalAndSpatial;
-  shaderio::ReSTIRDebugView  debugView      = shaderio::eReSTIRDebugViewDisabled;
-  DenoiserDebugView          denoiserDebugView = DenoiserDebugView::eFinal;
-  DenoiserSettings           denoiserSettings{};
+  shaderio::ReSTIRDebugView debugView         = shaderio::eReSTIRDebugViewDisabled;
+  DenoiserDebugView         denoiserDebugView = DenoiserDebugView::eFinal;
+  DenoiserSettings          denoiserSettings{};
 };
 
 inline ReSTIRDIInitialSamplingParameters GetDefaultReSTIRDIInitialSamplingParameters()
 {
-  return restir::GetDefaultReSTIRDIInitialSamplingParams();
+  return GetDefaultReSTIRDIInitialSamplingParams();
 }
 
 inline ReSTIRDITemporalResamplingParameters GetDefaultReSTIRDITemporalParameters()
 {
-  return restir::GetDefaultReSTIRDITemporalResamplingParams();
+  return GetDefaultReSTIRDITemporalResamplingParams();
 }
 
 inline ReSTIRDISpatialResamplingParameters GetDefaultReSTIRDISpatialParameters()
 {
-  return restir::GetDefaultReSTIRDISpatialResamplingParams();
+  return GetDefaultReSTIRDISpatialResamplingParams();
 }
 
 inline ReSTIRDIShadingParameters GetDefaultReSTIRDIShadingParameters()
 {
-  return restir::GetDefaultReSTIRDIShadingParams();
+  return GetDefaultReSTIRDIShadingParams();
 }
 
+// One settings object maps directly to the GPU parameter block sections.
 struct ReSTIRDISettings
 {
   ReSTIRDICommonSettings              common;

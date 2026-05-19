@@ -94,7 +94,7 @@ private:
   void RasterScene(VkCommandBuffer cmd);
   void PathTraceScene(VkCommandBuffer cmd);
   void ReSTIRDIScene(VkCommandBuffer cmd);
-  void InvalidatePathTracingHistory();
+  void InvalidateRenderHistory();
   bool SelectSceneForExperiment(const std::string& sceneLabel);
   bool SelectHdriForExperiment(const std::string& hdriLabelOrPath);
   void ApplyExperimentEnvironment(const ExperimentEnvironment& environment);
@@ -124,7 +124,7 @@ private:
   std::vector<nvsamples::AssetEntry>     m_ModelAssets;
   std::vector<nvsamples::AssetEntry>     m_HdriAssets;
   std::vector<nvsamples::SceneDefinition> m_SceneDefinitions;
-  RenderMode                             m_RenderMode = RenderMode::ePathTracing;
+  RenderMode                             m_RenderMode = RenderMode::eReSTIRDI;
   size_t                                 m_SelectedSceneIndex = 0;
   size_t                                 m_SelectedHdriIndex = 0;
   bool                                   m_SceneReloadRequested = false;
