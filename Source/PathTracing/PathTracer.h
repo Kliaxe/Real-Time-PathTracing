@@ -25,11 +25,16 @@ class Application;
 namespace nvsamples
 {
 
+// Ground-truth and direct-sampling baseline renderer. It owns the ray tracing
+// pipeline, accumulation target, and NRD resources used by the baseline modes.
+// CPU responsibility: prepare Vulkan state and record one ray tracing dispatch.
+// Shader responsibility: trace paths, accumulate radiance, and write NRD signals.
 class PathTracer
 {
 public:
   struct CreateInfo
   {
+    // Lifetime dependencies owned by Application.
     nvapp::Application*      app                   = nullptr;
     nvvk::ResourceAllocator* allocator             = nullptr;
     uint32_t                 maxTextureDescriptors = 0;
@@ -37,6 +42,7 @@ public:
 
   struct RenderInput
   {
+    // One-frame borrowed state. PathTracer records commands but owns none of these objects.
     VkCommandBuffer                     cmd                = VK_NULL_HANDLE;
     const nvsamples::GltfSceneResource* sceneResource      = nullptr;
     const shaderio::GltfSceneInfo*      sceneInfo          = nullptr;
@@ -47,9 +53,11 @@ public:
 
   struct Settings
   {
+    // Resolve mode decides whether the noisy image is raw, accumulated, or denoised.
     RenderResolveMode resolveMode       = RenderResolveMode::eOff;
     DenoiserDebugView denoiserDebugView = DenoiserDebugView::eFinal;
     DenoiserSettings  denoiserSettings{};
+    // Clamped against Vulkan ray recursion support before reaching the shader.
     uint32_t          maxBounces        = 8;
   };
 
@@ -63,7 +71,7 @@ public:
   const Settings& GetSettings() const;
   uint32_t        GetAccumulatedFrameCount() const;
   uint32_t        GetPipelineBounceLimit() const;
-  void            InvalidateAccumulation();
+  void            InvalidateHistory();
 
   nvvk::DescriptorPack&       GetDescriptorPack();
   const nvvk::DescriptorPack& GetDescriptorPack() const;
@@ -73,8 +81,9 @@ public:
 private:
   struct AccumulationSignature
   {
+    // Accumulation depends on camera and lighting state because old pixels are averaged visually.
     glm::mat4                   viewProjMatrix{};
-    glm::mat4                   projInvMatrix{};
+    glm::mat4                   viewProjInvMatrix{};
     glm::mat4                   viewInvMatrix{};
     glm::vec3                   cameraPosition{};
     int                         useSky                  = 0;
@@ -90,6 +99,7 @@ private:
 
   struct DenoiserSignature
   {
+    // NRD history depends on lighting/background state, but not on camera matrices directly.
     int                         useSky                  = 0;
     int                         useHdrEnv               = 0;
     int                         environmentTextureIndex = -1;
@@ -103,6 +113,7 @@ private:
 
   struct FrameState
   {
+    // Snapshot of decisions that must remain consistent for one recorded frame.
     VkExtent2D            viewportSize{};
     AccumulationSignature accumulationSignature{};
     DenoiserSignature     denoiserSignature{};
@@ -135,20 +146,25 @@ private:
   nvapp::Application*      m_App       = nullptr;
   nvvk::ResourceAllocator* m_Allocator = nullptr;
   uint32_t                 m_MaxTextureDescriptors = 0;
+  // Advances every rendered frame to decorrelate random samples, even when accumulation is off.
   uint32_t                 m_RngFrameNumber        = 0;
-  uint32_t                 m_MaxBounceLimit        = 0;
+  // Device limit comes from Vulkan; pipeline limit is the depth this renderer requested.
+  uint32_t                 m_DeviceBounceLimit     = 0;
   uint32_t                 m_PipelineBounceLimit   = 0;
+  // Accumulation is presentation/reference history, separate from NRD history.
   uint32_t                 m_AccumulatedFrames     = 0;
   bool                     m_AccumulationInvalidated = true;
   bool                     m_HasAccumulationSignature = false;
   bool                     m_HasDenoiserSignature = false;
   Settings                 m_Settings{};
+  // Signatures are compact CPU-side keys for "can old history still be trusted?"
   AccumulationSignature    m_LastAccumulationSignature{};
   DenoiserSignature        m_LastDenoiserSignature{};
 
   nvvk::DescriptorPack        m_DescPack;
   VkPipelineLayout            m_PipelineLayout = VK_NULL_HANDLE;
   VkPipeline                  m_Pipeline       = VK_NULL_HANDLE;
+  // Vulkan ray tracing needs an SBT that maps TraceRay indices to shader groups.
   nvvk::SBTGenerator          m_SbtGenerator;
   nvvk::Buffer                m_SbtBuffer;
   nvvk::Image                 m_AccumulationImage;
@@ -160,11 +176,3 @@ private:
 };
 
 }  // namespace nvsamples
-
-
-
-
-
-
-
-

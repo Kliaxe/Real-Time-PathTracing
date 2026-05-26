@@ -72,25 +72,12 @@ target_sources(RealTimePathTracing PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/ReSTIR/Internal/ReSTIRUtils.cpp"
 )
 
-if(TARGET NRD)
-    target_link_libraries(RealTimePathTracing PRIVATE NRD)
-    target_include_directories(RealTimePathTracing PRIVATE
-        "${THESIS_NRD_SOURCE_DIR}/Include"
-        "${THESIS_NRD_SOURCE_DIR}/Integration"
-    )
-    target_compile_definitions(RealTimePathTracing PRIVATE THESIS_ENABLE_NRD=1)
+if(NOT TARGET NRD)
+    message(FATAL_ERROR "NRD is required by the thesis denoising path, but the NRD target was not created.")
 endif()
 
-if(BUILD_TESTING)
-    add_executable(PathTracingDiagnostics
-        "${CMAKE_CURRENT_LIST_DIR}/Diagnostics/PathTracingDiagnostics.cpp"
-    )
-
-    target_include_directories(PathTracingDiagnostics PRIVATE
-        "${CMAKE_CURRENT_LIST_DIR}"
-    )
-
-    add_test(NAME PathTracingDiagnostics COMMAND PathTracingDiagnostics)
-    set_target_properties(PathTracingDiagnostics PROPERTIES FOLDER "Diagnostics")
-endif()
-
+target_link_libraries(RealTimePathTracing PRIVATE NRD)
+target_include_directories(RealTimePathTracing PRIVATE
+    "${THESIS_NRD_SOURCE_DIR}/Include"
+    "${THESIS_NRD_SOURCE_DIR}/Integration"
+)

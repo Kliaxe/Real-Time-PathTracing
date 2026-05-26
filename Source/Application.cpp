@@ -90,7 +90,7 @@
 #include "Scene/SceneRuntime.h"
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Rasterizer app element
+// Local UI helpers
 //
 
 namespace nvsamples
@@ -317,13 +317,17 @@ ReSTIRDIResamplingMode ToReSTIRResamplingMode(bool temporalReuse, bool spatialRe
 
 }  // namespace
 
+// ---------------------------------------------------------------------------------------------------------------------
+// nvapp lifecycle
+//
+
 Application::Application(const std::shared_ptr<nvutils::CameraManipulator>& cameraManip)
+{
+  if(cameraManip)
   {
-    if(cameraManip)
-    {
-      m_CameraManip = cameraManip;
-    }
+    m_CameraManip = cameraManip;
   }
+}
 Application::~Application() = default;
 
 void Application::SetExperimentController(std::shared_ptr<ExperimentController> experimentController)
@@ -332,7 +336,7 @@ void Application::SetExperimentController(std::shared_ptr<ExperimentController> 
 }
 
 void Application::onAttach(nvapp::Application* app)
-  {
+{
     m_App = app;
     m_ExperimentGpuTimer.Initialize(app->getPhysicalDevice(), app->getDevice());
 
@@ -381,6 +385,7 @@ void Application::onAttach(nvapp::Application* app)
     };
     m_GBuffers.init(gBufferInit);
 
+    // Application creates the major systems, then each system owns its own Vulkan resources.
     m_SceneAssetCatalog = std::make_unique<nvsamples::SceneAssetCatalog>();
     m_SceneResolver     = std::make_unique<nvsamples::SceneResolver>();
     m_SceneRenderer     = std::make_unique<nvsamples::SceneRenderer>();
@@ -404,24 +409,24 @@ void Application::onAttach(nvapp::Application* app)
     m_ReSTIRDI->Initialize();
     DiscoverAssets();
     CreateScene(true);
-    CreateGraphicsDescriptorSetLayout();
-    CreateGraphicsPipelineLayout();
-    CompileAndCreateGraphicsShaders();
+    CreateRasterDescriptorSetLayout();
+    CreateRasterPipelineLayout();
+    CompileAndCreateRasterShaders();
     UpdateTextures();
 
     // Init sky + tonemapper from precompiled shaders.
     m_SkySimple.init(&m_Allocator, std::span(sky_simple_slang));
     m_Tonemapper.init(&m_Allocator, std::span(tonemapper_slang));
-  }
+}
 
 void Application::onDetach()
-  {
+{
     NVVK_CHECK(vkQueueWaitIdle(m_App->getQueue(0).queue));
 
     VkDevice device = m_App->getDevice();
 
-    m_DescPack.deinit();
-    vkDestroyPipelineLayout(device, m_GraphicPipelineLayout, nullptr);
+    m_RasterDescPack.deinit();
+    vkDestroyPipelineLayout(device, m_RasterPipelineLayout, nullptr);
     vkDestroyShaderEXT(device, m_VertexShader, nullptr);
     vkDestroyShaderEXT(device, m_FragmentShader, nullptr);
 
@@ -436,10 +441,10 @@ void Application::onDetach()
     m_Tonemapper.deinit();
     m_SamplerPool.deinit();
     m_Allocator.deinit();
-  }
+}
 
 void Application::onUIRender()
-  {
+{
     namespace PE = nvgui::PropertyEditor;
 
     // Viewport.
@@ -592,15 +597,15 @@ void Application::onUIRender()
               ImGui::TreePop();
             }
 
-            if(ImGui::TreeNodeEx("Continuation"))
+            if(ImGui::TreeNodeEx("Secondary Path Bounces"))
             {
               const uint32_t bounceLimit = m_ReSTIRDI->GetPipelineBounceLimit();
-              if(DrawBounceLimitControl("Continuation Max Bounces", restirDiSettings.continuationMaxBounces, bounceLimit))
+              if(DrawBounceLimitControl("Secondary Path Max Bounces", restirDiSettings.secondaryPathMaxBounces, bounceLimit))
               {
                 invalidateRenderHistory            = true;
               }
 
-              ImGui::TextDisabled("Direct lighting comes from DI reservoirs, while the continuation path covers reflections and indirect transport.");
+              ImGui::TextDisabled("Direct lighting comes from DI reservoirs, while secondary path bounces cover reflections and indirect transport.");
               ImGui::TreePop();
             }
 
@@ -622,7 +627,7 @@ void Application::onUIRender()
             }
 
             DrawReSTIRMethodFooter(
-                "This DI mode uses ReSTIR direct-light reservoirs and a path-traced continuation for reflections and indirect transport.",
+                "This DI mode uses ReSTIR direct-light reservoirs and path-traced secondary bounces for reflections and indirect transport.",
               restirDiSettings.common.resolveMode,
               m_ReSTIRDI->GetAccumulatedFrameCount());
           }
@@ -782,15 +787,15 @@ void Application::onUIRender()
       }
     }
     ImGui::End();
-  }
+}
 void Application::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
-  {
-    NVVK_CHECK(m_GBuffers.update(cmd, size));
-    InvalidateRenderHistory();
-  }
+{
+  NVVK_CHECK(m_GBuffers.update(cmd, size));
+  InvalidateRenderHistory();
+}
 
 void Application::onRender(VkCommandBuffer cmd)
-  {
+{
     NVVK_DBG_SCOPE(cmd);
 
     if(m_ExperimentController)
@@ -809,6 +814,7 @@ void Application::onRender(VkCommandBuffer cmd)
       return;
     }
 
+    // The active renderer writes eImgRendered; post processing always consumes that same image.
     BeginExperimentGpuTiming(cmd);
     UpdateSceneBuffer(cmd);
     MarkExperimentRendererStart(cmd);
@@ -832,10 +838,10 @@ void Application::onRender(VkCommandBuffer cmd)
     {
       m_ExperimentController->AfterRender(*this);
     }
-  }
+}
 
 void Application::onUIMenu()
-  {
+{
     bool reload = false;
     if(ImGui::BeginMenu("Tools"))
     {
@@ -847,12 +853,12 @@ void Application::onUIMenu()
     if(reload)
     {
       vkQueueWaitIdle(m_App->getQueue(0).queue);
-      CompileAndCreateGraphicsShaders();
+      CompileAndCreateRasterShaders();
     }
-  }
+}
 
 void Application::onLastHeadlessFrame()
-  {
+{
     if(m_ExperimentController)
     {
       m_ExperimentController->OnLastHeadlessFrame(*this);
@@ -861,12 +867,12 @@ void Application::onLastHeadlessFrame()
 
     m_App->saveImageToFile(m_GBuffers.getColorImage(eImgTonemapped), m_GBuffers.getSize(),
                            nvutils::getExecutablePath().replace_extension(".jpg").string());
-  }
+}
 
 std::shared_ptr<nvutils::CameraManipulator> Application::GetCameraManipulator() const
-  {
-    return m_CameraManip;
-  }
+{
+  return m_CameraManip;
+}
 
 void Application::ApplyExperimentRun(const ExperimentRun& run)
 {
@@ -991,68 +997,71 @@ void Application::EndExperimentGpuTiming(VkCommandBuffer cmd)
 }
 
 void Application::DiscoverAssets()
-  {
-    const nvsamples::SceneAssetCatalogData catalogData = m_SceneAssetCatalog->Discover();
-    m_ModelAssets                                 = catalogData.modelAssets;
-    m_HdriAssets                                  = catalogData.hdriAssets;
-    m_SceneDefinitions                            = catalogData.sceneDefinitions;
-    m_SelectedSceneIndex                          = catalogData.selectedSceneIndex;
-    m_SelectedHdriIndex                           = catalogData.selectedHdriIndex;
+{
+  const nvsamples::SceneAssetCatalogData catalogData = m_SceneAssetCatalog->Discover();
+  m_ModelAssets                                      = catalogData.modelAssets;
+  m_HdriAssets                                       = catalogData.hdriAssets;
+  m_SceneDefinitions                                 = catalogData.sceneDefinitions;
+  m_SelectedSceneIndex                               = catalogData.selectedSceneIndex;
+  m_SelectedHdriIndex                                = catalogData.selectedHdriIndex;
 
-    // Emit one clear startup warning per missing asset reference.
-    for(const std::string& warning : catalogData.warnings)
-    {
-      LOGW("%s\n", warning.c_str());
-    }
+  // Emit one clear startup warning per missing asset reference.
+  for(const std::string& warning : catalogData.warnings)
+  {
+    LOGW("%s\n", warning.c_str());
   }
+}
 
 void Application::RebuildSceneFromSelection()
-  {
-    CreateScene(false);
-    UpdateTextures();
-    InvalidateRenderHistory();
-  }
+{
+  CreateScene(false);
+  UpdateTextures();
+  InvalidateRenderHistory();
+}
 
 void Application::PostProcess(VkCommandBuffer cmd)
-  {
-    NVVK_DBG_SCOPE(cmd);
+{
+  NVVK_DBG_SCOPE(cmd);
 
-    m_Tonemapper.runCompute(cmd, m_GBuffers.getSize(), m_TonemapperData, m_GBuffers.getDescriptorImageInfo(eImgRendered),
-                            m_GBuffers.getDescriptorImageInfo(eImgTonemapped));
+  m_Tonemapper.runCompute(cmd, m_GBuffers.getSize(), m_TonemapperData, m_GBuffers.getDescriptorImageInfo(eImgRendered),
+                          m_GBuffers.getDescriptorImageInfo(eImgTonemapped));
 
-    // Barrier: make sure the tonemapped image is ready for display.
-    nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT);
-  }
+  // Barrier: make sure the tonemapped image is ready for display.
+  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT);
+}
 
 void Application::CreateScene(bool resetCamera)
+{
+  SCOPED_TIMER(__FUNCTION__);
+
+  const nvsamples::SceneResolver::Input resolveInput{
+      .sceneDefinitions   = m_SceneDefinitions,
+      .selectedSceneIndex = m_SelectedSceneIndex,
+      .hdriAssets         = m_HdriAssets,
+      .selectedHdriIndex  = m_SelectedHdriIndex,
+  };
+  const nvsamples::SceneResolver::Output resolved = m_SceneResolver->Resolve(resolveInput);
+  if(resolved.sceneDefinition == nullptr)
   {
-    SCOPED_TIMER(__FUNCTION__);
-
-    const nvsamples::SceneResolver::Input resolveInput{
-        .sceneDefinitions   = m_SceneDefinitions,
-        .selectedSceneIndex = m_SelectedSceneIndex,
-        .hdriAssets         = m_HdriAssets,
-        .selectedHdriIndex  = m_SelectedHdriIndex,
-    };
-    const nvsamples::SceneResolver::Output resolved = m_SceneResolver->Resolve(resolveInput);
-    if(resolved.sceneDefinition == nullptr)
-    {
-      LOGE("No scenes available\n");
-      return;
-    }
-    m_SelectedSceneIndex = resolved.resolvedSceneIndex;
-    m_SelectedHdriIndex  = resolved.resolvedHdriIndex;
-
-    m_SceneRuntime->RebuildScene(
-        m_App->getQueue(0).queue,
-        nvsamples::SceneUploader::UploadInput{.sceneDefinition = *resolved.sceneDefinition, .selectedHdriRelativePath = resolved.hdriRelativePath},
-        resetCamera, m_CameraManip.get());
-
-    InvalidateRenderHistory();
+    LOGE("No scenes available\n");
+    return;
   }
-void Application::CreateGraphicsDescriptorSetLayout()
-  {
+  m_SelectedSceneIndex = resolved.resolvedSceneIndex;
+  m_SelectedHdriIndex  = resolved.resolvedHdriIndex;
+
+  // SceneRuntime owns the uploaded GPU scene after this call, including BLAS/TLAS data.
+  m_SceneRuntime->RebuildScene(
+      m_App->getQueue(0).queue,
+      nvsamples::SceneUploader::UploadInput{.sceneDefinition = *resolved.sceneDefinition, .selectedHdriRelativePath = resolved.hdriRelativePath},
+      resetCamera, m_CameraManip.get());
+
+  InvalidateRenderHistory();
+}
+
+void Application::CreateRasterDescriptorSetLayout()
+{
     nvvk::DescriptorBindings bindings;
+    // Raster preview uses the same texture array as the ray tracing paths, but through its own descriptor set.
     bindings.addBinding({.binding         = shaderio::BindingPoints::eTextures,
                          .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                          .descriptorCount = kMaxTextureDescriptors,
@@ -1060,16 +1069,16 @@ void Application::CreateGraphicsDescriptorSetLayout()
                         VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
                             | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
 
-    m_DescPack.init(bindings, m_App->getDevice(), 1, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
-                    VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT);
+    m_RasterDescPack.init(bindings, m_App->getDevice(), 1, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
+                          VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT);
 
-    NVVK_DBG_NAME(m_DescPack.getLayout());
-    NVVK_DBG_NAME(m_DescPack.getPool());
-    NVVK_DBG_NAME(m_DescPack.getSet(0));
-  }
+    NVVK_DBG_NAME(m_RasterDescPack.getLayout());
+    NVVK_DBG_NAME(m_RasterDescPack.getPool());
+    NVVK_DBG_NAME(m_RasterDescPack.getSet(0));
+}
 
-void Application::CreateGraphicsPipelineLayout()
-  {
+void Application::CreateRasterPipelineLayout()
+{
     const VkPushConstantRange pushConstantRange = {
         .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
         .offset     = 0,
@@ -1079,18 +1088,19 @@ void Application::CreateGraphicsPipelineLayout()
     const VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
         .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount         = 1,
-        .pSetLayouts            = m_DescPack.getLayoutPtr(),
+        .pSetLayouts            = m_RasterDescPack.getLayoutPtr(),
         .pushConstantRangeCount = 1,
         .pPushConstantRanges    = &pushConstantRange,
     };
 
-    NVVK_CHECK(vkCreatePipelineLayout(m_App->getDevice(), &pipelineLayoutInfo, nullptr, &m_GraphicPipelineLayout));
-    NVVK_DBG_NAME(m_GraphicPipelineLayout);
-  }
+    NVVK_CHECK(vkCreatePipelineLayout(m_App->getDevice(), &pipelineLayoutInfo, nullptr, &m_RasterPipelineLayout));
+    NVVK_DBG_NAME(m_RasterPipelineLayout);
+}
 
 void Application::UpdateTextures()
-  {
-    m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_DescPack, kMaxTextureDescriptors);
+{
+    // Every renderer has its own descriptor pack, so texture updates are fanned out explicitly.
+    m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_RasterDescPack, kMaxTextureDescriptors);
     if(m_PathTracer != nullptr && m_PathTracer->IsReady())
     {
       m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_PathTracer->GetDescriptorPack(), kMaxTextureDescriptors);
@@ -1099,10 +1109,10 @@ void Application::UpdateTextures()
     {
       m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_ReSTIRDI->GetDescriptorPack(), kMaxTextureDescriptors);
     }
-  }
+}
 
 VkShaderModuleCreateInfo Application::CompileSlangShader(const std::filesystem::path& filename, const std::span<const uint32_t>& spirvFallback)
-  {
+{
     SCOPED_TIMER(__FUNCTION__);
 
     VkShaderModuleCreateInfo shaderCode = nvsamples::GetShaderModuleCreateInfo(spirvFallback);
@@ -1119,10 +1129,10 @@ VkShaderModuleCreateInfo Application::CompileSlangShader(const std::filesystem::
     }
 
     return shaderCode;
-  }
+}
 
-void Application::CompileAndCreateGraphicsShaders()
-  {
+void Application::CompileAndCreateRasterShaders()
+{
     SCOPED_TIMER(__FUNCTION__);
 
     VkShaderModuleCreateInfo shaderCode = CompileSlangShader("Rasterizer.slang", Rasterizer_slang);
@@ -1141,7 +1151,7 @@ void Application::CompileAndCreateGraphicsShaders()
         .codeType               = VK_SHADER_CODE_TYPE_SPIRV_EXT,
         .pName                  = "main",
         .setLayoutCount         = 1,
-        .pSetLayouts            = m_DescPack.getLayoutPtr(),
+        .pSetLayouts            = m_RasterDescPack.getLayoutPtr(),
         .pushConstantRangeCount = 1,
         .pPushConstantRanges    = &pushConstantRange,
     };
@@ -1163,17 +1173,18 @@ void Application::CompileAndCreateGraphicsShaders()
     shaderInfo.pCode     = shaderCode.pCode;
     vkCreateShadersEXT(m_App->getDevice(), 1U, &shaderInfo, nullptr, &m_FragmentShader);
     NVVK_DBG_NAME(m_FragmentShader);
-  }
+}
 
 void Application::UpdateSceneBuffer(VkCommandBuffer cmd)
-  {
-    const glm::mat4& viewMatrix = m_CameraManip->getViewMatrix();
-    const glm::mat4& projMatrix = m_CameraManip->getPerspectiveMatrix();
-    m_SceneRuntime->UpdateSceneBuffer(cmd, viewMatrix, projMatrix, m_CameraManip->getEye(), m_App->getViewportSize());
-  }
+{
+  const glm::mat4& viewMatrix = m_CameraManip->getViewMatrix();
+  const glm::mat4& projMatrix = m_CameraManip->getPerspectiveMatrix();
+  m_SceneRuntime->UpdateSceneBuffer(cmd, viewMatrix, projMatrix, m_CameraManip->getEye(), m_App->getViewportSize());
+}
 
 void Application::RasterScene(VkCommandBuffer cmd)
-  {
+{
+    // Raster preview is kept as a separate handoff so ray tracing paths do not share raster state accidentally.
     m_SceneRenderer->Render(nvsamples::SceneRenderer::RenderInput{
         .cmd                       = cmd,
         .sceneResource             = &m_SceneRuntime->GetSceneResource(),
@@ -1183,17 +1194,18 @@ void Application::RasterScene(VkCommandBuffer cmd)
         .cameraManip               = m_CameraManip,
         .skySimple                 = &m_SkySimple,
         .gBuffers                  = &m_GBuffers,
-        .dynamicPipeline           = &m_DynamicPipeline,
-        .descPack                  = &m_DescPack,
-        .graphicsPipelineLayout    = m_GraphicPipelineLayout,
+        .dynamicPipeline           = &m_RasterDynamicPipeline,
+        .descPack                  = &m_RasterDescPack,
+        .graphicsPipelineLayout    = m_RasterPipelineLayout,
         .vertexShader              = m_VertexShader,
         .fragmentShader            = m_FragmentShader,
         .renderedImageIndex        = eImgRendered,
     });
-  }
+}
 
 void Application::PathTraceScene(VkCommandBuffer cmd)
-  {
+{
+    // Ground-truth/baseline renderer borrows the scene buffers and TLAS owned by SceneRuntime.
     m_PathTracer->Render(nvsamples::PathTracer::RenderInput{
         .cmd                = cmd,
         .sceneResource      = &m_SceneRuntime->GetSceneResource(),
@@ -1202,10 +1214,11 @@ void Application::PathTraceScene(VkCommandBuffer cmd)
         .gBuffers           = &m_GBuffers,
         .renderedImageIndex = eImgRendered,
     });
-  }
+}
 
 void Application::ReSTIRDIScene(VkCommandBuffer cmd)
-  {
+{
+    // ReSTIR DI receives the same scene interface as PathTracer, but owns its reservoir resources internally.
     m_ReSTIRDI->Render(nvsamples::ReSTIRDIRenderer::RenderInput{
         .cmd                = cmd,
         .sceneResource      = &m_SceneRuntime->GetSceneResource(),
@@ -1214,20 +1227,21 @@ void Application::ReSTIRDIScene(VkCommandBuffer cmd)
         .gBuffers           = &m_GBuffers,
         .renderedImageIndex = eImgRendered,
     });
-  }
+}
 
 void Application::InvalidateRenderHistory()
-  {
+{
+    // Any scene, camera, lighting, or renderer setting change makes temporal histories untrustworthy.
     m_SceneRuntime->InvalidateFrameHistory();
     if(m_PathTracer != nullptr && m_PathTracer->IsReady())
     {
-      m_PathTracer->InvalidateAccumulation();
+      m_PathTracer->InvalidateHistory();
     }
     if(m_ReSTIRDI != nullptr && m_ReSTIRDI->IsReady())
     {
       m_ReSTIRDI->InvalidateHistory();
     }
-  }
+}
 
 bool Application::SelectSceneForExperiment(const std::string& sceneLabel)
 {
@@ -1305,18 +1319,18 @@ void Application::ApplyExperimentReSTIRSettings(const ExperimentReSTIRSettings& 
 
   restirSettings.shading.enableFinalVisibility = settings.finalVisibility ? 1u : 0u;
   restirSettings.shading.reuseFinalVisibility  = settings.reuseFinalVisibility ? 1u : 0u;
-  restirSettings.continuationMaxBounces = std::min(settings.continuationMaxBounces, m_ReSTIRDI->GetPipelineBounceLimit());
+  restirSettings.secondaryPathMaxBounces = std::min(settings.secondaryPathMaxBounces, m_ReSTIRDI->GetPipelineBounceLimit());
 }
 
 bool Application::IsPathTracerRenderMode() const
-  {
-    return m_RenderMode == RenderMode::ePathTracing;
-  }
+{
+  return m_RenderMode == RenderMode::ePathTracing;
+}
 
 bool Application::IsReSTIRDIRenderMode() const
-  {
-    return m_RenderMode == RenderMode::eReSTIRDI;
-  }
+{
+  return m_RenderMode == RenderMode::eReSTIRDI;
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Application module API
@@ -1328,16 +1342,3 @@ std::shared_ptr<nvapp::IAppElement> CreateApplicationElement(const std::shared_p
 }
 
 }  // namespace nvsamples
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -119,7 +119,7 @@ void ExperimentMetadataWriter::WriteManifest(const ExperimentPlan& plan)
   std::ofstream summary(plan.outputRoot / "summary.csv", std::ios::trunc);
   summary << "run,scene,render_mode,resolve_mode,capture_frame,image,accumulated_frames,total_frames,warmup_frames,"
              "restir_local_light_samples,restir_environment_samples,restir_brdf_samples,restir_temporal_reuse,"
-             "restir_spatial_reuse,restir_spatial_samples,restir_spatial_radius,restir_continuation_bounces,"
+             "restir_spatial_reuse,restir_spatial_samples,restir_spatial_radius,restir_secondary_path_bounces,"
              "restir_debug_view,path_tracing_max_bounces,gpu_frame_ms,gpu_renderer_ms,gpu_post_process_ms\n";
 }
 
@@ -191,7 +191,7 @@ void ExperimentMetadataWriter::WriteCaptureMetadata(const ExperimentPlan& plan,
     file << "    \"finalVisibility\": " << (run.restir.finalVisibility ? "true" : "false") << ",\n";
     file << "    \"reuseFinalVisibility\": " << (run.restir.reuseFinalVisibility ? "true" : "false") << ",\n";
     file << "    \"debugView\": " << run.restir.debugView << ",\n";
-    file << "    \"continuationMaxBounces\": " << run.restir.continuationMaxBounces << "\n";
+    file << "    \"secondaryPathMaxBounces\": " << run.restir.secondaryPathMaxBounces << "\n";
     file << "  },\n";
   }
   else
@@ -230,7 +230,7 @@ void ExperimentMetadataWriter::AppendSummaryRow(const ExperimentPlan& plan,
   summary << (run.restir.spatialReuse ? "true" : "false") << ",";
   summary << run.restir.spatialSamples << ",";
   summary << run.restir.spatialRadius << ",";
-  summary << run.restir.continuationMaxBounces << ",";
+  summary << run.restir.secondaryPathMaxBounces << ",";
   summary << run.restir.debugView << ",";
   summary << run.pathTracing.maxBounces << ",";
   WriteCsvTimingValue(summary, gpuTimings, &ExperimentGpuTimings::frameMs);

@@ -19,6 +19,10 @@
 #include "ReSTIR/Reservoir.hlsli"
 #include "ReSTIR/ReservoirStorage.hlsli"
 
+// Adapter between the generic ReSTIR DI include code and this renderer's scene
+// representation. The functions below are the light, surface, visibility, and
+// BRDF hooks that the reservoir passes call from their shared HLSL code.
+
 static const uint kReSTIRDILightKindInvalid          = 0u;
 static const uint kReSTIRDILightKindEmissiveTriangle = 1u;
 static const uint kReSTIRDILightKindEnvironment      = 2u;
@@ -57,6 +61,9 @@ struct DIResolvedDirectLighting
   float  pad0;
 };
 
+// Material resolution for light samples. ReSTIR compute passes do not run the
+// closest-hit material loader, so the bridge resolves the small subset needed
+// by emissive lights and direct-light target PDFs.
 float4 ResolveDIBaseColor(GltfMetallicRoughness material, float2 texCoord)
 {
   float4 baseColor = material.baseColorFactor;
@@ -77,15 +84,16 @@ float3 ResolveDIEmission(GltfMetallicRoughness material, float2 texCoord)
   return max(emission, float3(0.0));
 }
 
-#ifndef PATH_TRACING_LIGHTS_H
-float EvaluateEmissiveTriangleCosine(GltfMetallicRoughness material, float3 geometricNormal, float3 directionToReceiver)
+float DIEvaluateEmissiveTriangleCosine(GltfMetallicRoughness material, float3 geometricNormal, float3 directionToReceiver)
 {
+  // Double-sided emissive materials can illuminate both sides of the triangle.
   const float cosine = dot(normalize(geometricNormal), directionToReceiver);
   return material.doubleSided != 0 ? abs(cosine) : max(cosine, 0.0);
 }
 
-float3 EvaluateEmissiveTriangleRadiance(GltfSceneInfo sceneInfo, EmissiveTriangleLight light, float2 texCoord)
+float3 DIEvaluateEmissiveTriangleRadiance(GltfSceneInfo sceneInfo, EmissiveTriangleLight light, float2 texCoord)
 {
+  // Emissive triangles use the same material alpha mask as visible geometry.
   const GltfMetallicRoughness material = sceneInfo.materials[light.materialIndex];
   const float4 baseColor = ResolveDIBaseColor(material, texCoord);
   if(material.alphaMode == GltfAlphaMode::eMask && baseColor.w < material.alphaCutoff)
@@ -95,7 +103,6 @@ float3 EvaluateEmissiveTriangleRadiance(GltfSceneInfo sceneInfo, EmissiveTriangl
 
   return ResolveDIEmission(material, texCoord);
 }
-#endif
 
 float EvaluateEmissiveTriangleSolidAnglePdf(GltfSceneInfo sceneInfo,
                                             EmissiveTriangleLight light,
@@ -116,7 +123,7 @@ float EvaluateEmissiveTriangleSolidAnglePdf(GltfSceneInfo sceneInfo,
 
   const GltfMetallicRoughness material = sceneInfo.materials[light.materialIndex];
   const float3 lightDirection = toLight * rsqrt(distanceSquared);
-  const float lightCos = EvaluateEmissiveTriangleCosine(material, light.geometricNormal, -lightDirection);
+  const float lightCos = DIEvaluateEmissiveTriangleCosine(material, light.geometricNormal, -lightDirection);
   if(lightCos <= 0.0)
   {
     return 0.0;
@@ -131,11 +138,14 @@ float EvaluateEmissiveTriangleSolidAnglePdf(GltfSceneInfo sceneInfo,
 
 ReSTIRDISurface EmptyDIPrimarySurface()
 {
+  // Zero is the invalid primary-surface representation for all ReSTIR passes.
   return (ReSTIRDISurface)0;
 }
 
 ReSTIRDISurface PackDIPrimarySurface(SurfaceData surface, uint materialIndex, uint instanceIndex, uint primitiveIndex, float linearDepth)
 {
+  // Capture closest-hit material state once so later compute passes do not
+  // need to repeat the full material and texture lookup.
   ReSTIRDISurface packed = EmptyDIPrimarySurface();
   packed.worldPosition      = surface.worldPosition;
   packed.linearDepth        = linearDepth;
@@ -170,6 +180,8 @@ ReSTIRDISurface PackDIPrimarySurface(SurfaceData surface, uint materialIndex, ui
 
 SurfaceData UnpackDIPrimarySurface(ReSTIRDISurface surface)
 {
+  // Convert the packed DI surface back into the path-tracing surface shape so
+  // the same Disney BRDF helpers can be reused.
   SurfaceData unpacked;
   unpacked.worldPosition       = surface.worldPosition;
   unpacked.shadingNormal       = surface.shadingNormal;
@@ -200,6 +212,7 @@ SurfaceData UnpackDIPrimarySurface(ReSTIRDISurface surface)
 
 bool HasEnvironmentLight(GltfSceneInfo sceneInfo)
 {
+  // ReSTIR treats sky, HDRI, and constant background as one environment light.
   return (sceneInfo.useSky != 0) || (sceneInfo.useHdrEnv != 0) || SafeMax3(sceneInfo.backgroundColor) > 0.0;
 }
 
@@ -212,6 +225,7 @@ uint GetTotalSupportedLightCount(GltfSceneInfo sceneInfo)
 
 ReSTIRLightBufferParameters BuildLightBufferParameters(GltfSceneInfo sceneInfo)
 {
+  // The generic include code sees one compact light range plus an optional environment entry.
   const uint localLightCount    = sceneInfo.emissiveTriangleCount;
   const uint environmentPresent = HasEnvironmentLight(sceneInfo) ? 1u : 0u;
 
@@ -225,6 +239,7 @@ ReSTIRLightBufferParameters BuildLightBufferParameters(GltfSceneInfo sceneInfo)
 
 float DIEvaluateLocalLightSelectionPdf(uint lightIndex)
 {
+  // Recover the discrete selection PDF from the CPU-built emissive CDF.
   const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
   if(sceneInfo.emissiveTriangleCount == 0 || lightIndex >= sceneInfo.emissiveTriangleCount)
   {
@@ -237,6 +252,7 @@ float DIEvaluateLocalLightSelectionPdf(uint lightIndex)
 
 DISurface DIEmptySurface()
 {
+  // Generic ReSTIR include code asks the renderer bridge for its empty surface.
   return EmptyDIPrimarySurface();
 }
 
@@ -252,6 +268,7 @@ DILightSample DIEmptyLightSample()
 
 DILightInfo MakeLightInfo(uint kind, uint sourceIndex)
 {
+  // Light info is only a compact reference; actual sampling happens later.
   DILightInfo info = DIEmptyLightInfo();
   info.kind          = kind;
   info.sourceIndex   = sourceIndex;
@@ -290,10 +307,11 @@ DIMaterial DIGetMaterial(DISurface surface)
 
 bool DIAreMaterialsSimilar(DIMaterial a, DIMaterial b)
 {
+  // Spatial reuse is restricted to the same material in this thesis renderer.
   return a == b;
 }
 
-int2 DIClampSamplePositionIntoView(int2 pixelPosition, bool previousFrame)
+int2 DIClampSamplePositionIntoView(int2 pixelPosition)
 {
   const int width  = int(pushConst.sceneInfoAddress[0].viewportSize.x);
   const int height = int(pushConst.sceneInfoAddress[0].viewportSize.y);
@@ -326,6 +344,7 @@ int2 DIClampSamplePositionIntoView(int2 pixelPosition, bool previousFrame)
 
 DISurface DILoadGBufferSurface(int2 pixelPosition, bool previousFrame)
 {
+  // Out-of-view reprojection means there is no previous surface to reuse.
   const int width  = int(pushConst.sceneInfoAddress[0].viewportSize.x);
   const int height = int(pushConst.sceneInfoAddress[0].viewportSize.y);
   if(pixelPosition.x < 0 || pixelPosition.y < 0 || pixelPosition.x >= width || pixelPosition.y >= height)
@@ -339,10 +358,11 @@ DISurface DILoadGBufferSurface(int2 pixelPosition, bool previousFrame)
 
 bool IsSelfEmissiveSample(DISurface surface, EmissiveTriangleLight light)
 {
+  // Avoid sampling the triangle that the primary ray is already standing on.
   return surface.instanceIndex == light.instanceIndex && surface.primitiveIndex == light.primitiveIndex;
 }
 
-DILightInfo DILoadLightInfo(uint lightIndex, bool previousFrame)
+DILightInfo DILoadLightInfo(uint lightIndex)
 {
   // Scene geometry and emissive-light indexing are static during thesis experiments,
   // so previous-frame light references map directly to the current light list.
@@ -365,12 +385,14 @@ DILightInfo DILoadLightInfo(uint lightIndex, bool previousFrame)
 
 DILightSample DISampleLight(DILightInfo lightInfo, DISurface surface, float2 uv)
 {
+  // Turn a compact reservoir sample reference into a concrete light sample at this surface.
   const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
   DILightSample sample = DIEmptyLightSample();
   sample.kind = lightInfo.kind;
 
   if(lightInfo.kind == kReSTIRDILightKindEmissiveTriangle)
   {
+    // Emissive triangle candidates store barycentric random numbers in uv.
     const EmissiveTriangleLight light = sceneInfo.emissiveTriangles[lightInfo.sourceIndex];
     if(IsSelfEmissiveSample(surface, light))
     {
@@ -383,7 +405,7 @@ DILightSample DISampleLight(DILightInfo lightInfo, DISurface surface, float2 uv)
 
     sample.position      = light.position0 * bary.x + light.position1 * bary.y + light.position2 * bary.z;
     const float2 texCoord = light.texCoord0 * bary.x + light.texCoord1 * bary.y + light.texCoord2 * bary.z;
-    sample.radiance      = EvaluateEmissiveTriangleRadiance(sceneInfo, light, texCoord);
+    sample.radiance      = DIEvaluateEmissiveTriangleRadiance(sceneInfo, light, texCoord);
     const float3 toLight = sample.position - surface.worldPosition;
     const float distanceSquared = dot(toLight, toLight);
     if(distanceSquared <= 1.0e-8 || SafeMax3(sample.radiance) <= 0.0)
@@ -401,6 +423,7 @@ DILightSample DISampleLight(DILightInfo lightInfo, DISurface surface, float2 uv)
 
   if(lightInfo.kind == kReSTIRDILightKindEnvironment)
   {
+    // Environment candidates store lat-long random numbers in uv.
     sample.direction     = LatLongUvToDir(uv);
     sample.distance      = kRayTMax;
     sample.position      = surface.worldPosition + sample.direction * sample.distance;
@@ -431,6 +454,7 @@ float DIGetLightSampleSolidAnglePdf(DILightSample lightSample)
 
 float3 EvaluateDIBrdfContribution(DISurface surface, float3 lightDir, out float pdf)
 {
+  // Evaluate f*cos(theta) and the matching BRDF PDF for the direct-light target function.
   const SurfaceData unpackedSurface = UnpackDIPrimarySurface(surface);
   const float3 viewDirection        = normalize(pushConst.sceneInfoAddress[0].cameraPosition - surface.worldPosition);
 
@@ -464,6 +488,7 @@ float3 EvaluateDIBrdfContribution(DISurface surface, float3 lightDir, out float 
 
 void EvaluateDIBrdfContributionSplit(DISurface surface, float3 lightDir, out float3 diffuseContribution, out float3 specularContribution, out float pdf)
 {
+  // Same BRDF evaluation as above, split into NRD diffuse and specular signals.
   diffuseContribution  = float3(0.0);
   specularContribution = float3(0.0);
   pdf                  = 0.0;
@@ -502,6 +527,7 @@ void EvaluateDIBrdfContributionSplit(DISurface surface, float3 lightDir, out flo
 
 float DIGetLightSampleTargetPdf(DILightSample lightSample, DISurface surface)
 {
+  // ReSTIR samples proportional to luminance of the visible direct-light contribution.
   if(lightSample.valid == 0 || lightSample.solidAnglePdf <= 0.0 || isinf(lightSample.solidAnglePdf) || isnan(lightSample.solidAnglePdf))
   {
     return 0.0;
@@ -521,6 +547,7 @@ float DIEvaluateSurfaceBrdfPdf(DISurface surface, float3 lightDir)
 
 bool DISampleSurfaceBrdf(DISurface surface, inout ReSTIRRandomSamplerState rng, out float3 sampleDir)
 {
+  // BRDF candidates let the initial pass discover lights that explicit light sampling may miss.
   sampleDir = float3(0.0);
 
   const SurfaceData unpackedSurface = UnpackDIPrimarySurface(surface);
@@ -546,11 +573,13 @@ bool DISampleSurfaceBrdf(DISurface surface, inout ReSTIRRandomSamplerState rng, 
 
   if(sampleGroup < broadProbability)
   {
+    // Broad lobes use cosine sampling as the diffuse/subsurface candidate direction.
     float ignoredPdf = 0.0;
     sampleDir = SampleCosineHemisphereDirection(unpackedSurface.shadingNormal, xi, ignoredPdf);
   }
   else if(sampleGroup < broadProbability + reflectionProbability)
   {
+    // Reflection lobes sample visible GGX for glossy candidates.
     const float3 viewLocal = ToLocal(unpackedSurface.shadingNormal, unpackedSurface.tangent, unpackedSurface.bitangent, viewDirection);
     const float3 halfLocal = ImportanceSampleVisibleGGX(viewLocal, material.alphaAnisotropicX, material.alphaAnisotropicY, xi);
     const float3 halfVector = ToWorld(unpackedSurface.shadingNormal, unpackedSurface.tangent, unpackedSurface.bitangent, halfLocal);
@@ -558,6 +587,7 @@ bool DISampleSurfaceBrdf(DISurface surface, inout ReSTIRRandomSamplerState rng, 
   }
   else
   {
+    // Clearcoat has its own sharper GGX lobe.
     float3 halfLocal = ImportanceSampleGGX(material.clearcoatAlpha, xi);
     if(halfLocal.z < 0.0)
     {
@@ -584,6 +614,7 @@ bool DISampleSurfaceBrdf(DISurface surface, inout ReSTIRRandomSamplerState rng, 
 
 bool DITraceRayForLocalLight(float3 origin, float3 direction, float minT, float maxT, out uint lightIndex, out float2 randXY)
 {
+  // Trace a BRDF candidate and translate the hit triangle back into a ReSTIR light id.
   lightIndex = ReSTIRInvalidLightIndex;
   randXY     = float2(0.0);
   if(maxT <= minT)
@@ -665,6 +696,7 @@ float DIEvaluateEnvironmentMapSamplingPdf(float3 direction)
 
 bool TraceDIVisibility(float3 worldPosition, float3 geometricNormal, float3 direction, float maxDistance)
 {
+  // Final visibility is a shadow ray from the receiver toward the selected light sample.
   if(maxDistance <= 1.0e-4)
   {
     return true;
@@ -706,18 +738,25 @@ bool DIGetConservativeVisibility(DISurface surface, DILightSample lightSample)
   return EvaluateLightSampleVisibility(surface, lightSample);
 }
 
-bool DIGetTemporalConservativeVisibility(DISurface surface, DISurface temporalSurface, DILightSample lightSample)
+bool DIGetTemporalConservativeVisibility(DISurface surface, DILightSample lightSample)
 {
+  // Temporal reuse samples a previous-frame surface, but this thesis renderer
+  // keeps one current-frame TLAS. The visibility ray is therefore an
+  // approximation from the current receiver.
   return EvaluateLightSampleVisibility(surface, lightSample);
 }
 
-int DITranslateLightIndex(uint lightIndex, bool previousFrame)
+int DITranslateLightIndex(uint lightIndex)
 {
+  // Scene geometry and emissive-light indexing are static during thesis
+  // experiments, so previous-frame light references map directly to the current
+  // light list.
   return lightIndex < GetTotalSupportedLightCount(pushConst.sceneInfoAddress[0]) ? int(lightIndex) : -1;
 }
 
 void EvaluateLightSampleContributionSplit(DISurface surface, DILightSample lightSample, out float3 diffuseContribution, out float3 specularContribution)
 {
+  // Convert the selected light sample into raw diffuse/specular radiance before reservoir weight.
   diffuseContribution  = float3(0.0);
   specularContribution = float3(0.0);
   if(lightSample.valid == 0)
@@ -735,6 +774,7 @@ void EvaluateLightSampleContributionSplit(DISurface surface, DILightSample light
 
 float3 ReconstructMissRadiance(uint2 pixelPosition)
 {
+  // Miss pixels still need background radiance for the final image.
   const GltfSceneInfo sceneInfo   = pushConst.sceneInfoAddress[0];
   const float2 pixelCenter        = float2(pixelPosition) + 0.5;
   const float3 worldDirection     = ReconstructWorldDirectionFromPixel(pixelCenter, sceneInfo);
@@ -746,6 +786,7 @@ DIResolvedDirectLighting ResolveReservoirDirectLightingSplit(uint2 pixelPosition
                                                              ReSTIRDIReservoir reservoir,
                                                              bool updateVisibility)
 {
+  // Resolve one selected reservoir into final radiance and NRD-compatible signal splits.
   DIResolvedDirectLighting resolved = (DIResolvedDirectLighting)0;
 
   if(!DIIsSurfaceValid(surface))
@@ -762,7 +803,7 @@ DIResolvedDirectLighting ResolveReservoirDirectLightingSplit(uint2 pixelPosition
     return resolved;
   }
 
-  const DILightInfo   lightInfo   = DILoadLightInfo(GetDIReservoirLightIndex(reservoir), false);
+  const DILightInfo   lightInfo   = DILoadLightInfo(GetDIReservoirLightIndex(reservoir));
   const DILightSample lightSample = DISampleLight(lightInfo, surface, GetDIReservoirSampleUv(reservoir));
   if(lightSample.valid == 0 || lightSample.solidAnglePdf <= 0.0 || isinf(lightSample.solidAnglePdf) || isnan(lightSample.solidAnglePdf))
   {
@@ -772,6 +813,7 @@ DIResolvedDirectLighting ResolveReservoirDirectLightingSplit(uint2 pixelPosition
   float3 visibility = float3(1.0);
   if(diParams.shading.enableFinalVisibility != 0)
   {
+    // Reuse cached final visibility when it is still close enough in time and screen space.
     bool reusedVisibility = false;
     if(diParams.shading.reuseFinalVisibility != 0)
     {
@@ -783,6 +825,7 @@ DIResolvedDirectLighting ResolveReservoirDirectLightingSplit(uint2 pixelPosition
 
     if(!reusedVisibility)
     {
+      // Fresh final visibility is the expensive shadow ray that validates the selected sample.
       visibility = EvaluateLightSampleVisibility(surface, lightSample) ? float3(1.0) : float3(0.0);
       if(updateVisibility)
       {
@@ -798,6 +841,7 @@ DIResolvedDirectLighting ResolveReservoirDirectLightingSplit(uint2 pixelPosition
   float3 specularContribution = float3(0.0);
   EvaluateLightSampleContributionSplit(surface, lightSample, diffuseContribution, specularContribution);
 
+  // Reservoir inverse PDF and light solid-angle PDF together form the final sample weight.
   const float lightWeight = GetDIReservoirInvPdf(reservoir) / lightSample.solidAnglePdf;
   diffuseContribution *= visibility * lightWeight;
   specularContribution *= visibility * lightWeight;
@@ -806,6 +850,7 @@ DIResolvedDirectLighting ResolveReservoirDirectLightingSplit(uint2 pixelPosition
   resolved.specularRadiance = specularContribution;
   resolved.totalRadiance    = resolved.diffuseRadiance + resolved.specularRadiance;
 
+  // NRD needs a hit distance for each noisy signal it denoises.
   const float lightHitDistance =
       (lightInfo.kind == kReSTIRDILightKindEnvironment) ? kDIDenoiserMissHitDistance : max(lightSample.distance, 0.0);
   if(SafeMax3(diffuseContribution) > 0.0)

@@ -225,10 +225,8 @@ void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewM
   m_SceneResource.sceneInfo.prevViewMatrix         = m_PreviousViewMatrix;
   m_SceneResource.sceneInfo.prevPrevViewProjMatrix = m_PreviousPreviousViewProjMatrix;
 
-  // Historical note: the shared shader struct still calls this field
-  // projInvMatrix, but both the raster sky/background path and the path tracer
-  // reconstruct world-space camera rays from the inverse view-projection.
-  m_SceneResource.sceneInfo.projInvMatrix  = glm::inverse(m_SceneResource.sceneInfo.viewProjMatrix);
+  // Shared camera-ray reconstruction uses the inverse view-projection matrix.
+  m_SceneResource.sceneInfo.viewProjInvMatrix  = glm::inverse(m_SceneResource.sceneInfo.viewProjMatrix);
   m_SceneResource.sceneInfo.viewInvMatrix  = glm::inverse(viewMatrix);
   m_SceneResource.sceneInfo.cameraPosition = cameraPosition;
   m_SceneResource.sceneInfo.prevCameraPosition = m_PreviousCameraPosition;
@@ -529,4 +527,3 @@ void SceneRuntime::DestroyTextures()
 }
 
 }  // namespace nvsamples
-

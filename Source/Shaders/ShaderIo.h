@@ -25,20 +25,26 @@
 
 NAMESPACE_SHADERIO_BEGIN()
 
+// Descriptor binding numbers are part of the CPU/Slang ABI. Keep these values
+// synchronized with descriptor-set creation in C++ and resource declarations in
+// the corresponding shaders.
 enum BindingPoints
 {
   eTextures                         = 0,
   eTlas                             = 1,
-    eOutputImage                      = 2,
-    eAccumulationImage                = 3,
-    eMotionVectorsImage               = 4,
-    eNormalRoughnessImage             = 5,
-    eBaseColorMetalnessImage          = 6,
-    eViewZImage                       = 7,
-    eDiffuseRadianceHitDistanceImage  = 8,
-    eSpecularRadianceHitDistanceImage = 9,
-  };
+  eOutputImage                      = 2,
+  eAccumulationImage                = 3,
+  eMotionVectorsImage               = 4,
+  eNormalRoughnessImage             = 5,
+  eBaseColorMetalnessImage          = 6,
+  eViewZImage                       = 7,
+  eDiffuseRadianceHitDistanceImage  = 8,
+  eSpecularRadianceHitDistanceImage = 9,
+};
 
+// ReSTIR uses a separate descriptor layout because the reuse passes need
+// reservoir buffers, current/previous surface buffers, and denoiser signal
+// targets in addition to the normal path-tracing resources.
 enum ReSTIRDIBindingPoints
 {
   eReSTIRDITextures            = 0,
@@ -112,6 +118,9 @@ enum ReSTIRShiftStatus
 
 struct ReSTIRDIParameters
 {
+  // Packed uniform block consumed by every ReSTIR pass. The nested structs come
+  // from the shared ReSTIR include code, so C++ only fills values and keeps the
+  // layout stable.
   ReSTIRRuntimeParameters                runtimeParams;
   ReSTIRReservoirBufferParameters        reservoirBufferParams;
   ReSTIRDIBufferIndices                  bufferIndices;
@@ -126,12 +135,15 @@ struct ReSTIRDIPushConstant
   GltfSceneInfo* sceneInfoAddress;
   uint           accumulatedFrames;
   uint           flags;
-  uint           continuationMaxBounces;
+  uint           secondaryPathMaxBounces;
   uint           debugView;
 };
 
 struct ReSTIRDISurface
 {
+  // G-buffer record stored between ReSTIR passes. It intentionally carries the
+  // material values needed for direct-light evaluation so later passes do not
+  // have to re-run the closest-hit material path.
   float3 worldPosition;
   float  linearDepth;
   float3 shadingNormal;
@@ -194,11 +206,3 @@ static_assert(sizeof(ReSTIRPackedDIReservoir) == 24, "Packed ReSTIR DI reservoir
 NAMESPACE_SHADERIO_END()
 
 #endif  // SHADERIO_H
-
-
-
-
-
-
-
-

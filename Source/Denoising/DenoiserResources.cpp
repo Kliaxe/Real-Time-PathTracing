@@ -128,6 +128,9 @@ void DenoiserResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
   DestroyViewportResources();
   m_ViewportSize = viewportSize;
 
+  // These images are the renderer-side half of the NRD contract. Path tracing
+  // and ReSTIR both write the same guide buffers plus noisy diffuse/specular
+  // radiance-hit-distance signals before NRD consumes them.
   m_MotionVectorsImage   = CreateStorageImage(viewportSize, kMotionVectorsFormat, "PathTraceMotionVectorsImage");
   m_NormalRoughnessImage = CreateStorageImage(viewportSize, kNormalRoughnessFormat, "PathTraceNormalRoughnessImage");
   m_BaseColorMetalnessImage = CreateStorageImage(viewportSize, kBaseColorMetalnessFormat, "PathTraceBaseColorMetalnessImage");

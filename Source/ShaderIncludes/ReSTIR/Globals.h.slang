@@ -6,6 +6,9 @@
 #include <nvshaders/slang_types.h>
 #include "ShaderIo.h"
 
+// Descriptor declarations for every ReSTIR DI shader. The numeric binding
+// points come from ShaderIo.h and must match the descriptor set built by
+// ReSTIRDIRenderer on the CPU.
 [[vk::push_constant]] ConstantBuffer<ReSTIRDIPushConstant> pushConst;
 [[vk::binding(ReSTIRDIBindingPoints::eReSTIRDITextures)]] Sampler2D textures[];
 [[vk::binding(ReSTIRDIBindingPoints::eReSTIRDITlas)]] RaytracingAccelerationStructure topLevelAS;

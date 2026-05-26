@@ -1,6 +1,10 @@
 #ifndef RESTIR_COMMON_H
 #define RESTIR_COMMON_H
 
+// Small math and reprojection helpers shared by the ReSTIR passes. Keep this
+// file renderer-agnostic: it should not know about reservoirs, light sampling,
+// or descriptor bindings.
+
 float ReSTIRLuminance(float3 value)
 {
   return dot(value, float3(0.2126, 0.7152, 0.0722));
@@ -30,6 +34,9 @@ bool TryComputeReSTIRTemporalMotionVector(float2 pixelCenter,
                                           GltfSceneInfo sceneInfo,
                                           out float3 motionVector)
 {
+  // Reprojects the current world-space hit into the previous camera. The
+  // returned XY is a UV delta, while Z stores the linear-depth delta used by
+  // temporal surface validation.
   motionVector = float3(0.0, 0.0, 0.0);
 
   const float2 currentUv = pixelCenter / sceneInfo.viewportSize;

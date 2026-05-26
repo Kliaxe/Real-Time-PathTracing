@@ -11,6 +11,7 @@ namespace nvsamples
 inline constexpr uint32_t kReSTIRDIReservoirBufferCount = 3;
 
 // ReSTIR DI can run without reuse, with temporal reuse, with spatial reuse, or with both.
+// The mode decides which reservoir arrays become pass inputs and outputs.
 enum class ReSTIRDIResamplingMode : uint32_t
 {
   eNone = 0,
@@ -22,6 +23,7 @@ enum class ReSTIRDIResamplingMode : uint32_t
 // Static dimensions decide buffer layout, so changing these recreates the context.
 struct ReSTIRDIStaticParameters
 {
+  // Must stay a power of two because shaders use neighborOffsetMask for indexing.
   uint32_t neighborOffsetCount = 16;
   uint32_t renderWidth         = 0;
   uint32_t renderHeight        = 0;
@@ -34,6 +36,7 @@ ReSTIRDISpatialResamplingParameters GetDefaultReSTIRDISpatialResamplingParams();
 ReSTIRDIShadingParameters GetDefaultReSTIRDIShadingParams();
 
 // Builds the uniform-buffer parameters consumed by the ReSTIR DI shaders.
+// It also owns the reservoir-array rotation, which is why it depends on frame index.
 class ReSTIRDIParameterContext
 {
 public:
@@ -61,11 +64,13 @@ public:
 private:
   void UpdateBufferIndices();
 
+  // Tracks which reservoir array shaded the previous frame and which will shade this frame.
   uint32_t m_LastFrameOutputReservoir    = 0;
   uint32_t m_CurrentFrameOutputReservoir = 0;
 
   ReSTIRDIStaticParameters m_StaticParameters{};
   ReSTIRDIResamplingMode   m_ResamplingMode = ReSTIRDIResamplingMode::eTemporalAndSpatial;
+  // These structs are copied almost directly into shaderio::ReSTIRDIParameters.
   ReSTIRReservoirBufferParameters m_ReservoirBufferParameters{};
   ReSTIRRuntimeParameters         m_RuntimeParameters{};
   ReSTIRDIBufferIndices           m_BufferIndices{};

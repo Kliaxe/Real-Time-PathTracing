@@ -18,6 +18,8 @@ namespace nvsamples
 {
 
 // Owns the ReSTIR DI buffers/images whose size depends on the viewport.
+// This class does not decide what a pass does. It only guarantees that the
+// GPU memory used by those passes exists and matches the current resolution.
 class ReSTIRDIResources
 {
 public:
@@ -30,10 +32,13 @@ public:
   explicit ReSTIRDIResources(const CreateInfo& createInfo);
 
   void Destroy();
+  // Creates missing resources and recreates viewport-sized resources when resolution changes.
   void EnsureForViewport(VkExtent2D viewportSize);
 
   VkExtent2D                             GetViewportSize() const;
+  // Three logical reservoir arrays live inside this one packed buffer.
   const nvvk::Buffer&                    GetLightReservoirBuffer() const;
+  // Two surface buffers ping-pong between current and previous frame history.
   const nvvk::Buffer&                    GetSurfaceBuffer(uint32_t historyIndex) const;
   const nvvk::Buffer&                    GetNeighborOffsetBuffer() const;
   const nvvk::Buffer&                    GetDebugBuffer() const;
@@ -42,8 +47,11 @@ public:
   const ReSTIRReservoirBufferParameters& GetReservoirBufferParameters() const;
 
 private:
+  // Neighbor offsets are static for the app lifetime and reused every frame.
   void CreateNeighborOffsetBuffer();
+  // Viewport resources are replaced instead of resized in place.
   void CreateOrResizeViewportResources(VkExtent2D viewportSize);
+  // Old resources are freed after the GPU has finished using submitted work.
   void ScheduleBufferDestroy(nvvk::Buffer buffer);
   void ScheduleImageDestroy(nvvk::Image image);
   nvvk::Buffer CreateStorageBuffer(VkDeviceSize size, const char* debugName) const;
@@ -51,7 +59,8 @@ private:
   nvapp::Application*             m_App       = nullptr;
   nvvk::ResourceAllocator*        m_Allocator = nullptr;
   VkExtent2D                      m_ViewportSize{};
-  std::array<nvvk::Buffer, 2> m_SurfaceBuffers{};
+  // Indexed by ReSTIRDIFrameContext current/previous history index.
+  std::array<nvvk::Buffer, 2>     m_SurfaceBuffers{};
   nvvk::Buffer                    m_LightReservoirBuffer;
   nvvk::Buffer                    m_NeighborOffsetBuffer;
   nvvk::Buffer                    m_DebugBuffer;

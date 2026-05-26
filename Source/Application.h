@@ -84,12 +84,12 @@ private:
   void RebuildSceneFromSelection();
   void PostProcess(VkCommandBuffer cmd);
   void CreateScene(bool resetCamera);
-  void CreateGraphicsDescriptorSetLayout();
-  void CreateGraphicsPipelineLayout();
+  void CreateRasterDescriptorSetLayout();
+  void CreateRasterPipelineLayout();
   void UpdateTextures();
   VkShaderModuleCreateInfo CompileSlangShader(const std::filesystem::path& filename,
                                               const std::span<const uint32_t>& spirvFallback);
-  void CompileAndCreateGraphicsShaders();
+  void CompileAndCreateRasterShaders();
   void UpdateSceneBuffer(VkCommandBuffer cmd);
   void RasterScene(VkCommandBuffer cmd);
   void PathTraceScene(VkCommandBuffer cmd);
@@ -108,19 +108,27 @@ private:
   bool IsReSTIRDIRenderMode() const;
 
 private:
-  nvapp::Application*                    m_App = nullptr;  // Owning application
   static constexpr uint32_t              kMaxTextureDescriptors = 4096;
-  nvvk::ResourceAllocator                m_Allocator;       // Vulkan allocator
-  nvvk::StagingUploader                  m_StagingUploader; // Upload helper
-  nvvk::SamplerPool                      m_SamplerPool;     // Sampler pool
-  nvvk::GBuffer                          m_GBuffers;        // Offscreen buffers
-  nvslang::SlangCompiler                 m_SlangCompiler;   // Hot reload compiler
+
+  // nvapp gives Application the frame callbacks; this pointer is borrowed for the app lifetime.
+  nvapp::Application*                    m_App = nullptr;
+
+  // Shared Vulkan services used by scene upload, raster preview, path tracing, and ReSTIR DI.
+  nvvk::ResourceAllocator                m_Allocator;
+  nvvk::StagingUploader                  m_StagingUploader;
+  nvvk::SamplerPool                      m_SamplerPool;
+  nvvk::GBuffer                          m_GBuffers;
+  nvslang::SlangCompiler                 m_SlangCompiler;
   std::shared_ptr<nvutils::CameraManipulator> m_CameraManip = std::make_shared<nvutils::CameraManipulator>();
-  nvvk::GraphicsPipelineState            m_DynamicPipeline; // Dynamic pipeline state
-  nvvk::DescriptorPack                   m_DescPack;        // Descriptor pack for textures
-  VkPipelineLayout                       m_GraphicPipelineLayout = VK_NULL_HANDLE;
+
+  // Raster preview owns its descriptor layout and shader objects here; ray tracing renderers own theirs.
+  nvvk::GraphicsPipelineState            m_RasterDynamicPipeline;
+  nvvk::DescriptorPack                   m_RasterDescPack;
+  VkPipelineLayout                       m_RasterPipelineLayout = VK_NULL_HANDLE;
   VkShaderEXT                            m_VertexShader = VK_NULL_HANDLE;
   VkShaderEXT                            m_FragmentShader = VK_NULL_HANDLE;
+
+  // UI selection state. SceneRuntime receives the resolved scene and owns the uploaded GPU data.
   std::vector<nvsamples::AssetEntry>     m_ModelAssets;
   std::vector<nvsamples::AssetEntry>     m_HdriAssets;
   std::vector<nvsamples::SceneDefinition> m_SceneDefinitions;
@@ -129,17 +137,22 @@ private:
   size_t                                 m_SelectedHdriIndex = 0;
   bool                                   m_SceneReloadRequested = false;
   bool                                   m_HdriReloadRequested = false;
-  nvshaders::SkySimple                   m_SkySimple;      // Sky compute
-  nvshaders::Tonemapper                  m_Tonemapper;     // Tonemapper compute
-  shaderio::TonemapperData               m_TonemapperData; // Tonemapper parameters
-  glm::vec2                              m_MetallicRoughnessOverride = {-0.01f, -0.01f}; // UI overrides
-  std::unique_ptr<nvsamples::SceneAssetCatalog> m_SceneAssetCatalog; // Asset discovery helper
-  std::unique_ptr<nvsamples::PathTracer>        m_PathTracer;        // Ray tracing renderer
-  std::unique_ptr<nvsamples::ReSTIRDIRenderer>  m_ReSTIRDI;          // Reservoir-based direct illumination renderer
-  std::unique_ptr<nvsamples::SceneResolver>     m_SceneResolver;     // Scene selection resolver
-  std::unique_ptr<nvsamples::SceneRenderer>     m_SceneRenderer;     // Raster scene renderer
-  std::unique_ptr<nvsamples::SceneRuntime>      m_SceneRuntime;      // GPU scene runtime owner
-  nvsamples::ExperimentGpuTimer                 m_ExperimentGpuTimer; // Experiment-only timestamp queries
+  // Full-frame post processing after whichever renderer wrote eImgRendered.
+  nvshaders::SkySimple                   m_SkySimple;
+  nvshaders::Tonemapper                  m_Tonemapper;
+  shaderio::TonemapperData               m_TonemapperData;
+  glm::vec2                              m_MetallicRoughnessOverride = {-0.01f, -0.01f};
+
+  // Application wires these systems together but keeps their responsibilities separate.
+  std::unique_ptr<nvsamples::SceneAssetCatalog> m_SceneAssetCatalog;
+  std::unique_ptr<nvsamples::PathTracer>        m_PathTracer;
+  std::unique_ptr<nvsamples::ReSTIRDIRenderer>  m_ReSTIRDI;
+  std::unique_ptr<nvsamples::SceneResolver>     m_SceneResolver;
+  std::unique_ptr<nvsamples::SceneRenderer>     m_SceneRenderer;
+  std::unique_ptr<nvsamples::SceneRuntime>      m_SceneRuntime;
+
+  // Headless experiments reuse the same renderer code path but add scripted state and GPU timestamps.
+  nvsamples::ExperimentGpuTimer                 m_ExperimentGpuTimer;
   std::shared_ptr<nvsamples::ExperimentController> m_ExperimentController;
 };
 
@@ -148,6 +161,5 @@ std::shared_ptr<nvapp::IAppElement> CreateApplicationElement(
     const std::shared_ptr<nvutils::CameraManipulator>& cameraManip);
 
 }  // namespace nvsamples
-
 
 

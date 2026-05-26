@@ -10,6 +10,7 @@ namespace
 
 void CheckStaticParameters(const ReSTIRDIStaticParameters& parameters)
 {
+  // Shader indexing assumes positive dimensions and a power-of-two neighbor table.
   assert(parameters.renderWidth > 0);
   assert(parameters.renderHeight > 0);
   assert(parameters.neighborOffsetCount > 0);
@@ -32,6 +33,7 @@ ReSTIRDIBufferIndices GetDefaultReSTIRDIBufferIndices()
 
 ReSTIRDIInitialSamplingParameters GetDefaultReSTIRDIInitialSamplingParams()
 {
+  // Defaults favor the thesis ReSTIR DI path: many direct-light candidates, no BRDF candidates.
   ReSTIRDIInitialSamplingParameters parameters{};
   parameters.brdfCutoff                      = 0.0001f;
   parameters.brdfRayMinT                     = 0.001f;
@@ -45,6 +47,7 @@ ReSTIRDIInitialSamplingParameters GetDefaultReSTIRDIInitialSamplingParams()
 
 ReSTIRDITemporalResamplingParameters GetDefaultReSTIRDITemporalResamplingParams()
 {
+  // Basic bias correction keeps the implementation focused while avoiding the fastest 1/M mode.
   ReSTIRDITemporalResamplingParameters parameters{};
   parameters.maxHistoryLength         = 20;
   parameters.biasCorrectionMode       = ReSTIRDI_TemporalBiasCorrectionMode::Basic;
@@ -58,6 +61,7 @@ ReSTIRDITemporalResamplingParameters GetDefaultReSTIRDITemporalResamplingParams(
 
 ReSTIRDISpatialResamplingParameters GetDefaultReSTIRDISpatialResamplingParams()
 {
+  // Spatial reuse uses a moderate neighbor count and radius suitable for the experiment scenes.
   ReSTIRDISpatialResamplingParameters parameters{};
   parameters.numDisocclusionBoostSamples = 8;
   parameters.numSamples                  = 5;
@@ -73,6 +77,7 @@ ReSTIRDISpatialResamplingParameters GetDefaultReSTIRDISpatialResamplingParams()
 
 ReSTIRDIShadingParameters GetDefaultReSTIRDIShadingParams()
 {
+  // Final visibility reuse trades a few shadow rays for stable direct-light shading.
   ReSTIRDIShadingParameters parameters{};
   parameters.enableFinalVisibility      = true;
   parameters.finalVisibilityMaxAge      = 4;
@@ -91,6 +96,7 @@ ReSTIRDIParameterContext::ReSTIRDIParameterContext(const ReSTIRDIStaticParameter
     , m_ShadingParameters(GetDefaultReSTIRDIShadingParams())
 {
   CheckStaticParameters(parameters);
+  // The shader masks random neighbor indices, so neighborOffsetCount must be a power of two.
   m_RuntimeParameters.neighborOffsetMask = m_StaticParameters.neighborOffsetCount - 1;
   UpdateBufferIndices();
 }
@@ -143,7 +149,9 @@ const ReSTIRDIStaticParameters& ReSTIRDIParameterContext::GetStaticParameters() 
 void ReSTIRDIParameterContext::SetFrameIndex(uint32_t frameIndex)
 {
   m_RuntimeParameters.frameIndex = frameIndex;
+  // Temporal permutation sampling needs a deterministic per-frame random integer.
   m_TemporalResamplingParameters.uniformRandomNumber = JenkinsHash(m_RuntimeParameters.frameIndex);
+  // Last-frame output becomes the history input for this frame.
   m_LastFrameOutputReservoir = m_CurrentFrameOutputReservoir;
   UpdateBufferIndices();
 }
@@ -167,6 +175,7 @@ void ReSTIRDIParameterContext::SetInitialSamplingParameters(const ReSTIRDIInitia
 void ReSTIRDIParameterContext::SetTemporalResamplingParameters(const ReSTIRDITemporalResamplingParameters& temporalResamplingParameters)
 {
   m_TemporalResamplingParameters = temporalResamplingParameters;
+  // Preserve the frame-derived permutation value after copying UI settings.
   m_TemporalResamplingParameters.uniformRandomNumber = JenkinsHash(m_RuntimeParameters.frameIndex);
 }
 
@@ -190,6 +199,7 @@ void ReSTIRDIParameterContext::UpdateBufferIndices()
   // Reservoir buffers rotate so this frame can read history and write a fresh candidate.
   m_BufferIndices.initialSamplingOutputBufferIndex = (m_LastFrameOutputReservoir + 1) % kReSTIRDIReservoirBufferCount;
   m_BufferIndices.temporalResamplingInputBufferIndex = m_LastFrameOutputReservoir;
+  // Temporal output is placed in a different array than the previous history input.
   m_BufferIndices.temporalResamplingOutputBufferIndex =
       (m_BufferIndices.temporalResamplingInputBufferIndex + 1) % kReSTIRDIReservoirBufferCount;
 
@@ -200,6 +210,7 @@ void ReSTIRDIParameterContext::UpdateBufferIndices()
       (m_BufferIndices.spatialResamplingInputBufferIndex + 1) % kReSTIRDIReservoirBufferCount;
   m_BufferIndices.shadingInputBufferIndex = useSpatialResampling ? m_BufferIndices.spatialResamplingOutputBufferIndex
                                                                  : m_BufferIndices.temporalResamplingOutputBufferIndex;
+  // The shading input becomes the previous-frame reservoir after FinishFrame advances.
   m_CurrentFrameOutputReservoir = m_BufferIndices.shadingInputBufferIndex;
 }
 

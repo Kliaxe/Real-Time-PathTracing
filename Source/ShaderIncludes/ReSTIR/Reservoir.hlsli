@@ -3,8 +3,12 @@
 
 #include "ReSTIR/Parameters.h"
 
-// This structure represents a single light reservoir that stores the weights, the sample ref,
-// sample count (M), and visibility for reuse. It can be serialized into ReSTIRPackedDIReservoir for storage.
+// Reservoir math for biased ReSTIR DI. The code separates streaming candidates,
+// combining reservoirs, and final normalization so initial, temporal, and
+// spatial passes can share the same mechanics.
+
+// This structure represents one light reservoir. It stores one selected sample
+// plus enough statistics to say how many candidates that sample represents.
 struct ReSTIRDIReservoir
 {
     // Light index (bits 0..30) and validity bit (31)
@@ -20,7 +24,8 @@ struct ReSTIRDIReservoir
     // Target PDF of the selected sample
     float targetPdf;
 
-    // Effective number of candidates represented by this reservoir.
+    // Effective number of candidates represented by this reservoir. This is
+    // the ReSTIR paper's M, not a matrix or material value.
     float M;
 
     // Visibility information stored in the reservoir for reuse
@@ -66,16 +71,18 @@ void StoreVisibilityInDIReservoir(
     float3 visibility,
     bool discardIfInvisible)
 {
+    // Pack RGB visibility into 6 bits per channel so it travels with the reservoir.
     reservoir.packedVisibility = uint(saturate(visibility.x) * ReSTIRPackedDIReservoirVisibilityChannelMax) 
         | (uint(saturate(visibility.y) * ReSTIRPackedDIReservoirVisibilityChannelMax)) << ReSTIRPackedDIReservoirVisibilityChannelShift
         | (uint(saturate(visibility.z) * ReSTIRPackedDIReservoirVisibilityChannelMax)) << (ReSTIRPackedDIReservoirVisibilityChannelShift * 2);
 
+    // Fresh visibility starts at the reservoir's current screen position.
     reservoir.spatialDistance = int2(0, 0);
     reservoir.age = 0;
 
     if (discardIfInvisible && visibility.x == 0 && visibility.y == 0 && visibility.z == 0)
     {
-        // Keep M for correct resampling, remove the actual sample
+        // Keep M for correct resampling, but remove the actual selected sample.
         reservoir.lightData = 0;
         reservoir.weightSum = 0;
     }
@@ -105,6 +112,7 @@ bool GetDIReservoirVisibility(
         reservoir.age <= params.maxAge &&
         length(float2(reservoir.spatialDistance)) < params.maxDistance)
     {
+        // Visibility is approximate, but useful enough to skip a new final shadow ray.
         o_visibility.x = float(reservoir.packedVisibility & ReSTIRPackedDIReservoirVisibilityChannelMax) / ReSTIRPackedDIReservoirVisibilityChannelMax;
         o_visibility.y = float((reservoir.packedVisibility >> ReSTIRPackedDIReservoirVisibilityChannelShift) & ReSTIRPackedDIReservoirVisibilityChannelMax) / ReSTIRPackedDIReservoirVisibilityChannelMax;
         o_visibility.z = float((reservoir.packedVisibility >> (ReSTIRPackedDIReservoirVisibilityChannelShift * 2)) & ReSTIRPackedDIReservoirVisibilityChannelMax) / ReSTIRPackedDIReservoirVisibilityChannelMax;
@@ -133,6 +141,7 @@ float2 GetDIReservoirSampleUv(const ReSTIRDIReservoir reservoir)
 
 float GetDIReservoirInvPdf(const ReSTIRDIReservoir reservoir)
 {
+    // After finalization, weightSum is the inverse PDF used by the shading estimator.
     return reservoir.weightSum;
 }
 
@@ -146,16 +155,16 @@ bool StreamDIReservoirSample(
     float targetPdf,
     float invSourcePdf)
 {
-    // What's the current weight
+    // RIS weight is target PDF divided by the PDF that produced this sample.
     float risWeight = targetPdf * invSourcePdf;
 
-    // Add one sample to the counter
+    // Count the candidate even if it does not become the selected sample.
     reservoir.M += 1;
 
-    // Update the weight sum
+    // The streaming weight sum is needed for final reservoir normalization.
     reservoir.weightSum += risWeight;
 
-    // Decide if we will randomly pick this sample
+    // Weighted reservoir sampling chooses the sample with probability proportional to its weight.
     bool selectSample = (random * reservoir.weightSum < risWeight);
 
     // If we did select this sample, update the relevant data.
@@ -177,21 +186,21 @@ bool InternalSimpleResample(
     inout ReSTIRDIReservoir reservoir,
     const ReSTIRDIReservoir newReservoir,
     float random,
-    float targetPdf RESTIR_DEFAULT(1.0f),            // Usually closely related to the sample normalization, 
-    float sampleNormalization RESTIR_DEFAULT(1.0f),  //     typically off by some multiplicative factor 
-    float sampleM RESTIR_DEFAULT(1.0f)               // In its most basic form, should be newReservoir.M
+    float targetPdf RESTIR_DEFAULT(1.0f),            // Target PDF of the reused sample at the current receiver.
+    float sampleNormalization RESTIR_DEFAULT(1.0f),  // Weight carried from the source reservoir or pass.
+    float sampleM RESTIR_DEFAULT(1.0f)               // Number of candidates represented by the source reservoir.
 )
 {
-    // What's the current weight (times any prior-step RIS normalization factor)
+    // Reused reservoirs arrive with a normalization factor from their source pass.
     float risWeight = targetPdf * sampleNormalization;
 
-    // Our *effective* candidate pool is the sum of our candidates plus those of our neighbors
+    // The effective candidate count grows by the represented sample count of the reused reservoir.
     reservoir.M += sampleM;
 
-    // Update the weight sum
+    // Keep accumulating stream weights until the caller runs final normalization.
     reservoir.weightSum += risWeight;
 
-    // Decide if we will randomly pick this sample
+    // The chosen representative can come from the center, temporal history, or a spatial neighbor.
     bool selectSample = (random * reservoir.weightSum < risWeight);
 
     // If we did select this sample, update the relevant data
@@ -233,8 +242,10 @@ void FinalizeDIResampling(
     float normalizationNumerator,
     float normalizationDenominator)
 {
+    // If the selected sample has zero target density at this receiver, it cannot contribute.
     float denominator = reservoir.targetPdf * normalizationDenominator;
 
+    // After finalization, weightSum stores the reservoir inverse PDF used in shading.
     reservoir.weightSum = (denominator == 0.0) ? 0.0 : (reservoir.weightSum * normalizationNumerator) / denominator;
 }
 

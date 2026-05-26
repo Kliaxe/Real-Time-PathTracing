@@ -41,6 +41,7 @@ void TransitionStorageImageForWrite(VkCommandBuffer cmd, nvvk::Image& image, VkP
 
   if(image.descriptor.imageLayout == VK_IMAGE_LAYOUT_GENERAL)
   {
+    // The image is already in the right layout, but this still orders previous writes before this pass.
     const VkImageMemoryBarrier2 imageBarrier{
         .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
@@ -77,6 +78,7 @@ void TransitionStorageImageForWrite(VkCommandBuffer cmd, nvvk::Image& image, VkP
       .imageMemoryBarrierCount = 1,
       .pImageMemoryBarriers    = &imageBarrier,
   };
+  // First use this frame moves the image into GENERAL so ray tracing shaders can write it.
   vkCmdPipelineBarrier2(cmd, &dependencyInfo);
   image.descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 }
@@ -122,6 +124,7 @@ void ReSTIRDIRenderer::Initialize()
     return;
   }
 
+  // Vulkan objects are created once; viewport-sized buffers are created later when a frame arrives.
   QueryRayTracingProperties();
   CreateDescriptorSetLayout();
   CreateParameterBuffers();
@@ -142,6 +145,7 @@ void ReSTIRDIRenderer::Destroy()
 
   VkDevice device = m_Allocator->getDevice();
 
+  // Destroy dependents before descriptor/pipeline layout state they were built against.
   m_NrdDenoiser.Destroy();
   m_DenoiserResources.Destroy();
   m_Resources.Destroy();
@@ -202,6 +206,7 @@ uint32_t ReSTIRDIRenderer::GetPipelineBounceLimit() const
 
 void ReSTIRDIRenderer::InvalidateHistory()
 {
+  // CPU-side flags are reset immediately; GPU buffers are cleared on the next command buffer.
   m_AccumulatedFrames   = 0;
   m_HistoryInvalidated  = true;
   m_HasAccumulationSignature = false;
@@ -240,6 +245,7 @@ void ReSTIRDIRenderer::Render(const RenderInput& input)
   FrameState frameState = BeginReSTIRFrame(input, viewportSize);
   PrepareDenoiser(input, frameState);
 
+  // The descriptor set index follows nvpro's frame cycle to avoid overwriting in-flight data.
   const uint32_t frameSetIndex = GetReSTIRDIFrameSetIndex(m_App->getFrameCycleIndex(), m_ParameterBuffers.size());
   UpdateParameterBuffer(frameSetIndex, BuildShaderParameters());
   UpdateFrameDescriptors(input);
@@ -247,6 +253,7 @@ void ReSTIRDIRenderer::Render(const RenderInput& input)
   ClearHistoryIfNeeded(input.cmd);
 
   const shaderio::ReSTIRDIPushConstant pushConstant = BuildPushConstant(input, frameState.denoiserSignalsNeeded);
+  // Push constants are small per-dispatch values; the larger ReSTIR settings live in the parameter buffer.
   RecordReSTIRPasses(input, pushConstant);
   RunDenoiserIfNeeded(input, frameState);
   FinishFrame(frameState);
@@ -270,6 +277,7 @@ void ReSTIRDIRenderer::EnsureViewportResources(VkExtent2D viewportSize)
 ReSTIRDIRenderer::FrameState ReSTIRDIRenderer::BeginReSTIRFrame(const RenderInput& input, VkExtent2D viewportSize)
 {
   FrameState frameState{};
+  // FrameState keeps all history decisions together so the frame finishes with the same assumptions.
   frameState.viewportSize            = viewportSize;
   frameState.denoiseEnabled          = IsDenoiseResolveMode(m_Settings.common.resolveMode);
   frameState.restirDebugActive       = m_Settings.common.debugView != shaderio::eReSTIRDebugViewDisabled;
@@ -288,6 +296,7 @@ ReSTIRDIRenderer::FrameState ReSTIRDIRenderer::BeginReSTIRFrame(const RenderInpu
   frameState.denoiserHistoryInvalidated = m_HistoryInvalidated || (frameState.denoiseEnabled && denoiserSignatureChanged);
   if(restirHistoryInvalidated)
   {
+    // Recreating the parameter context resets reservoir rotation to a known first-frame state.
     m_AccumulatedFrames = 0;
     m_FrameContext.InvalidateHistory();
     m_ParameterContext.reset();
@@ -323,7 +332,8 @@ shaderio::ReSTIRDIParameters ReSTIRDIRenderer::BuildShaderParameters()
   m_ParameterContext->SetTemporalResamplingParameters(m_Settings.temporalResampling);
   m_ParameterContext->SetSpatialResamplingParameters(m_Settings.spatialResampling);
   m_ParameterContext->SetShadingParameters(m_Settings.shading);
-  m_Settings.continuationMaxBounces = std::min(m_Settings.continuationMaxBounces, m_PipelineBounceLimit);
+  // The UI value cannot exceed the recursion depth supported by the current device/pipeline.
+  m_Settings.secondaryPathMaxBounces = std::min(m_Settings.secondaryPathMaxBounces, m_PipelineBounceLimit);
 
   return shaderio::ReSTIRDIParameters{
       .runtimeParams         = m_ParameterContext->GetRuntimeParameters(),
@@ -383,7 +393,7 @@ shaderio::ReSTIRDIPushConstant ReSTIRDIRenderer::BuildPushConstant(const RenderI
       .sceneInfoAddress       = (shaderio::GltfSceneInfo*)input.sceneResource->bSceneInfo.address,
       .accumulatedFrames      = IsAccumulationResolveMode(m_Settings.common.resolveMode) ? m_AccumulatedFrames : 0u,
       .flags                  = restirFlags,
-      .continuationMaxBounces = m_Settings.continuationMaxBounces,
+      .secondaryPathMaxBounces = m_Settings.secondaryPathMaxBounces,
       .debugView              = static_cast<uint32_t>(m_Settings.common.debugView),
   };
 }
@@ -399,6 +409,7 @@ void ReSTIRDIRenderer::RecordReSTIRPasses(const RenderInput& input, const shader
   VkPipelineStageFlags2 lastStage = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
   if(enableTemporal)
   {
+    // Initial sampling writes reservoirs/surfaces that temporal compute reads.
     nvvk::cmdMemoryBarrier(input.cmd, lastStage, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
     RunTemporalPass(input, pushConstant);
     lastStage = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
@@ -406,13 +417,16 @@ void ReSTIRDIRenderer::RecordReSTIRPasses(const RenderInput& input, const shader
 
   if(enableSpatial)
   {
+    // Spatial reuse consumes either the temporal result or the initial reservoir.
     nvvk::cmdMemoryBarrier(input.cmd, lastStage, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
     RunSpatialPass(input, pushConstant);
     lastStage = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
   }
 
+  // Final shading reads the chosen reservoir and writes the output/accumulation images.
   nvvk::cmdMemoryBarrier(input.cmd, lastStage, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
   RunFinalShadingPass(input, pushConstant);
+  // Leave the image writes visible to later post-processing or denoising work.
   nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 }
 
@@ -447,18 +461,21 @@ void ReSTIRDIRenderer::QueryRayTracingProperties()
 {
   VkPhysicalDeviceProperties2 props{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &m_RtProperties};
   vkGetPhysicalDeviceProperties2(m_Allocator->getPhysicalDevice(), &props);
+  // Vulkan recursion depth counts the primary ray, so secondary path bounces get one less.
   const uint32_t maxBounceLimit     = (m_RtProperties.maxRayRecursionDepth > 0) ? (m_RtProperties.maxRayRecursionDepth - 1u) : 0u;
   m_PipelineBounceLimit             = std::min(kRequestedMaxBounces, maxBounceLimit);
-  m_Settings.continuationMaxBounces = std::min(m_Settings.continuationMaxBounces, m_PipelineBounceLimit);
+  m_Settings.secondaryPathMaxBounces = std::min(m_Settings.secondaryPathMaxBounces, m_PipelineBounceLimit);
 }
 
 void ReSTIRDIRenderer::CreateDescriptorSetLayout()
 {
+  // One descriptor layout is shared by all ReSTIR passes so the pass sequence can reuse the same set.
   const VkShaderStageFlags allStages = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR
                                        | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR
                                        | VK_SHADER_STAGE_COMPUTE_BIT;
 
   nvvk::DescriptorBindings bindings;
+  // Textures use bindless-style indexing from material records.
   bindings.addBinding({.binding = shaderio::ReSTIRDIBindingPoints::eReSTIRDITextures,
                        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                        .descriptorCount = m_MaxTextureDescriptors,
@@ -466,9 +483,11 @@ void ReSTIRDIRenderer::CreateDescriptorSetLayout()
                       VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
                           | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDITlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, allStages);
+  // Storage images are written by final shading and optionally consumed by NRD.
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDIOutputImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDIAccumulationImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDILightReservoirBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+  // Surface buffers are ping-ponged for current/previous-frame temporal reuse.
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDICurrentSurfaceBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDIPreviousSurfaceBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDINeighborOffsetBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
@@ -489,6 +508,7 @@ void ReSTIRDIRenderer::CreateDescriptorSetLayout()
 
 void ReSTIRDIRenderer::CreatePipelineLayout()
 {
+  // Pipeline layout is the ABI between C++ descriptor sets/push constants and Slang bindings.
   const VkPushConstantRange pushConstantRange{
       .stageFlags = kReSTIRDIPushConstantStages,
       .offset     = 0,
@@ -514,6 +534,7 @@ void ReSTIRDIRenderer::CreateParameterBuffers()
 
   for(nvvk::Buffer& parameterBuffer : m_ParameterBuffers)
   {
+    // Mapped uniform buffers are updated once per frame set before recording the ReSTIR passes.
     NVVK_CHECK(m_Allocator->createBuffer(
         parameterBuffer, sizeof(shaderio::ReSTIRDIParameters), VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
         VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT));
@@ -523,21 +544,23 @@ void ReSTIRDIRenderer::CreateParameterBuffers()
 
 void ReSTIRDIRenderer::CreateInitialSamplingPipeline()
 {
-  CreateReSTIRDIRayTracingPass(m_Allocator, m_RtProperties, m_PipelineLayout, GetInitialSamplingShaderCode(), 2u, m_InitialSamplingPass);
+  CreateReSTIRDIRayTracingPass(m_Allocator, m_RtProperties, m_PipelineLayout, GetInitialSamplingShaderCode(), 2u,
+                               "ReSTIR DI Initial Sampling Pipeline", m_InitialSamplingPass);
 }
 
 void ReSTIRDIRenderer::CreateFinalShadingPipeline()
 {
   CreateReSTIRDIRayTracingPass(m_Allocator, m_RtProperties, m_PipelineLayout, GetFinalShadingShaderCode(),
-                             std::max(1u, m_PipelineBounceLimit + 1u), m_FinalShadingPass);
+                               std::max(1u, m_PipelineBounceLimit + 1u), "ReSTIR DI Final Shading Pipeline",
+                               m_FinalShadingPass);
 }
 
 void ReSTIRDIRenderer::CreateComputePipelines()
 {
   m_ComputePipelines[static_cast<size_t>(ComputePass::eTemporal)] =
-      CreateReSTIRDIComputePipeline(m_Allocator, m_PipelineLayout, GetTemporalShaderCode());
+      CreateReSTIRDIComputePipeline(m_Allocator, m_PipelineLayout, GetTemporalShaderCode(), "ReSTIR DI Temporal Pipeline");
   m_ComputePipelines[static_cast<size_t>(ComputePass::eSpatial)] =
-      CreateReSTIRDIComputePipeline(m_Allocator, m_PipelineLayout, GetSpatialShaderCode());
+      CreateReSTIRDIComputePipeline(m_Allocator, m_PipelineLayout, GetSpatialShaderCode(), "ReSTIR DI Spatial Pipeline");
 }
 
 void ReSTIRDIRenderer::EnsureParameterContext(VkExtent2D viewportSize)
@@ -552,6 +575,7 @@ void ReSTIRDIRenderer::EnsureParameterContext(VkExtent2D viewportSize)
     }
   }
 
+  // The reservoir addressing math depends on resolution and neighbor table size.
   const ReSTIRDIStaticParameters staticParameters{
       .neighborOffsetCount      = m_Resources.GetNeighborOffsetCount(),
       .renderWidth              = viewportSize.width,
@@ -567,6 +591,7 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
   const uint32_t currentHistoryIndex  = m_FrameContext.GetCurrentHistoryIndex();
   const uint32_t previousHistoryIndex = m_FrameContext.GetPreviousHistoryIndex();
 
+  // Descriptors describe the concrete images and buffers used by this frame.
   VkDescriptorImageInfo outputImageInfo = input.gBuffers->getDescriptorImageInfo(input.renderedImageIndex);
   outputImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
   VkDescriptorImageInfo accumulationImageInfo = m_Resources.GetAccumulationImage().descriptor;
@@ -585,7 +610,9 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
   specularRadianceHitDistanceImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
 
   std::array<VkDescriptorBufferInfo, 6> bufferInfos{
+      // Reservoir buffer contains all three logical reservoir arrays.
       VkDescriptorBufferInfo{m_Resources.GetLightReservoirBuffer().buffer, 0, VK_WHOLE_SIZE},
+      // Surface buffers are bound as current/previous according to frame parity.
       VkDescriptorBufferInfo{m_Resources.GetSurfaceBuffer(currentHistoryIndex).buffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{m_Resources.GetSurfaceBuffer(previousHistoryIndex).buffer, 0, VK_WHOLE_SIZE},
       VkDescriptorBufferInfo{m_Resources.GetNeighborOffsetBuffer().buffer, 0, VK_WHOLE_SIZE},
@@ -594,6 +621,7 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
   };
 
   VkAccelerationStructureKHR accel = input.topLevelAS->accel;
+  // TLAS descriptors are attached through pNext rather than pBufferInfo/pImageInfo.
   VkWriteDescriptorSetAccelerationStructureKHR accelerationInfo{
       .sType                      = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
       .accelerationStructureCount = 1,
@@ -603,6 +631,7 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
   std::array<VkWriteDescriptorSet, 15> writes{};
   uint32_t                            writeCount = 0;
 
+  // TLAS and output images are written individually because their descriptor types differ.
   writes[writeCount]       = m_DescPack.makeWrite(shaderio::ReSTIRDIBindingPoints::eReSTIRDITlas, frameSetIndex);
   writes[writeCount].pNext = &accelerationInfo;
   ++writeCount;
@@ -622,6 +651,7 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
       shaderio::ReSTIRDIBindingPoints::eReSTIRDINeighborOffsetBuffer,
   };
 
+  // The first four buffer infos line up with the first four buffer bindings above.
   for(size_t i = 0; i < bufferBindings.size(); ++i)
   {
     writes[writeCount]             = m_DescPack.makeWrite(bufferBindings[i], frameSetIndex);
@@ -653,6 +683,7 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
       &diffuseRadianceHitDistanceImageInfo,
       &specularRadianceHitDistanceImageInfo,
   };
+  // NRD guide images are always bound; final shading only writes them when the flag is enabled.
   for(size_t i = 0; i < imageBindings.size(); ++i)
   {
     writes[writeCount]            = m_DescPack.makeWrite(imageBindings[i], frameSetIndex);
@@ -665,6 +696,8 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
 
 void ReSTIRDIRenderer::ClearHistoryBuffers(VkCommandBuffer cmd)
 {
+  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(cmd, "ReSTIR DI Clear History");
+  // Zeroed reservoirs/surfaces make the first frame behave like there is no temporal history.
   vkCmdFillBuffer(cmd, m_Resources.GetLightReservoirBuffer().buffer, 0, m_Resources.GetLightReservoirBuffer().bufferSize, 0);
   vkCmdFillBuffer(cmd, m_Resources.GetSurfaceBuffer(0).buffer, 0, m_Resources.GetSurfaceBuffer(0).bufferSize, 0);
   vkCmdFillBuffer(cmd, m_Resources.GetSurfaceBuffer(1).buffer, 0, m_Resources.GetSurfaceBuffer(1).bufferSize, 0);
@@ -713,6 +746,7 @@ void ReSTIRDIRenderer::ClearHistoryBuffers(VkCommandBuffer cmd)
       },
   };
 
+  // Transfer writes from vkCmdFillBuffer must be visible before ray tracing/compute reads.
   const VkDependencyInfo dependencyInfo{
       .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
       .bufferMemoryBarrierCount = uint32_t(std::size(barriers)),
@@ -723,6 +757,7 @@ void ReSTIRDIRenderer::ClearHistoryBuffers(VkCommandBuffer cmd)
 
 void ReSTIRDIRenderer::RunInitialSamplingPass(const RenderInput& input, const shaderio::ReSTIRDIPushConstant& pushConstant)
 {
+  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR DI Initial Sampling");
   const uint32_t frameSetIndex = GetReSTIRDIFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
   TraceReSTIRDIRayTracingPass(input.cmd, m_InitialSamplingPass, m_PipelineLayout, *m_DescPack.getSetPtr(frameSetIndex),
                             kReSTIRDIPushConstantStages, pushConstant, input.gBuffers->getSize());
@@ -730,6 +765,7 @@ void ReSTIRDIRenderer::RunInitialSamplingPass(const RenderInput& input, const sh
 
 void ReSTIRDIRenderer::RunTemporalPass(const RenderInput& input, const shaderio::ReSTIRDIPushConstant& pushConstant)
 {
+  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR DI Temporal Resampling");
   const uint32_t frameSetIndex = GetReSTIRDIFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
   DispatchReSTIRDIComputePass(input.cmd, m_ComputePipelines[static_cast<size_t>(ComputePass::eTemporal)], m_PipelineLayout,
                             *m_DescPack.getSetPtr(frameSetIndex), kReSTIRDIPushConstantStages, pushConstant, input.gBuffers->getSize(),
@@ -738,6 +774,7 @@ void ReSTIRDIRenderer::RunTemporalPass(const RenderInput& input, const shaderio:
 
 void ReSTIRDIRenderer::RunSpatialPass(const RenderInput& input, const shaderio::ReSTIRDIPushConstant& pushConstant)
 {
+  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR DI Spatial Resampling");
   const uint32_t frameSetIndex = GetReSTIRDIFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
   DispatchReSTIRDIComputePass(input.cmd, m_ComputePipelines[static_cast<size_t>(ComputePass::eSpatial)], m_PipelineLayout,
                             *m_DescPack.getSetPtr(frameSetIndex), kReSTIRDIPushConstantStages, pushConstant, input.gBuffers->getSize(),
@@ -746,6 +783,7 @@ void ReSTIRDIRenderer::RunSpatialPass(const RenderInput& input, const shaderio::
 
 void ReSTIRDIRenderer::RunFinalShadingPass(const RenderInput& input, const shaderio::ReSTIRDIPushConstant& pushConstant)
 {
+  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR DI Final Shading");
   const uint32_t frameSetIndex = GetReSTIRDIFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
   TraceReSTIRDIRayTracingPass(input.cmd, m_FinalShadingPass, m_PipelineLayout, *m_DescPack.getSetPtr(frameSetIndex),
                             kReSTIRDIPushConstantStages, pushConstant, input.gBuffers->getSize());
@@ -758,6 +796,7 @@ void ReSTIRDIRenderer::UpdateParameterBuffer(uint32_t frameSetIndex, const shade
     return;
   }
 
+  // Host writes to the mapped uniform buffer are flushed before command recording uses it.
   nvvk::Buffer& parameterBuffer = m_ParameterBuffers[frameSetIndex];
   std::memcpy(parameterBuffer.mapping, &parameters, sizeof(parameters));
   NVVK_CHECK(m_Allocator->flushBuffer(parameterBuffer, 0, sizeof(parameters)));

@@ -1,6 +1,10 @@
 #ifndef RESTIR_PARAMETERS_H
 #define RESTIR_PARAMETERS_H
 
+// CPU/Slang shared parameter layout for ReSTIR DI. Keep this file plain C-like:
+// it is included by C++ and shader code, so every field must stay ABI-stable
+// and explicitly padded when needed.
+
 #ifdef __cplusplus
 #include <stdint.h>
 #else

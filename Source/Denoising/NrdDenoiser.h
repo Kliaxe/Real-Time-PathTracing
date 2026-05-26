@@ -13,17 +13,7 @@
 #include "nvvk/resource_allocator.hpp"
 #include "nvvk/resources.hpp"
 
-#ifdef THESIS_ENABLE_NRD
 #include <NRD.h>
-#else
-namespace nrd
-{
-struct DispatchDesc;
-enum class ResourceType : uint32_t;
-enum class DescriptorType : uint32_t;
-enum class Format : uint32_t;
-}
-#endif
 
 namespace nvapp
 {
@@ -115,11 +105,9 @@ private:
   void TransitionImageToGeneral(VkCommandBuffer cmd, nvvk::Image& image, VkPipelineStageFlags2 dstStageMask) const;
   void InsertComputeBarrier(VkCommandBuffer cmd) const;
 
-#ifdef THESIS_ENABLE_NRD
   static VkDescriptorType ToVkDescriptorType(nrd::DescriptorType descriptorType);
   static VkFormat ToVkFormat(nrd::Format format);
   static void     CopyMatrix(glm::mat4 matrix, float (&destination)[16]);
-#endif
 
   nvapp::Application*      m_App       = nullptr;
   nvvk::ResourceAllocator* m_Allocator = nullptr;
@@ -144,7 +132,6 @@ private:
   std::vector<nvvk::Image> m_PermanentPoolImages;
   std::vector<nvvk::Image> m_TransientPoolImages;
 
-#ifdef THESIS_ENABLE_NRD
   static constexpr nrd::Identifier kDenoiserIdentifier = 1u;
 
   const nrd::LibraryDesc*  m_LibraryDesc  = nullptr;
@@ -156,7 +143,6 @@ private:
   bool                     m_HasPreviousMatrices = false;
   glm::mat4                m_PreviousViewMatrix{1.0f};
   glm::mat4                m_PreviousProjectionMatrix{1.0f};
-#endif
 };
 
 }  // namespace nvsamples

@@ -20,6 +20,8 @@ constexpr VkFormat kAccumulationFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
 
 std::array<shaderio::ReSTIRNeighborOffset, 16> CreateDefaultNeighborOffsets()
 {
+  // Fixed low-discrepancy pattern used by the spatial reuse pass. The shader
+  // rotates the starting index per pixel so this table can stay small.
   return {{
       {{-0.94201624f, -0.39906216f}, {0.0f, 0.0f}},
       {{0.94558609f, -0.76890725f}, {0.0f, 0.0f}},
@@ -50,6 +52,7 @@ ReSTIRDIResources::ReSTIRDIResources(const CreateInfo& createInfo)
 
 void ReSTIRDIResources::Destroy()
 {
+  // Destroy is used during full renderer shutdown where no submitted work should still reference these resources.
   for(nvvk::Buffer& surfaceBuffer : m_SurfaceBuffers)
   {
     m_Allocator->destroyBuffer(surfaceBuffer);
@@ -74,6 +77,7 @@ void ReSTIRDIResources::EnsureForViewport(VkExtent2D viewportSize)
 {
   if(m_NeighborOffsetBuffer.buffer == VK_NULL_HANDLE)
   {
+    // Neighbor offsets do not depend on resolution, so create them once.
     CreateNeighborOffsetBuffer();
   }
 
@@ -92,6 +96,7 @@ const nvvk::Buffer& ReSTIRDIResources::GetLightReservoirBuffer() const
 
 const nvvk::Buffer& ReSTIRDIResources::GetSurfaceBuffer(uint32_t historyIndex) const
 {
+  // Current/previous surfaces are ping-ponged by frame parity.
   return m_SurfaceBuffers[historyIndex & 1u];
 }
 
@@ -125,6 +130,7 @@ void ReSTIRDIResources::CreateNeighborOffsetBuffer()
   const auto offsets = CreateDefaultNeighborOffsets();
   m_NeighborOffsetCount = static_cast<uint32_t>(offsets.size());
 
+  // Host-visible upload is fine here because the table is tiny and immutable.
   NVVK_CHECK(m_Allocator->createBuffer(
       m_NeighborOffsetBuffer, sizeof(shaderio::ReSTIRNeighborOffset) * offsets.size(), VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT,
       VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
@@ -132,7 +138,7 @@ void ReSTIRDIResources::CreateNeighborOffsetBuffer()
 
   std::memcpy(m_NeighborOffsetBuffer.mapping, offsets.data(), sizeof(shaderio::ReSTIRNeighborOffset) * offsets.size());
   NVVK_CHECK(m_Allocator->flushBuffer(m_NeighborOffsetBuffer, 0, sizeof(shaderio::ReSTIRNeighborOffset) * offsets.size()));
-  NVVK_DBG_NAME(m_NeighborOffsetBuffer.buffer);
+  nvvk::DebugUtil::getInstance().setObjectName(m_NeighborOffsetBuffer.buffer, "ReSTIRDINeighborOffsetBuffer");
 }
 
 void ReSTIRDIResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
@@ -145,11 +151,14 @@ void ReSTIRDIResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
   if(m_ViewportSize.width == viewportSize.width && m_ViewportSize.height == viewportSize.height
      && m_LightReservoirBuffer.buffer != VK_NULL_HANDLE)
   {
+    // Existing buffers already match the current resolution.
     return;
   }
 
+  // The shader uses this layout to address packed reservoir arrays.
   m_ReservoirBufferParameters = CalculateReservoirBufferParameters(viewportSize.width, viewportSize.height);
 
+  // One reservoir buffer contains all rotating reservoir arrays.
   const VkDeviceSize reservoirElementCount =
       VkDeviceSize(m_ReservoirBufferParameters.reservoirArrayPitch) * VkDeviceSize(kReSTIRDIReservoirBufferCount);
   const VkDeviceSize reservoirBufferSize = reservoirElementCount * sizeof(ReSTIRPackedDIReservoir);
@@ -157,6 +166,7 @@ void ReSTIRDIResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
   const VkDeviceSize surfaceBufferSize   = pixelCount * sizeof(shaderio::ReSTIRDISurface);
   const VkDeviceSize debugBufferSize     = pixelCount * sizeof(shaderio::ReSTIRDebugPixel);
 
+  // Old viewport resources may still be referenced by submitted frames, so defer destruction.
   for(nvvk::Buffer& surfaceBuffer : m_SurfaceBuffers)
   {
     ScheduleBufferDestroy(surfaceBuffer);
@@ -167,14 +177,13 @@ void ReSTIRDIResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
   ScheduleImageDestroy(m_AccumulationImage);
 
   m_ViewportSize = viewportSize;
-  for(nvvk::Buffer& surfaceBuffer : m_SurfaceBuffers)
-  {
-    surfaceBuffer = CreateStorageBuffer(surfaceBufferSize, "ReSTIRDISurfaceBuffer");
-  }
+  m_SurfaceBuffers[0] = CreateStorageBuffer(surfaceBufferSize, "ReSTIRDISurfaceHistory0Buffer");
+  m_SurfaceBuffers[1] = CreateStorageBuffer(surfaceBufferSize, "ReSTIRDISurfaceHistory1Buffer");
 
   m_LightReservoirBuffer = CreateStorageBuffer(reservoirBufferSize, "ReSTIRDILightReservoirBuffer");
   m_DebugBuffer          = CreateStorageBuffer(debugBufferSize, "ReSTIRDIDebugBuffer");
 
+  // The accumulation image stores HDR radiance before tonemapping/denoising.
   VkImageCreateInfo imageInfo{
       .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType     = VK_IMAGE_TYPE_2D,
@@ -196,6 +205,8 @@ void ReSTIRDIResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
   };
 
   NVVK_CHECK(m_Allocator->createImage(m_AccumulationImage, imageInfo, viewInfo));
+  nvvk::DebugUtil::getInstance().setObjectName(m_AccumulationImage.image, "ReSTIRDIAccumulationImage");
+  nvvk::DebugUtil::getInstance().setObjectName(m_AccumulationImage.descriptor.imageView, "ReSTIRDIAccumulationImageView");
   m_AccumulationImage.descriptor.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   m_AccumulationImage.descriptor.sampler     = VK_NULL_HANDLE;
 }
@@ -207,6 +218,7 @@ void ReSTIRDIResources::ScheduleBufferDestroy(nvvk::Buffer buffer)
     return;
   }
 
+  // nvpro runs this callback only when it is safe to free resources used by previous submissions.
   nvvk::ResourceAllocator* allocator = m_Allocator;
   m_App->submitResourceFree([allocator, buffer]() mutable {
     if(allocator != nullptr)
@@ -234,11 +246,11 @@ void ReSTIRDIResources::ScheduleImageDestroy(nvvk::Image image)
 
 nvvk::Buffer ReSTIRDIResources::CreateStorageBuffer(VkDeviceSize size, const char* debugName) const
 {
-  (void)debugName;
   nvvk::Buffer buffer;
+  // Device-local storage buffers are written by GPU passes and occasionally cleared by transfer.
   NVVK_CHECK(m_Allocator->createBuffer(buffer, size, VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
                                        VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE));
-  NVVK_DBG_NAME(buffer.buffer);
+  nvvk::DebugUtil::getInstance().setObjectName(buffer.buffer, debugName);
   return buffer;
 }
 

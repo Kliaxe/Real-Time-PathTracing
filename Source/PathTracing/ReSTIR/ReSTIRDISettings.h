@@ -12,8 +12,11 @@ namespace nvsamples
 // User-facing switches for the whole ReSTIR DI renderer.
 struct ReSTIRDICommonSettings
 {
+  // Resolve mode decides whether the output is raw, accumulated, or denoised.
   RenderResolveMode          resolveMode    = RenderResolveMode::eOff;
+  // Resampling mode controls which ReSTIR reuse passes are recorded.
   ReSTIRDIResamplingMode     resamplingMode = ReSTIRDIResamplingMode::eTemporalAndSpatial;
+  // ReSTIR debug views replace the beauty image before denoising.
   shaderio::ReSTIRDebugView debugView         = shaderio::eReSTIRDebugViewDisabled;
   DenoiserDebugView         denoiserDebugView = DenoiserDebugView::eFinal;
   DenoiserSettings          denoiserSettings{};
@@ -43,11 +46,13 @@ inline ReSTIRDIShadingParameters GetDefaultReSTIRDIShadingParameters()
 struct ReSTIRDISettings
 {
   ReSTIRDICommonSettings              common;
+  // These parameter structs are shared with Slang through ShaderIo/ReSTIR headers.
   ReSTIRDIInitialSamplingParameters   initialSampling   = GetDefaultReSTIRDIInitialSamplingParameters();
   ReSTIRDITemporalResamplingParameters temporalResampling = GetDefaultReSTIRDITemporalParameters();
   ReSTIRDISpatialResamplingParameters spatialResampling = GetDefaultReSTIRDISpatialParameters();
   ReSTIRDIShadingParameters           shading           = GetDefaultReSTIRDIShadingParameters();
-  uint32_t                            continuationMaxBounces = 3u;
+  // ReSTIR handles direct lighting; extra path bounces are traced during final shading.
+  uint32_t                            secondaryPathMaxBounces = 3u;
 };
 
 }  // namespace nvsamples

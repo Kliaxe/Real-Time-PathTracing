@@ -3,8 +3,13 @@
 
 #include "ShaderIncludes/ReSTIR/Common.h.slang"
 
+// Debug views are written opportunistically by the ReSTIR passes and resolved
+// during final shading. They are intentionally side-band data: changing debug
+// modes should not change reservoir contents.
+
 ReSTIRDebugPixel MakeDefaultDebugPixel()
 {
+  // Zeroed debug pixels keep disabled or untouched views black/neutral.
   return (ReSTIRDebugPixel)0;
 }
 
@@ -28,6 +33,7 @@ void WriteReSTIRDebugPixel(uint pixelIndex,
     return;
   }
 
+  // Store numeric debug facts first; color mapping happens only in final shading.
   ReSTIRDebugPixel debugPixel = MakeDefaultDebugPixel();
   debugPixel.targetPdf        = targetPdf;
   debugPixel.reservoirWeight  = reservoirWeight;
@@ -42,6 +48,7 @@ void WriteReSTIRDebugPixel(uint pixelIndex,
 
 float3 GetShiftStatusDebugColor(uint status)
 {
+  // Status colors are stable across temporal and spatial debug views.
   if(status == uint(ReSTIRShiftStatus::eReSTIRShiftStatusAccepted))
     return float3(0.15, 0.9, 0.25);
   if(status == uint(ReSTIRShiftStatus::eReSTIRShiftStatusRejectedNoHistory))
@@ -66,20 +73,24 @@ float3 VisualizeReSTIRDebugPixel(ReSTIRDebugPixel debugPixel,
 
   if(debugView == uint(ReSTIRDebugView::eReSTIRDebugViewCandidateKind))
   {
+    // Candidate kind uses a method-specific tag color supplied by the DI bridge.
     return methodTagColor;
   }
   if(debugView == uint(ReSTIRDebugView::eReSTIRDebugViewTargetPdf))
   {
+    // Log scaling keeps bright target PDFs readable without clipping everything else.
     const float value = saturate(log2(debugPixel.targetPdf + 1.0) / 8.0);
     return float3(value, value, value);
   }
   if(debugView == uint(ReSTIRDebugView::eReSTIRDebugViewReservoirWeight))
   {
+    // Reservoir weight is already an inverse-PDF style value after finalization.
     const float value = saturate(debugPixel.reservoirWeight * 0.25);
     return float3(value, value, value);
   }
   if(debugView == uint(ReSTIRDebugView::eReSTIRDebugViewReservoirAge))
   {
+    // Age view makes temporal history visible as a warm color ramp.
     const float value = saturate(float(debugPixel.reservoirAge) / max(maxHistoryLength, 1.0));
     return lerp(float3(0.05, 0.1, 0.2), float3(0.95, 0.85, 0.25), value);
   }
@@ -93,27 +104,31 @@ float3 VisualizeReSTIRDebugPixel(ReSTIRDebugPixel debugPixel,
   }
   if(debugView == uint(ReSTIRDebugView::eReSTIRDebugViewShiftJacobian))
   {
+    // Green means stretched shift, red means compressed shift.
     const float value = saturate(abs(log2(max(debugPixel.shiftJacobian, 1.0e-5))) / 6.0);
     return debugPixel.shiftJacobian >= 1.0 ? lerp(float3(0.1, 0.1, 0.1), float3(0.15, 0.95, 0.25), value)
                                            : lerp(float3(0.1, 0.1, 0.1), float3(0.95, 0.25, 0.2), value);
   }
   if(debugView == uint(ReSTIRDebugView::eReSTIRDebugViewDepthDisocclusion))
   {
+    // Depth disocclusion is drawn later because it needs current surface data.
     return fallbackColor;
   }
 
+  // Default debug view visualizes how many candidates a reservoir represents.
   const float reuse = saturate(debugPixel.reuseCount / 8.0);
   return lerp(float3(0.05, 0.05, 0.08), float3(0.15, 0.8, 0.95), reuse);
 }
 
 uint DIGetReservoirDebugTag(ReSTIRDIReservoir reservoir)
 {
+  // Candidate-kind debug view follows the selected reservoir light.
   if(!IsValidDIReservoir(reservoir))
   {
     return kReSTIRDILightKindInvalid;
   }
 
-  return DILoadLightInfo(GetDIReservoirLightIndex(reservoir), false).kind;
+  return DILoadLightInfo(GetDIReservoirLightIndex(reservoir)).kind;
 }
 
 float3 GetDILightKindDebugColor(uint lightKind)
@@ -148,6 +163,7 @@ float3 VisualizeReSTIRDIDebug(uint pixelIndex, float3 fallbackColor)
     return fallbackColor;
   }
 
+  // The active debug view decides how to turn stored facts into final color.
   const ReSTIRDebugPixel debugPixel = debugBuffer[pixelIndex];
   const float maxAge = max(float(diParams.temporalResampling.maxHistoryLength), float(diParams.shading.finalVisibilityMaxAge));
   return VisualizeReSTIRDebugPixel(debugPixel, pushConst.debugView, maxAge, fallbackColor,

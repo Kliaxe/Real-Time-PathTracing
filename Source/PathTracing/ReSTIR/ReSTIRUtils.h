@@ -10,6 +10,7 @@ namespace nvsamples
 ReSTIRReservoirBufferParameters CalculateReservoirBufferParameters(uint32_t renderWidth, uint32_t renderHeight);
 
 // Stable integer hash used to decorrelate per-frame ReSTIR sampling.
+// The result feeds temporal permutation sampling.
 uint32_t JenkinsHash(uint32_t a);
 
 }  // namespace nvsamples

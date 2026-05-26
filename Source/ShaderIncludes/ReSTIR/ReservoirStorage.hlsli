@@ -3,15 +3,12 @@
 
 #include "ReSTIR/Reservoir.hlsli"
 
-// Define this macro to 0 if your shader needs read-only access to the reservoirs,
-// to avoid compile errors in the StoreDIReservoir function
-#ifndef RESTIR_ENABLE_STORE_RESERVOIR
-#define RESTIR_ENABLE_STORE_RESERVOIR 1
-#endif
-
 #ifndef RESTIR_LIGHT_RESERVOIR_BUFFER
 #error "RESTIR_LIGHT_RESERVOIR_BUFFER must be defined to point to a RWStructuredBuffer<ReSTIRPackedDIReservoir> type resource"
 #endif
+
+// Storage helpers for the three reservoir arrays owned by ReSTIRDIResources.
+// The CPU builds the matching block-linear pitches in ReSTIRDIParameterContext.
 
 // Encoding helper constants for ReSTIRPackedDIReservoir.distanceAge
 static const uint ReSTIRPackedDIReservoirDistanceChannelBits = 8;
@@ -24,6 +21,7 @@ static const  int ReSTIRPackedDIReservoirMaxDistance = int((1u << (ReSTIRPackedD
 
 uint2 PixelPosToReservoirPos(uint2 pixelPosition)
 {
+    // Reservoirs currently use one storage entry per screen pixel.
     return pixelPosition;
 }
 
@@ -32,6 +30,7 @@ uint ReservoirPositionToPointer(
     uint2 reservoirPosition,
     uint reservoirArrayIndex)
 {
+    // Block-linear addressing keeps nearby pixels close in memory for spatial reuse.
     uint2 blockIdx = reservoirPosition / RESTIR_RESERVOIR_BLOCK_SIZE;
     uint2 positionInBlock = reservoirPosition % RESTIR_RESERVOIR_BLOCK_SIZE;
 
@@ -44,6 +43,7 @@ uint ReservoirPositionToPointer(
 
 void ApplyPermutationSampling(inout int2 prevPixelPos, uint uniformRandomNumber)
 {
+    // Permutation sampling rotates 4x4 pixel groups to reduce temporal reuse correlation.
     int2 offset = int2(uniformRandomNumber & 3, (uniformRandomNumber >> 2) & 3);
     prevPixelPos += offset;
 
@@ -55,6 +55,7 @@ void ApplyPermutationSampling(inout int2 prevPixelPos, uint uniformRandomNumber)
 
 ReSTIRPackedDIReservoir PackDIReservoir(const ReSTIRDIReservoir reservoir)
 {
+    // Clamp side-band visibility metadata to the compact packed representation.
     int2 clampedSpatialDistance = clamp(reservoir.spatialDistance, -ReSTIRPackedDIReservoirMaxDistance, ReSTIRPackedDIReservoirMaxDistance);
     uint clampedAge = clamp(reservoir.age, 0, ReSTIRPackedDIReservoirMaxAge);
 
@@ -65,6 +66,7 @@ ReSTIRPackedDIReservoir PackDIReservoir(const ReSTIRDIReservoir reservoir)
     data.mVisibility = reservoir.packedVisibility
         | (min(uint(reservoir.M), ReSTIRPackedDIReservoirMaxM) << ReSTIRPackedDIReservoirMShift);
 
+    // Distance is stored as signed 8-bit fields and age as an unsigned 8-bit field.
     data.distanceAge =
           ((clampedSpatialDistance.x & ReSTIRPackedDIReservoirDistanceMask) << ReSTIRPackedDIReservoirDistanceXShift)
         | ((clampedSpatialDistance.y & ReSTIRPackedDIReservoirDistanceMask) << ReSTIRPackedDIReservoirDistanceYShift)
@@ -76,20 +78,20 @@ ReSTIRPackedDIReservoir PackDIReservoir(const ReSTIRDIReservoir reservoir)
     return data;
 }
 
-#if RESTIR_ENABLE_STORE_RESERVOIR
 void StoreDIReservoir(
     const ReSTIRDIReservoir reservoir,
     ReSTIRReservoirBufferParameters reservoirParams,
     uint2 reservoirPosition,
     uint reservoirArrayIndex)
 {
+    // Storage always goes through the same packed layout used by all ReSTIR passes.
     uint pointer = ReservoirPositionToPointer(reservoirParams, reservoirPosition, reservoirArrayIndex);
     RESTIR_LIGHT_RESERVOIR_BUFFER[pointer] = PackDIReservoir(reservoir);
 }
-#endif // RESTIR_ENABLE_STORE_RESERVOIR
 
 ReSTIRDIReservoir UnpackDIReservoir(ReSTIRPackedDIReservoir data)
 {
+    // Unpack the compact GPU representation back into the algorithm-friendly form.
     ReSTIRDIReservoir res;
     res.lightData = data.lightData;
     res.uvData = data.uvData;
@@ -97,12 +99,12 @@ ReSTIRDIReservoir UnpackDIReservoir(ReSTIRPackedDIReservoir data)
     res.weightSum = data.weight;
     res.M = (data.mVisibility >> ReSTIRPackedDIReservoirMShift) & ReSTIRPackedDIReservoirMaxM;
     res.packedVisibility = data.mVisibility & ReSTIRPackedDIReservoirVisibilityMask;
-    // Sign extend the shift values
+    // Sign extend the packed 8-bit spatial offsets back to int values.
     res.spatialDistance.x = int(data.distanceAge << (32 - ReSTIRPackedDIReservoirDistanceXShift - ReSTIRPackedDIReservoirDistanceChannelBits)) >> (32 - ReSTIRPackedDIReservoirDistanceChannelBits);
     res.spatialDistance.y = int(data.distanceAge << (32 - ReSTIRPackedDIReservoirDistanceYShift - ReSTIRPackedDIReservoirDistanceChannelBits)) >> (32 - ReSTIRPackedDIReservoirDistanceChannelBits);
     res.age = (data.distanceAge >> ReSTIRPackedDIReservoirAgeShift) & ReSTIRPackedDIReservoirMaxAge;
 
-    // Discard reservoirs that have Inf/NaN
+    // Discard reservoirs that have Inf/NaN before they can poison later reuse.
     if (isinf(res.weightSum) || isnan(res.weightSum)) {
         res = EmptyDIReservoir();
     }
@@ -115,6 +117,7 @@ ReSTIRDIReservoir LoadDIReservoir(
     uint2 reservoirPosition,
     uint reservoirArrayIndex)
 {
+    // Every pass chooses which reservoir array to read through reservoirArrayIndex.
     uint pointer = ReservoirPositionToPointer(reservoirParams, reservoirPosition, reservoirArrayIndex);
     return UnpackDIReservoir(RESTIR_LIGHT_RESERVOIR_BUFFER[pointer]);
 }

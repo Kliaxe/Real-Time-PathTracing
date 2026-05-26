@@ -172,7 +172,7 @@ struct GltfSceneInfo
 {
   float4x4               viewProjMatrix;     // View-projection matrix
   float4x4               viewMatrix;         // View matrix used for camera-space guide-buffer reconstruction
-  float4x4               projInvMatrix;      // Historical name: stores the inverse view-projection matrix for shared camera-ray reconstruction
+  float4x4               viewProjInvMatrix;      // Inverse view-projection matrix for shared camera-ray reconstruction
   float4x4               viewInvMatrix;      // Inverse view matrix
   float4x4               prevViewProjMatrix; // Previous frame view-projection matrix for temporal reprojection
   float4x4               prevViewMatrix;     // Previous frame view matrix used for screen-space motion reprojection
@@ -211,7 +211,3 @@ CHECK_STRUCT_ALIGNMENT(GltfSceneInfo)
 NAMESPACE_SHADERIO_END()
 
 #endif  // IO_GLTF_H
-
-
-
-

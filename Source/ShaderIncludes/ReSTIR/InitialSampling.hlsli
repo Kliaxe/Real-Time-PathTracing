@@ -2,7 +2,12 @@
 #define INITIAL_SAMPLING_FUNCTIONS_HLSLI
 
 #include "ReSTIR/Parameters.h"
+#include "ReSTIR/Random.hlsli"
 #include "ReSTIR/Reservoir.hlsli"
+
+// Initial candidate generation for ReSTIR DI. This pass streams local-light,
+// environment, and optional BRDF-hit candidates into one reservoir for the
+// current primary surface.
 
 #define RESTIR_DI_STRATIFY_LOCAL_SAMPLING 1
 
@@ -24,12 +29,14 @@ DIInitialSamplingMisData ComputeEffectiveInitialSamplingMisData(
 {
     DIInitialSamplingMisData result;
 
+    // Disable a sampling family automatically if the scene has no lights for it.
     const uint effectiveLocalLightSamples =
         lightBufferParams.localLightBufferRegion.numLights > 0 ? initialSamplingParams.numLocalLightSamples : 0u;
     const uint effectiveEnvironmentSamples =
         lightBufferParams.environmentLightParams.lightPresent != 0 ? initialSamplingParams.numEnvironmentSamples : 0u;
     const uint effectiveBrdfSamples = initialSamplingParams.numBrdfSamples;
 
+    // The MIS weights describe how much of the candidate budget each family owns.
     result.numMisSamples = max(1u, effectiveLocalLightSamples + effectiveEnvironmentSamples + effectiveBrdfSamples);
     result.localLightMisWeight = float(effectiveLocalLightSamples) / float(result.numMisSamples);
     result.environmentMapMisWeight = float(effectiveEnvironmentSamples) / float(result.numMisSamples);
@@ -41,6 +48,7 @@ DIInitialSamplingMisData ComputeEffectiveInitialSamplingMisData(
 // Heuristic to determine a max visibility ray length from a PDF wrt. solid angle.
 float ComputeBrdfMaxDistanceFromPdf(float brdfCutoff, float pdf)
 {
+    // BRDF candidate rays can be shortened when their PDF is too small to matter.
     const float kRayTMax = 3.402823466e+38F; // FLT_MAX
     return brdfCutoff > 0.f ? sqrt((1.f / brdfCutoff - 1.f) * pdf) : kRayTMax;
 }
@@ -52,6 +60,7 @@ float ComputeLightBrdfMisWeight(DISurface surface, DILightSample lightSample,
     float lightSelectionPdf, float lightMisWeight, bool isEnvironmentMap,
     float brdfMisWeight, float brdfCutoff)
 {
+    // Invalid light PDFs cannot participate in light/BRDF MIS.
     float lightSolidAnglePdf = DIGetLightSampleSolidAnglePdf(lightSample);
     if (brdfMisWeight == 0 || DIIsAnalyticLightSample(lightSample) ||
         lightSolidAnglePdf <= 0 || isinf(lightSolidAnglePdf) || isnan(lightSolidAnglePdf))
@@ -104,12 +113,15 @@ void SelectNextLocalLight(
     out float invSourcePdf)
 {
     const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
+
+    // The CPU builds a power-weighted CDF over emissive triangles.
     const uint localLightIndex = BinarySearchCdf(sceneInfo.emissiveTriangleCdf, ctx.lightBufferRegion.numLights, saturate(rnd));
     lightIndex = ctx.lightBufferRegion.firstLightIndex + localLightIndex;
 
     const float sourcePdf = DIEvaluateLocalLightSourcePdf(lightIndex);
+    // Reservoir streaming wants 1/sourcePdf because the RIS weight is targetPdf/sourcePdf.
     invSourcePdf = sourcePdf > 0.0 ? (1.0 / sourcePdf) : 0.0;
-    lightInfo = DILoadLightInfo(lightIndex, false);
+    lightInfo = DILoadLightInfo(lightIndex);
 }
 
 float2 SelectLocalLightUv(inout ReSTIRRandomSamplerState rng)
@@ -133,6 +145,9 @@ bool StreamLocalLightAtUvIntoReservoir(
     inout DILightSample o_selectedSample)
 {
     DILightSample candidateSample = DISampleLight(lightInfo, surface, uv);
+
+    // Blend the explicit light-sampling PDF with the chance that a BRDF ray
+    // could have found the same point.
     float blendedSourcePdf = ComputeLightBrdfMisWeight(surface, candidateSample, 1.0 / invSourcePdf,
         misData.localLightMisWeight, false, misData.brdfMisWeight, brdfCutoff);
     float targetPdf = DIGetLightSampleTargetPdf(candidateSample, surface);
@@ -145,6 +160,7 @@ bool StreamLocalLightAtUvIntoReservoir(
     bool selected = StreamDIReservoirSample(state, lightIndex, uv, risRnd, targetPdf, 1.0 / blendedSourcePdf);
 
     if (selected) {
+        // Keep the full sample around for optional initial visibility.
         o_selectedSample = candidateSample;
     }
     return true;
@@ -170,6 +186,8 @@ ReSTIRDIReservoir SampleLocalLightsInternal(
 
         float rnd = GetNextRandom(rng);
 #if RESTIR_DI_STRATIFY_LOCAL_SAMPLING
+        // Stratification spreads local-light choices across the CDF instead of
+        // letting all candidates cluster in one random interval.
         rnd = (rnd + i) / sampleParams.numLocalLightSamples;
 #endif // RESTIR_DI_STRATIFY_LOCAL_SAMPLING
 
@@ -226,6 +244,7 @@ void StreamEnvironmentLightIntoReservoir(
         if(sceneInfo.useHdrEnv != 0 && sceneInfo.environmentTextureIndex >= 0 && sceneInfo.environmentWidth > 0
            && sceneInfo.environmentHeight > 0)
         {
+            // Sample the HDRI CDF built on the CPU, then jitter within the chosen texel.
             const uint texelCount = sceneInfo.environmentWidth * sceneInfo.environmentHeight;
             const uint index = BinarySearchCdf(sceneInfo.environmentCdf, texelCount, GetNextRandom(rng));
             const uint x = index % sceneInfo.environmentWidth;
@@ -234,6 +253,8 @@ void StreamEnvironmentLightIntoReservoir(
         }
         else
         {
+            // Sky/background fallback has no texture CDF, so use cosine sampling
+            // around the receiver normal.
             float pdf = 0.0;
             const float3 sampledDirection = SampleCosineHemisphereDirection(surface.shadingNormal, frac(uv), pdf);
             uv = dirToLatLongUv(sampledDirection);
@@ -243,6 +264,7 @@ void StreamEnvironmentLightIntoReservoir(
     DILightSample candidateSample = DISampleLight(lightInfo, surface, uv);
     float targetPdf = DIGetLightSampleTargetPdf(candidateSample, surface);
     float lightSelectionPdf = DIEvaluateEnvironmentMapSamplingPdf(candidateSample.direction);
+    // Environment samples are also balanced against possible BRDF hits.
     float blendedSourcePdf = ComputeLightBrdfMisWeight(surface, candidateSample, lightSelectionPdf,
         misData.environmentMapMisWeight, true, misData.brdfMisWeight, sampleParams.brdfCutoff);
     if(blendedSourcePdf <= 0.0)
@@ -272,7 +294,7 @@ ReSTIRDIReservoir SampleEnvironmentLight(
     if(params.lightPresent == 0 || sampleParams.numEnvironmentSamples == 0)
         return state;
 
-    DILightInfo lightInfo = DILoadLightInfo(params.lightIndex, false);
+    DILightInfo lightInfo = DILoadLightInfo(params.lightIndex);
     for(uint i = 0; i < sampleParams.numEnvironmentSamples; ++i)
     {
         StreamEnvironmentLightIntoReservoir(rng, sampleParams, misData, surface, lightInfo, params.lightIndex, state, o_selectedSample);
@@ -308,7 +330,10 @@ ReSTIRDIReservoir SampleBrdfCandidates(
 
         if (DISampleSurfaceBrdf(surface, rng, sampleDir))
         {
+            // A BRDF candidate becomes a ReSTIR light candidate only if the ray
+            // actually reaches an emissive triangle or the environment.
             float brdfPdf = DIEvaluateSurfaceBrdfPdf(surface, sampleDir);
+            // Low-PDF BRDF candidates are allowed to trace farther because they represent rarer events.
             float maxDistance = ComputeBrdfMaxDistanceFromPdf(brdfCutoff, brdfPdf);
             
             const float3 rayOrigin = OffsetRay(DIGetSurfaceWorldPosition(surface), SelectOffsetNormal(DIGetSurfaceGeometricNormal(surface), sampleDir));
@@ -317,13 +342,12 @@ ReSTIRDIReservoir SampleBrdfCandidates(
 
             if (lightIndex != ReSTIRInvalidLightIndex)
             {
-                DILightInfo lightInfo = DILoadLightInfo(lightIndex, false);
+                DILightInfo lightInfo = DILoadLightInfo(lightIndex);
                 candidateSample = DISampleLight(lightInfo, surface, randXY);
                     
                 if (brdfCutoff > 0.f)
                 {
-                    // If Mis cutoff is used, we need to evaluate the sample and make sure it actually could have been
-                    // generated by the area sampling technique. This is due to numerical precision.
+                    // Re-check the cutoff using the exact light direction found by the ray.
                     float3 lightDir;
                     float lightDistance;
                     DIGetLightDirectionAndDistance(surface, candidateSample, lightDir, lightDistance);
@@ -336,14 +360,15 @@ ReSTIRDIReservoir SampleBrdfCandidates(
 
                 if (lightIndex != ReSTIRInvalidLightIndex)
                 {
+                    // Use the same local-light source PDF as explicit light sampling.
                     lightSourcePdf = DIEvaluateLocalLightSourcePdf(lightIndex);
                 }
             }
             else if (!hitAnything && (lightBufferParams.environmentLightParams.lightPresent != 0))
             {
-                // sample environment light
+                // A miss ray is an environment-light candidate.
                 lightIndex = lightBufferParams.environmentLightParams.lightIndex;
-                DILightInfo lightInfo = DILoadLightInfo(lightIndex, false);
+                DILightInfo lightInfo = DILoadLightInfo(lightIndex);
                 randXY = DIGetEnvironmentMapUvFromDirection(sampleDir);
                 candidateSample = DISampleLight(lightInfo, surface, randXY);
                 lightSourcePdf = DIEvaluateEnvironmentMapSamplingPdf(sampleDir);
@@ -358,6 +383,9 @@ ReSTIRDIReservoir SampleBrdfCandidates(
 
         bool isEnvMapSample = lightIndex == lightBufferParams.environmentLightParams.lightIndex;
         float targetPdf = DIGetLightSampleTargetPdf(candidateSample, surface);
+
+        // Convert the BRDF hit into the same source-PDF convention as the
+        // explicit light candidates before reservoir streaming.
         float blendedSourcePdf = ComputeLightBrdfMisWeight(surface, candidateSample, lightSourcePdf,
             isEnvMapSample ? misData.environmentMapMisWeight : misData.localLightMisWeight, 
             isEnvMapSample,
@@ -390,6 +418,7 @@ ReSTIRDIReservoir ReSTIRDISampleLightsForSurface(
 
     DIInitialSamplingMisData misData = ComputeEffectiveInitialSamplingMisData(sampleParams, lightBufferParams);
 
+    // Build one reservoir per candidate family first.
     localReservoir = SampleLocalLights(
         rng, surface, sampleParams, misData, lightBufferParams.localLightBufferRegion, localSample);
 
@@ -401,6 +430,8 @@ ReSTIRDIReservoir ReSTIRDISampleLightsForSurface(
     ReSTIRDIReservoir brdfReservoir = SampleBrdfCandidates(rng, surface, sampleParams.numBrdfSamples, sampleParams.brdfCutoff, sampleParams.brdfRayMinT, misData, lightBufferParams, brdfSample);
 
     ReSTIRDIReservoir state = EmptyDIReservoir();
+
+    // Combine the families into one initial reservoir for this pixel.
     CombineDIReservoirs(state, localReservoir, 0.5, localReservoir.targetPdf);
     bool selectEnvironment = CombineDIReservoirs(state, environmentReservoir, GetNextRandom(rng), environmentReservoir.targetPdf);
     bool selectBrdf = CombineDIReservoirs(state, brdfReservoir, GetNextRandom(rng), brdfReservoir.targetPdf);
@@ -416,6 +447,8 @@ ReSTIRDIReservoir ReSTIRDISampleLightsForSurface(
 
 	if(sampleParams.enableInitialVisibility != 0 && IsValidDIReservoir(state))
 	{
+        // Optional initial visibility removes invisible samples before temporal
+        // or spatial reuse can spread them.
 		if (!DIGetConservativeVisibility(surface, o_lightSample))
         {
             StoreVisibilityInDIReservoir(state, 0, true);

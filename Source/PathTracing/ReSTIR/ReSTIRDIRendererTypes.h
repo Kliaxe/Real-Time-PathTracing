@@ -28,6 +28,7 @@ namespace nvsamples
 {
 
 // CPU-side construction parameters for the ReSTIR DI renderer.
+// These are stable lifetime dependencies supplied by Application.
 struct ReSTIRDIRendererCreateInfo
 {
   nvapp::Application*      app                   = nullptr;
@@ -36,6 +37,7 @@ struct ReSTIRDIRendererCreateInfo
 };
 
 // One-frame render input borrowed from Application and SceneRuntime.
+// Nothing here is owned by ReSTIR; the renderer only records commands against it.
 struct ReSTIRDIRenderInput
 {
   VkCommandBuffer                     cmd                = VK_NULL_HANDLE;
@@ -48,8 +50,9 @@ struct ReSTIRDIRenderInput
 
 struct ReSTIRDIAccumulationSignature
 {
+  // Accumulation depends on camera and background state because old pixels are averaged visually.
   glm::mat4                     viewProjMatrix{};
-  glm::mat4                     projInvMatrix{};
+  glm::mat4                     viewProjInvMatrix{};
   glm::mat4                     viewInvMatrix{};
   glm::vec3                     cameraPosition{};
   int                           useSky                  = 0;
@@ -65,6 +68,7 @@ struct ReSTIRDIAccumulationSignature
 
 struct ReSTIRDIDenoiserHistorySignature
 {
+  // NRD history depends on lighting/background state, but not on camera matrices directly.
   int                           useSky                  = 0;
   int                           useHdrEnv               = 0;
   int                           environmentTextureIndex = -1;
@@ -80,9 +84,10 @@ inline ReSTIRDIAccumulationSignature MakeReSTIRDIAccumulationSignature(const sha
                                                                        VkDeviceAddress topLevelAsAddress,
                                                                        VkExtent2D viewportSize)
 {
+  // Keep this builder explicit so adding/removing a history dependency is easy to review.
   ReSTIRDIAccumulationSignature signature{};
   signature.viewProjMatrix          = sceneInfo.viewProjMatrix;
-  signature.projInvMatrix           = sceneInfo.projInvMatrix;
+  signature.viewProjInvMatrix       = sceneInfo.viewProjInvMatrix;
   signature.viewInvMatrix           = sceneInfo.viewInvMatrix;
   signature.cameraPosition          = sceneInfo.cameraPosition;
   signature.useSky                  = sceneInfo.useSky;
@@ -96,9 +101,10 @@ inline ReSTIRDIAccumulationSignature MakeReSTIRDIAccumulationSignature(const sha
 }
 
 inline ReSTIRDIDenoiserHistorySignature MakeReSTIRDIDenoiserHistorySignature(const shaderio::GltfSceneInfo& sceneInfo,
-                                                                         VkDeviceAddress topLevelAsAddress,
-                                                                         VkExtent2D viewportSize)
+                                                                             VkDeviceAddress topLevelAsAddress,
+                                                                             VkExtent2D viewportSize)
 {
+  // This is intentionally smaller than the accumulation signature.
   ReSTIRDIDenoiserHistorySignature signature{};
   signature.useSky                  = sceneInfo.useSky;
   signature.useHdrEnv               = sceneInfo.useHdrEnv;
@@ -122,6 +128,7 @@ inline bool IsReSTIRDISpatialResamplingEnabled(ReSTIRDIResamplingMode resampling
 
 inline uint32_t GetReSTIRDIFrameSetIndex(uint32_t frameCycleIndex, size_t setCount)
 {
+  // Descriptor/parameter buffers are allocated per frame set, but guard empty packs for shutdown paths.
   if(setCount == 0)
   {
     return 0;

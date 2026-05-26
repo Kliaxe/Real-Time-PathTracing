@@ -38,7 +38,7 @@ ExperimentCaptureFrame FinalCapture(uint32_t frameIndex, std::string outputName 
 }
 
 ExperimentRun MakeReSTIRRun(std::string runName, std::string sceneLabel, ExperimentCamera camera,
-                             uint32_t continuationBounces, uint32_t totalFrames)
+                             uint32_t secondaryPathBounces, uint32_t totalFrames)
 {
   ExperimentRun run{};
   run.runName     = std::move(runName);
@@ -52,7 +52,7 @@ ExperimentRun MakeReSTIRRun(std::string runName, std::string sceneLabel, Experim
       .useSky = false,
       .backgroundColor = glm::vec3(0.0f),
   };
-  run.restir.continuationMaxBounces = continuationBounces;
+  run.restir.secondaryPathMaxBounces = secondaryPathBounces;
   run.restir.environmentSamples     = 0;
   run.restir.localLightSamples      = 24;
   run.restir.spatialSamples         = 5;
@@ -61,14 +61,14 @@ ExperimentRun MakeReSTIRRun(std::string runName, std::string sceneLabel, Experim
   return run;
 }
 
-ExperimentRun MakeCornellReSTIRRun(std::string runName, uint32_t continuationBounces, uint32_t totalFrames)
+ExperimentRun MakeCornellReSTIRRun(std::string runName, uint32_t secondaryPathBounces, uint32_t totalFrames)
 {
-  return MakeReSTIRRun(std::move(runName), "Cornell Box", CornellCamera(), continuationBounces, totalFrames);
+  return MakeReSTIRRun(std::move(runName), "Cornell Box", CornellCamera(), secondaryPathBounces, totalFrames);
 }
 
-ExperimentRun MakeManyLightReSTIRRun(std::string runName, uint32_t continuationBounces, uint32_t totalFrames)
+ExperimentRun MakeManyLightReSTIRRun(std::string runName, uint32_t secondaryPathBounces, uint32_t totalFrames)
 {
-  return MakeReSTIRRun(std::move(runName), "Cornell Many Lights", CornellCamera(), continuationBounces, totalFrames);
+  return MakeReSTIRRun(std::move(runName), "Cornell Many Lights", CornellCamera(), secondaryPathBounces, totalFrames);
 }
 
 ExperimentRun MakePathTracingRun(std::string runName, std::string sceneLabel, ExperimentCamera camera,
@@ -315,17 +315,17 @@ ExperimentPlan CreateDenoisingComparisonPlan(const std::filesystem::path& output
   return plan;
 }
 
-ExperimentPlan CreateContinuationPlan(const std::filesystem::path& outputRoot)
+ExperimentPlan CreateSecondaryPathPlan(const std::filesystem::path& outputRoot)
 {
   ExperimentPlan plan{};
-  plan.name       = "restir-continuation";
+  plan.name       = "restir-secondary-path";
   plan.outputRoot = outputRoot;
   plan.runs.push_back(MakePathTracingRun("path-tracing-3-bounce-reference", "Cornell Box", CornellCamera(), 3, 96));
   plan.runs.push_back(
       MakePathTracingBaselineRun("path-tracing-3-bounce-baseline", "Cornell Box", CornellCamera(), 3, 32));
   plan.runs.push_back(MakeCornellReSTIRRun("restir-direct-only", 0, 32));
-  plan.runs.push_back(MakeCornellReSTIRRun("restir-1-continuation-bounce", 1, 32));
-  plan.runs.push_back(MakeCornellReSTIRRun("restir-3-continuation-bounces", 3, 32));
+  plan.runs.push_back(MakeCornellReSTIRRun("restir-1-secondary-path-bounce", 1, 32));
+  plan.runs.push_back(MakeCornellReSTIRRun("restir-3-secondary-path-bounces", 3, 32));
   return plan;
 }
 
@@ -429,9 +429,9 @@ std::optional<ExperimentPlan> CreateNamedExperimentPlan(std::string_view name, c
   {
     return CreateDenoisingComparisonPlan(outputRoot);
   }
-  if(name == "restir-continuation")
+  if(name == "restir-secondary-path")
   {
-    return CreateContinuationPlan(outputRoot);
+    return CreateSecondaryPathPlan(outputRoot);
   }
   if(name == "restir-environment")
   {
@@ -451,7 +451,7 @@ std::optional<ExperimentPlan> CreateNamedExperimentPlan(std::string_view name, c
 std::vector<std::string_view> GetAvailableExperimentPlanNames()
 {
   return {"restir-smoke",           "restir-di-minimal",       "restir-reuse-modes",
-          "restir-candidate-sweep", "restir-many-light",       "restir-continuation",
+          "restir-candidate-sweep", "restir-many-light",       "restir-secondary-path",
           "restir-equal-quality",   "restir-secondary-bounce-quality",
           "restir-denoising-comparison",
           "restir-environment",     "restir-environment-temporal", "restir-temporal-camera"};

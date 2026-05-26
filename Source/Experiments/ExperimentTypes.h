@@ -63,7 +63,7 @@ struct ExperimentReSTIRSettings
   bool                  finalVisibility       = true;
   bool                  reuseFinalVisibility  = true;
   uint32_t              debugView             = 0;
-  uint32_t              continuationMaxBounces = 0;
+  uint32_t              secondaryPathMaxBounces = 0;
 };
 
 struct ExperimentEnvironment

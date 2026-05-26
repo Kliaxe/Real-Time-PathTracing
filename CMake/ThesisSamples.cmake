@@ -15,14 +15,13 @@ include_guard(GLOBAL)
 #     SOURCE_DIR <dir>            # e.g. ${CMAKE_CURRENT_LIST_DIR}
 #     SHADER_DIR <dir>            # e.g. ${CMAKE_CURRENT_LIST_DIR}/shaders
 #     [EXTRA_SHADER_INCLUDES ...]
-#     [EXTRA_COPY_DIRECTORIES ...]
 #   )
 #
 
 function(setup_thesis_app)
     set(_Options)
     set(_OneValueArgs TARGET SOURCE_DIR SHADER_DIR)
-    set(_MultiValueArgs EXTRA_SHADER_INCLUDES EXTRA_COPY_DIRECTORIES)
+    set(_MultiValueArgs EXTRA_SHADER_INCLUDES)
     cmake_parse_arguments(THESIS "${_Options}" "${_OneValueArgs}" "${_MultiValueArgs}" ${ARGN})
 
     if(NOT THESIS_TARGET)
@@ -220,4 +219,3 @@ function(setup_thesis_app)
         )
     endif()
 endfunction()
-

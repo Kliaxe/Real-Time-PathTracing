@@ -1,6 +1,9 @@
 #ifndef RESTIR_RANDOM_HLSLI
 #define RESTIR_RANDOM_HLSLI
 
+// Deterministic per-pixel random stream used by ReSTIR passes. Each pass gets a
+// different stream by changing the pass index in InitRandomSampler.
+
 static const uint ReSTIRRandomSamplerPrimeConstant = 31;
 
 struct ReSTIRRandomSamplerState

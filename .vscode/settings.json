@@ -5,10 +5,6 @@
   // Always use your CMakePresets.json (keeps VS Code + build consistent).
   "cmake.useCMakePresets": "always",
 
-  // Force VS Code to use Visual Studio's CMake (avoid Strawberry/MinGW CMake).
-  // NOTE: This path exists on your machine (VS 18 Community).
-  "cmake.cmakePath": "${env:ProgramFiles}\\Microsoft Visual Studio\\18\\Community\\Common7\\IDE\\CommonExtensions\\Microsoft\\CMake\\CMake\\bin\\cmake.exe",
-
   // Build when launching (cmake.launchTargetPath / cmake.launchTargetDirectory triggers a build).
   "cmake.buildBeforeRun": true,
 
@@ -19,4 +15,3 @@
   "cmake.configurePreset": "x64-Debug",
   "cmake.buildPreset": "x64-Debug"
 }
-

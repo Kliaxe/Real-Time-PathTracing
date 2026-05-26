@@ -28,11 +28,6 @@ VkShaderModuleCreateInfo GetPathTracingShaderCode()
   return nvsamples::GetShaderModuleCreateInfo(std::span(PathTracer_slang));
 }
 
-bool IsFinalRadianceAccumulationEnabled(const PathTracer::Settings& settings)
-{
-  return IsAccumulationResolveMode(settings.resolveMode);
-}
-
 }  // namespace
 
 PathTracer::PathTracer(const CreateInfo& createInfo)
@@ -51,13 +46,14 @@ void PathTracer::Initialize()
     return;
   }
 
+  // Permanent Vulkan objects are created here; viewport-sized images are created when frames arrive.
   QueryRayTracingProperties();
   CreateDescriptorSetLayout();
   CreatePipelineLayout();
   CreateRayTracingPipeline();
   CreateShaderBindingTable();
   m_NrdDenoiser.Initialize();
-  InvalidateAccumulation();
+  InvalidateHistory();
 }
 
 void PathTracer::Destroy()
@@ -69,6 +65,7 @@ void PathTracer::Destroy()
 
   VkDevice device = m_Allocator->getDevice();
 
+  // Destroy GPU resources before the descriptor/pipeline state that references them.
   DestroyAccumulationImage();
   m_DenoiserResources.Destroy();
   m_NrdDenoiser.Destroy();
@@ -87,7 +84,7 @@ void PathTracer::Destroy()
   m_DescPack.deinit();
 
   m_RngFrameNumber           = 0;
-  m_MaxBounceLimit           = 0;
+  m_DeviceBounceLimit        = 0;
   m_PipelineBounceLimit      = 0;
   m_AccumulatedFrames        = 0;
   m_AccumulationInvalidated  = true;
@@ -112,7 +109,7 @@ const PathTracer::Settings& PathTracer::GetSettings() const
 
 uint32_t PathTracer::GetAccumulatedFrameCount() const
 {
-  return IsFinalRadianceAccumulationEnabled(m_Settings) ? m_AccumulatedFrames : 0;
+  return IsAccumulationResolveMode(m_Settings.resolveMode) ? m_AccumulatedFrames : 0;
 }
 
 uint32_t PathTracer::GetPipelineBounceLimit() const
@@ -120,8 +117,9 @@ uint32_t PathTracer::GetPipelineBounceLimit() const
   return m_PipelineBounceLimit;
 }
 
-void PathTracer::InvalidateAccumulation()
+void PathTracer::InvalidateHistory()
 {
+  // CPU history flags reset now; shader-visible history restarts through accumulatedFrames.
   m_AccumulatedFrames        = 0;
   m_AccumulationInvalidated  = true;
   m_HasAccumulationSignature = false;
@@ -160,6 +158,7 @@ void PathTracer::Render(const RenderInput& input)
   PrepareStorageImages(input);
 
   const shaderio::PathTracePushConstant pushConstant = BuildPushConstant(input, frameState);
+  // Push constants carry the small per-dispatch values; descriptors carry images, TLAS, and textures.
   RecordPathTracePass(input, pushConstant);
   RunDenoiserIfNeeded(input, frameState);
   FinishFrame(frameState);
@@ -181,8 +180,9 @@ void PathTracer::EnsureViewportResources(VkExtent2D viewportSize)
 PathTracer::FrameState PathTracer::BeginPathTraceFrame(const RenderInput& input, VkExtent2D viewportSize)
 {
   FrameState frameState{};
+  // FrameState keeps history decisions together so the frame finishes with the same assumptions.
   frameState.viewportSize              = viewportSize;
-  frameState.finalAccumulationEnabled  = IsFinalRadianceAccumulationEnabled(m_Settings);
+  frameState.finalAccumulationEnabled  = IsAccumulationResolveMode(m_Settings.resolveMode);
   frameState.accumulationSignature     = MakeAccumulationSignature(input, viewportSize);
   frameState.denoiserSignature         = MakeDenoiserSignature(input, viewportSize);
 
@@ -242,12 +242,14 @@ void PathTracer::PrepareStorageImages(const RenderInput& input)
   };
   const VkDependencyInfo outputDependency{
       .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &outputBarrier};
+  // The swapchain/G-buffer color target is external to PathTracer but written as a storage image here.
   vkCmdPipelineBarrier2(input.cmd, &outputDependency);
 }
 
 shaderio::PathTracePushConstant PathTracer::BuildPushConstant(const RenderInput& input, const FrameState& frameState)
 {
-  const uint32_t clampedMaxBounces      = std::min(m_Settings.maxBounces, m_MaxBounceLimit);
+  // Device and pipeline limits both matter: Vulkan support may exceed what this pipeline was created for.
+  const uint32_t clampedMaxBounces      = std::min(m_Settings.maxBounces, m_DeviceBounceLimit);
   const uint32_t pipelineSafeMaxBounces = std::min(clampedMaxBounces, m_PipelineBounceLimit);
   uint32_t       pathTraceFlags         = 0;
   if(frameState.finalAccumulationEnabled)
@@ -267,9 +269,11 @@ shaderio::PathTracePushConstant PathTracer::BuildPushConstant(const RenderInput&
 
 void PathTracer::RecordPathTracePass(const RenderInput& input, const shaderio::PathTracePushConstant& pushConstant)
 {
+  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "Path Tracing");
   // The path tracer is a single ray tracing dispatch.
   const VkExtent2D viewportSize = input.gBuffers->getSize();
   vkCmdBindPipeline(input.cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_Pipeline);
+  // Descriptor set index follows nvpro's frame cycle to avoid overwriting in-flight descriptors.
   const uint32_t frameSetIndex = std::min(m_App->getFrameCycleIndex(), uint32_t(m_DescPack.getSets().size() - 1));
   vkCmdBindDescriptorSets(input.cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_PipelineLayout, 0, 1, m_DescPack.getSetPtr(frameSetIndex), 0,
                           nullptr);
@@ -282,6 +286,7 @@ void PathTracer::RecordPathTracePass(const RenderInput& input, const shaderio::P
   vkCmdTraceRaysKHR(input.cmd, &m_SbtRegions.raygen, &m_SbtRegions.miss, &m_SbtRegions.hit, &m_SbtRegions.callable, viewportSize.width,
                     viewportSize.height, 1);
 
+  // Make path-traced image and guide-buffer writes visible to later compute denoising/post work.
   nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 }
 
@@ -311,22 +316,26 @@ void PathTracer::QueryRayTracingProperties()
   VkPhysicalDeviceProperties2 props{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &m_RtProperties};
   vkGetPhysicalDeviceProperties2(m_Allocator->getPhysicalDevice(), &props);
 
-  m_MaxBounceLimit      = (m_RtProperties.maxRayRecursionDepth > 0) ? (m_RtProperties.maxRayRecursionDepth - 1) : 0;
-  m_PipelineBounceLimit = std::min(kRequestedMaxBounces, m_MaxBounceLimit);
+  // Vulkan recursion depth counts the primary ray, so path bounces get one less.
+  m_DeviceBounceLimit   = (m_RtProperties.maxRayRecursionDepth > 0) ? (m_RtProperties.maxRayRecursionDepth - 1) : 0;
+  m_PipelineBounceLimit = std::min(kRequestedMaxBounces, m_DeviceBounceLimit);
   m_Settings.maxBounces = m_PipelineBounceLimit;
 }
 
 void PathTracer::CreateDescriptorSetLayout()
 {
+  // One descriptor layout is shared by the path tracing shader and Application's texture updates.
   const VkShaderStageFlags rayTracingStages = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR
                                               | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
 
   nvvk::DescriptorBindings bindings;
+  // Textures use bindless-style indexing from material records.
   bindings.addBinding({.binding = shaderio::BindingPoints::eTextures, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                        .descriptorCount = m_MaxTextureDescriptors, .stageFlags = rayTracingStages},
                       VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
                           | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
   bindings.addBinding(shaderio::BindingPoints::eTlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, rayTracingStages);
+  // Output/accumulation/NRD guide images are all written by ray generation.
   bindings.addBinding(shaderio::BindingPoints::eOutputImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
   bindings.addBinding(shaderio::BindingPoints::eAccumulationImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
   bindings.addBinding(shaderio::BindingPoints::eMotionVectorsImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_RAYGEN_BIT_KHR);
@@ -345,6 +354,7 @@ void PathTracer::CreateDescriptorSetLayout()
 
 void PathTracer::CreatePipelineLayout()
 {
+  // Pipeline layout is the ABI between C++ descriptor sets/push constants and Slang bindings.
   const VkPushConstantRange pushConstantRange{
       .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
                     | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
@@ -360,6 +370,7 @@ void PathTracer::CreateRayTracingPipeline()
   VkDevice device                      = m_Allocator->getDevice();
   VkShaderModuleCreateInfo shaderCode = GetPathTracingShaderCode();
 
+  // Entry point names must match the [shader(...)] functions in PathTracer.slang.
   enum StageIndices
   {
     eRaygen,
@@ -374,6 +385,7 @@ void PathTracer::CreateRayTracingPipeline()
   std::array<VkPipelineShaderStageCreateInfo, eStageCount> stages{};
   for(VkPipelineShaderStageCreateInfo& stage : stages)
   {
+    // Slang SPIR-V is passed through pNext in this nvpro helper path.
     stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stage.pNext = &shaderCode;
   }
@@ -400,6 +412,7 @@ void PathTracer::CreateRayTracingPipeline()
   std::vector<VkRayTracingShaderGroupCreateInfoKHR> shaderGroups;
   shaderGroups.reserve(5);
 
+  // Group order becomes the shader binding table layout used by TraceRay calls.
   group.type          = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
   group.generalShader = eRaygen;
   shaderGroups.push_back(group);
@@ -425,6 +438,7 @@ void PathTracer::CreateRayTracingPipeline()
   shaderGroups.push_back(group);
 
   const uint32_t recursionDepth = std::max(1u, m_PipelineBounceLimit + 1);
+  // The extra recursion level accounts for the primary ray before secondary bounces.
   VkRayTracingPipelineCreateInfoKHR pipelineInfo{
       .sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
       .stageCount                   = static_cast<uint32_t>(stages.size()),
@@ -436,18 +450,22 @@ void PathTracer::CreateRayTracingPipeline()
   };
 
   NVVK_CHECK(vkCreateRayTracingPipelinesKHR(device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_Pipeline));
+  nvvk::DebugUtil::getInstance().setObjectName(m_Pipeline, "Path Tracing Pipeline");
 
   m_SbtGenerator.init(device, m_RtProperties);
+  // SBT alignment and stride are device-specific ray tracing properties.
   const size_t sbtBufferSize = m_SbtGenerator.calculateSBTBufferSize(m_Pipeline, pipelineInfo);
   NVVK_CHECK(m_Allocator->createBuffer(m_SbtBuffer, sbtBufferSize,
                                        VK_BUFFER_USAGE_2_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT,
                                        VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
                                        VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
                                        m_SbtGenerator.getBufferAlignment()));
+  nvvk::DebugUtil::getInstance().setObjectName(m_SbtBuffer.buffer, "Path Tracing SBT");
 }
 
 void PathTracer::CreateShaderBindingTable()
 {
+  // The SBT stores shader group handles copied out of the created ray tracing pipeline.
   NVVK_CHECK(m_SbtGenerator.populateSBTBuffer(m_SbtBuffer.address, m_SbtBuffer.bufferSize, m_SbtBuffer.mapping));
   m_SbtRegions = m_SbtGenerator.getSBTRegions(0);
 }
@@ -456,11 +474,14 @@ void PathTracer::UpdateFrameDescriptors(const RenderInput& input)
 {
   const uint32_t frameSetIndex = std::min(m_App->getFrameCycleIndex(), uint32_t(m_DescPack.getSets().size() - 1));
 
+  // Descriptor writes point the shader at the concrete resources for this frame.
   nvvk::WriteSetContainer write;
   write.reserve(9);
 
+  // TLAS gives the ray tracing shader access to scene acceleration structures.
   write.append(m_DescPack.makeWrite(shaderio::BindingPoints::eTlas, frameSetIndex), *input.topLevelAS);
 
+  // Beauty output and accumulation image are separate so raw/accumulated/denoised modes can coexist.
   VkDescriptorImageInfo outputImageInfo = input.gBuffers->getDescriptorImageInfo(input.renderedImageIndex);
   outputImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
   write.append(m_DescPack.makeWrite(shaderio::BindingPoints::eOutputImage, frameSetIndex), outputImageInfo);
@@ -469,6 +490,7 @@ void PathTracer::UpdateFrameDescriptors(const RenderInput& input)
   accumulationImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
   write.append(m_DescPack.makeWrite(shaderio::BindingPoints::eAccumulationImage, frameSetIndex), accumulationImageInfo);
 
+  // NRD guide images are always bound because the shader writes them every path tracing pass.
   VkDescriptorImageInfo motionVectorsImageInfo = m_DenoiserResources.GetMotionVectorsImage().descriptor;
   motionVectorsImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
   write.append(m_DescPack.makeWrite(shaderio::BindingPoints::eMotionVectorsImage, frameSetIndex), motionVectorsImageInfo);
@@ -503,15 +525,18 @@ void PathTracer::CreateOrResizeAccumulationImage(VkExtent2D size)
   if(m_AccumulationImage.image != VK_NULL_HANDLE && m_AccumulationImage.extent.width == size.width
      && m_AccumulationImage.extent.height == size.height)
   {
+    // Existing accumulation target already matches the viewport.
     return;
   }
 
   if(m_AccumulationImage.image != VK_NULL_HANDLE)
   {
+    // Old image may still be referenced by submitted work, so defer destruction.
     ScheduleAccumulationImageDestroy(m_AccumulationImage);
     m_AccumulationImage = {};
   }
 
+  // R32G32B32A32 keeps HDR path radiance before tonemapping or denoising.
   VkImageCreateInfo imageInfo{.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
                               .imageType = VK_IMAGE_TYPE_2D,
                               .format = kAccumulationFormat,
@@ -530,9 +555,11 @@ void PathTracer::CreateOrResizeAccumulationImage(VkExtent2D size)
                                                       .baseArrayLayer = 0, .layerCount = 1}};
 
   NVVK_CHECK(m_Allocator->createImage(m_AccumulationImage, imageInfo, viewInfo));
+  nvvk::DebugUtil::getInstance().setObjectName(m_AccumulationImage.image, "PathTracingAccumulationImage");
+  nvvk::DebugUtil::getInstance().setObjectName(m_AccumulationImage.descriptor.imageView, "PathTracingAccumulationImageView");
   m_AccumulationImage.descriptor.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   m_AccumulationImage.descriptor.sampler     = VK_NULL_HANDLE;
-  InvalidateAccumulation();
+  InvalidateHistory();
 }
 
 void PathTracer::DestroyAccumulationImage()
@@ -548,6 +575,7 @@ void PathTracer::ScheduleAccumulationImageDestroy(nvvk::Image image)
     return;
   }
 
+  // nvpro runs this callback only when it is safe to free resources used by previous submissions.
   nvvk::ResourceAllocator* allocator = m_Allocator;
   m_App->submitResourceFree([allocator, image]() mutable {
     if(allocator != nullptr)
@@ -564,6 +592,7 @@ void PathTracer::TransitionStorageImageForWrite(VkCommandBuffer cmd, nvvk::Image
     return;
   }
 
+  // First use this frame moves the image into GENERAL so ray tracing shaders can write it.
   const VkImageMemoryBarrier2 transition{
       .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
       .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
@@ -587,9 +616,10 @@ void PathTracer::TransitionStorageImageForWrite(VkCommandBuffer cmd, nvvk::Image
 
 PathTracer::AccumulationSignature PathTracer::MakeAccumulationSignature(const RenderInput& input, VkExtent2D size) const
 {
+  // Keep this explicit so accumulation dependencies are easy to review.
   AccumulationSignature signature{};
   signature.viewProjMatrix          = input.sceneInfo->viewProjMatrix;
-  signature.projInvMatrix           = input.sceneInfo->projInvMatrix;
+  signature.viewProjInvMatrix       = input.sceneInfo->viewProjInvMatrix;
   signature.viewInvMatrix           = input.sceneInfo->viewInvMatrix;
   signature.cameraPosition          = input.sceneInfo->cameraPosition;
   signature.useSky                  = input.sceneInfo->useSky;
@@ -604,6 +634,7 @@ PathTracer::AccumulationSignature PathTracer::MakeAccumulationSignature(const Re
 
 PathTracer::DenoiserSignature PathTracer::MakeDenoiserSignature(const RenderInput& input, VkExtent2D size) const
 {
+  // This is intentionally smaller than the accumulation signature.
   DenoiserSignature signature{};
   signature.useSky                  = input.sceneInfo->useSky;
   signature.useHdrEnv               = input.sceneInfo->useHdrEnv;

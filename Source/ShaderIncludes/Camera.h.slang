@@ -5,12 +5,10 @@
 #include "Common/IoGltf.h"
 
 // Reconstruct a world-space camera ray direction from normalized device
-// coordinates. The scene buffer field is historically named projInvMatrix, but
-// in this sample it stores the inverse view-projection matrix so both raster
-// background shading and ray tracing can share the exact same camera contract.
+// coordinates using the scene's inverse view-projection matrix.
 float3 ReconstructWorldDirectionFromNdc(float2 ndc, GltfSceneInfo sceneInfo)
 {
-  float4 worldPosH = mul(float4(ndc, 1.0, 1.0), sceneInfo.projInvMatrix);
+  float4 worldPosH = mul(float4(ndc, 1.0, 1.0), sceneInfo.viewProjInvMatrix);
   float  w         = (abs(worldPosH.w) > 1e-6) ? worldPosH.w : 1.0;
   float3 worldPos  = worldPosH.xyz / w;
   return normalize(worldPos - sceneInfo.cameraPosition);

@@ -6,6 +6,8 @@
 #include "ShaderIncludes/ReSTIR/Debug.h.slang"
 #include "ReSTIR/InitialSampling.hlsli"
 
+// Ray tracing pass that creates the primary ReSTIR inputs: one packed surface
+// record and one initial direct-light reservoir per pixel.
 struct DIPrimaryPayload
 {
   ReSTIRDISurface surface;
@@ -16,6 +18,8 @@ struct DIPrimaryPayload
 [shader("raygeneration")]
 void rgenMain()
 {
+  // Initial sampling owns the primary ray. The closest-hit shader packs the
+  // surface record and builds the first reservoir for the later reuse passes.
   const uint2 launchID = DispatchRaysIndex().xy;
   const uint  width    = uint(pushConst.sceneInfoAddress[0].viewportSize.x);
   const uint  pixelIndex = launchID.y * width + launchID.x;
@@ -26,6 +30,7 @@ void rgenMain()
   ray.TMin      = 0.001;
   ray.TMax      = kRayTMax;
 
+  // Payload starts empty; closest-hit fills both the surface and initial reservoir.
   DIPrimaryPayload payload;
   payload.surface       = EmptyDIPrimarySurface();
   payload.reservoir     = EmptyDIReservoir();
@@ -33,6 +38,7 @@ void rgenMain()
 
   TraceRay(topLevelAS, 0, 0xFF, 0, 0, 0, ray, payload);
 
+  // Later compute passes read the current surface buffer instead of tracing again.
   currentSurfaceBuffer[pixelIndex] = payload.surface;
   StoreDIReservoir(payload.reservoir, diParams.reservoirBufferParams,
                    PixelPosToReservoirPos(launchID),
@@ -44,6 +50,7 @@ void rgenMain()
 [shader("miss")]
 void rmissMain(inout DIPrimaryPayload payload)
 {
+  // Background pixels have no surface and no direct-light reservoir.
   payload.surface   = EmptyDIPrimarySurface();
   payload.reservoir = EmptyDIReservoir();
 }
@@ -57,6 +64,7 @@ void shadowMissMain(inout ShadowPayload payload)
 [shader("anyhit")]
 void rahitMain(inout DIPrimaryPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
+  // Alpha-masked triangles must not create a primary ReSTIR surface.
   if(IsMaskedSurfaceHit(attr))
   {
     IgnoreHit();
@@ -75,12 +83,14 @@ void shadowAnyHitMain(inout ShadowPayload payload, in BuiltInTriangleIntersectio
 [shader("closesthit")]
 void rchitMain(inout DIPrimaryPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
+  // Closest-hit is the only place where full material data is available cheaply.
   const SurfaceData surface = LoadSurfaceData(attr);
   payload.surface = PackDIPrimarySurface(surface, pushConst.sceneInfoAddress[0].instances[InstanceIndex()].materialIndex, InstanceIndex(),
                                          PrimitiveIndex(), RayTCurrent());
 
   ReSTIRRandomSamplerState rng = InitRandomSampler(payload.pixelPosition, diParams.runtimeParams.frameIndex, 0u);
   DILightSample selectedSample;
+  // Build the first reservoir from local-light, environment, and BRDF candidates.
   payload.reservoir = ReSTIRDISampleLightsForSurface(rng, payload.surface, diParams.initialSampling,
                                                      BuildLightBufferParameters(pushConst.sceneInfoAddress[0]), selectedSample);
 }

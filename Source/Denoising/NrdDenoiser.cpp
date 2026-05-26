@@ -14,9 +14,7 @@
 
 #include "Common/Utils.hpp"
 
-#ifdef THESIS_ENABLE_NRD
 #include "_autogen/NrdCompose.slang.h"
-#endif
 
 namespace nvsamples
 {
@@ -38,7 +36,6 @@ uint32_t DivideUp(uint32_t x, uint16_t y)
   return (x + y - 1u) / y;
 }
 
-#ifdef THESIS_ENABLE_NRD
 VkShaderModuleCreateInfo GetComposeShaderCode()
 {
   return nvsamples::GetShaderModuleCreateInfo(std::span(NrdCompose_slang));
@@ -48,7 +45,6 @@ bool IsNrdSuccess(nrd::Result result)
 {
   return result == nrd::Result::SUCCESS;
 }
-#endif
 
 }  // namespace
 
@@ -60,9 +56,6 @@ NrdDenoiser::NrdDenoiser(const CreateInfo& createInfo)
 
 void NrdDenoiser::Initialize()
 {
-#ifndef THESIS_ENABLE_NRD
-  return;
-#else
   if(m_App == nullptr || m_Allocator == nullptr || m_Instance != nullptr)
   {
     return;
@@ -98,14 +91,10 @@ void NrdDenoiser::Initialize()
   m_ReblurSettings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::OFF;
 
   CreateVulkanState();
-#endif
 }
 
 void NrdDenoiser::Destroy()
 {
-#ifndef THESIS_ENABLE_NRD
-  return;
-#else
   if(m_Allocator == nullptr)
   {
     return;
@@ -125,34 +114,22 @@ void NrdDenoiser::Destroy()
   m_PreviousViewMatrix     = glm::mat4(1.0f);
   m_PreviousProjectionMatrix = glm::mat4(1.0f);
   m_FrameIndex             = 0;
-#endif
 }
 
 bool NrdDenoiser::IsReady() const
 {
-#ifndef THESIS_ENABLE_NRD
-  return false;
-#else
   return m_Instance != nullptr && m_PipelineLayout != VK_NULL_HANDLE && !m_Pipelines.empty() && m_ComposePipeline != VK_NULL_HANDLE;
-#endif
 }
 
 void NrdDenoiser::InvalidateHistory()
 {
-#ifdef THESIS_ENABLE_NRD
   m_HistoryInvalidated   = true;
   m_HasPreviousMatrices  = false;
   m_FrameIndex           = 0;
-#endif
 }
 
 void NrdDenoiser::PrepareFrame(const FrameInput& input, const DenoiserResources& denoiserInputs)
 {
-#ifndef THESIS_ENABLE_NRD
-  (void)input;
-  (void)denoiserInputs;
-  return;
-#else
   if(!IsReady() || input.sceneInfo == nullptr || input.viewportSize.width == 0 || input.viewportSize.height == 0)
   {
     return;
@@ -176,20 +153,15 @@ void NrdDenoiser::PrepareFrame(const FrameInput& input, const DenoiserResources&
   assert(IsNrdSuccess(nrd::SetDenoiserSettings(*m_Instance, kDenoiserIdentifier, &m_ReblurSettings)));
 
   m_HistoryInvalidated = false;
-#endif
 }
 
 void NrdDenoiser::ApplyDenoiserSettings(const DenoiserSettings& settings)
 {
-#ifdef THESIS_ENABLE_NRD
   m_ReblurSettings.maxAccumulatedFrameNum      = settings.maxAccumulatedFrames;
   m_ReblurSettings.maxFastAccumulatedFrameNum  = std::min(settings.maxFastAccumulatedFrames, settings.maxAccumulatedFrames);
   m_ReblurSettings.diffusePrepassBlurRadius    = settings.diffusePrepassBlurRadius;
   m_ReblurSettings.specularPrepassBlurRadius   = settings.specularPrepassBlurRadius;
   m_ReblurSettings.enableAntiFirefly           = settings.enableAntiFirefly;
-#else
-  (void)settings;
-#endif
 }
 
 void NrdDenoiser::Denoise(VkCommandBuffer cmd,
@@ -199,15 +171,6 @@ void NrdDenoiser::Denoise(VkCommandBuffer cmd,
                                    DenoiserDebugView debugView,
                                    VkExtent2D viewportSize)
 {
-#ifndef THESIS_ENABLE_NRD
-  (void)cmd;
-  (void)denoiserInputs;
-  (void)rawBeautyImageView;
-  (void)outputImageView;
-  (void)debugView;
-  (void)viewportSize;
-  return;
-#else
   if(!IsReady() || cmd == VK_NULL_HANDLE || rawBeautyImageView == VK_NULL_HANDLE || outputImageView == VK_NULL_HANDLE
      || viewportSize.width == 0 || viewportSize.height == 0)
   {
@@ -243,7 +206,6 @@ void NrdDenoiser::Denoise(VkCommandBuffer cmd,
   UpdateFrameSet(frameResources);
   DispatchNrd(cmd, frameResources, denoiserInputs);
   ComposeDenoisedResult(cmd, frameResources, denoiserInputs, rawBeautyImageView, outputImageView, debugView, viewportSize);
-#endif
 }
 
 const nvvk::Image& NrdDenoiser::GetDiffuseOutputImage() const
@@ -258,15 +220,11 @@ const nvvk::Image& NrdDenoiser::GetSpecularOutputImage() const
 
 void NrdDenoiser::CreateVulkanState()
 {
-#ifndef THESIS_ENABLE_NRD
-  return;
-#else
   CreateSamplers();
   CreateDescriptorSetLayouts();
   CreatePipelineLayout();
   CreatePipelines();
   CreateFrameResources();
-#endif
 }
 
 void NrdDenoiser::DestroyVulkanState()
@@ -308,9 +266,6 @@ void NrdDenoiser::DestroyVulkanState()
 
 void NrdDenoiser::CreateSamplers()
 {
-#ifndef THESIS_ENABLE_NRD
-  return;
-#else
   VkDevice device = m_Allocator->getDevice();
 
   const VkSamplerCreateInfo nearestSamplerInfo{
@@ -336,16 +291,15 @@ void NrdDenoiser::CreateSamplers()
       .maxLod       = VK_LOD_CLAMP_NONE,
   };
   NVVK_CHECK(vkCreateSampler(device, &linearSamplerInfo, nullptr, &m_LinearSampler));
-#endif
 }
 
 void NrdDenoiser::CreateDescriptorSetLayouts()
 {
-#ifndef THESIS_ENABLE_NRD
-  return;
-#else
   VkDevice device = m_Allocator->getDevice();
 
+  // NRD describes the SPIR-V binding ranges for its generated compute passes.
+  // The wrapper mirrors that layout in Vulkan instead of hard-coding a local
+  // descriptor contract.
   const uint32_t textureBinding =
       m_LibraryDesc->spirvBindingOffsets.textureOffset + m_InstanceDesc->resourcesBaseRegisterIndex;
   const uint32_t storageBinding =
@@ -492,7 +446,6 @@ void NrdDenoiser::CreateDescriptorSetLayouts()
       .pBindings    = composeBindings.data(),
   };
   NVVK_CHECK(vkCreateDescriptorSetLayout(device, &composeLayoutInfo, nullptr, &m_ComposeSetLayout));
-#endif
 }
 
 void NrdDenoiser::CreatePipelineLayout()
@@ -532,9 +485,6 @@ void NrdDenoiser::CreatePipelineLayout()
 
 void NrdDenoiser::CreatePipelines()
 {
-#ifndef THESIS_ENABLE_NRD
-  return;
-#else
   VkDevice device = m_Allocator->getDevice();
   m_Pipelines.reserve(m_InstanceDesc->pipelinesNum);
 
@@ -585,14 +535,10 @@ void NrdDenoiser::CreatePipelines()
   };
   NVVK_CHECK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &composePipelineInfo, nullptr, &m_ComposePipeline));
   vkDestroyShaderModule(device, composeShaderModule, nullptr);
-#endif
 }
 
 void NrdDenoiser::CreateFrameResources()
 {
-#ifndef THESIS_ENABLE_NRD
-  return;
-#else
   const uint32_t frameCount = std::max(1u, m_App->getFrameCycleSize());
   m_FrameResources.resize(frameCount);
 
@@ -626,7 +572,6 @@ void NrdDenoiser::CreateFrameResources()
                                          VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                          VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT));
   }
-#endif
 }
 
 void NrdDenoiser::DestroyFrameResources()
@@ -726,7 +671,6 @@ void NrdDenoiser::RecreateViewportResources(VkExtent2D viewportSize)
   m_DiffuseOutputImage  = CreateStorageImage(viewportSize, kDenoisedRadianceFormat, "NrdDiffuseOutput");
   m_SpecularOutputImage = CreateStorageImage(viewportSize, kDenoisedRadianceFormat, "NrdSpecularOutput");
 
-#ifdef THESIS_ENABLE_NRD
   m_PermanentPoolImages.reserve(m_InstanceDesc->permanentPoolSize);
   for(uint32_t imageIndex = 0; imageIndex < m_InstanceDesc->permanentPoolSize; ++imageIndex)
   {
@@ -748,7 +692,6 @@ void NrdDenoiser::RecreateViewportResources(VkExtent2D viewportSize)
     m_TransientPoolImages.push_back(CreateStorageImage(imageSize, ToVkFormat(m_InstanceDesc->transientPool[imageIndex].format),
                                                        "NrdTransientPool"));
   }
-#endif
 }
 
 nvvk::Image NrdDenoiser::CreateStorageImage(VkExtent2D viewportSize, VkFormat format, const char* debugName) const
@@ -786,12 +729,11 @@ nvvk::Image NrdDenoiser::CreateStorageImage(VkExtent2D viewportSize, VkFormat fo
 
 void NrdDenoiser::UpdateCommonSettings(const FrameInput& input)
 {
-#ifndef THESIS_ENABLE_NRD
-  (void)input;
-  return;
-#else
   const shaderio::GltfSceneInfo& sceneInfo = *input.sceneInfo;
 
+  // NRD receives current and previous camera transforms in view/clip space.
+  // The renderer has no jitter here, and motion vectors are written in screen
+  // pixel space by the path tracing and ReSTIR shaders.
   const glm::mat4 currentViewMatrix       = sceneInfo.viewMatrix;
   const glm::mat4 currentProjectionMatrix = sceneInfo.viewProjMatrix * sceneInfo.viewInvMatrix;
   const glm::mat4 previousViewMatrix      = m_HasPreviousMatrices ? m_PreviousViewMatrix : currentViewMatrix;
@@ -836,7 +778,6 @@ void NrdDenoiser::UpdateCommonSettings(const FrameInput& input)
   m_PreviousProjectionMatrix = currentProjectionMatrix;
   m_HasPreviousMatrices      = true;
   m_FrameIndex += 1;
-#endif
 }
 
 NrdDenoiser::FrameResources& NrdDenoiser::GetCurrentFrameResources()
@@ -858,10 +799,6 @@ void NrdDenoiser::BeginFrame(FrameResources& frameResources)
 
 void NrdDenoiser::UpdateFrameSet(FrameResources& frameResources)
 {
-#ifndef THESIS_ENABLE_NRD
-  (void)frameResources;
-  return;
-#else
   const VkDescriptorBufferInfo constantBufferInfo{
       .buffer = frameResources.constantBuffer.buffer,
       .offset = 0,
@@ -876,7 +813,6 @@ void NrdDenoiser::UpdateFrameSet(FrameResources& frameResources)
       .pBufferInfo     = &constantBufferInfo,
   };
   vkUpdateDescriptorSets(m_Allocator->getDevice(), 1, &write, 0, nullptr);
-#endif
 }
 
 VkDescriptorSet NrdDenoiser::AllocateDescriptorSet(FrameResources& frameResources, VkDescriptorSetLayout layout)
@@ -898,13 +834,6 @@ uint32_t NrdDenoiser::UploadConstantData(FrameResources& frameResources,
                                                   uint32_t        constantDataSize,
                                                   bool            reusePreviousData)
 {
-#ifndef THESIS_ENABLE_NRD
-  (void)frameResources;
-  (void)constantData;
-  (void)constantDataSize;
-  (void)reusePreviousData;
-  return 0;
-#else
   if(constantDataSize == 0 || constantData == nullptr)
   {
     return 0;
@@ -928,21 +857,17 @@ uint32_t NrdDenoiser::UploadConstantData(FrameResources& frameResources,
   frameResources.constantBufferOffset         += alignedConstantDataSize;
   frameResources.previousConstantBufferOffset  = currentOffset;
   return currentOffset;
-#endif
 }
 
 void NrdDenoiser::UpdateResourceSet(VkDescriptorSet                      resourceSet,
                                              const nrd::DispatchDesc&            dispatchDesc,
                                              const DenoiserResources&   denoiserInputs)
 {
-#ifndef THESIS_ENABLE_NRD
-  (void)resourceSet;
-  (void)dispatchDesc;
-  (void)denoiserInputs;
-  return;
-#else
   const nrd::PipelineDesc& pipelineDesc = m_InstanceDesc->pipelines[dispatchDesc.pipelineIndex];
 
+  // Each dispatch can bind a different slice of NRD's permanent/transient
+  // pools. Translate the NRD resource list into the descriptor set expected by
+  // the pipeline selected for this dispatch.
   std::vector<VkDescriptorImageInfo> imageInfos;
   std::vector<VkWriteDescriptorSet>  writes;
   imageInfos.reserve(dispatchDesc.resourcesNum);
@@ -991,22 +916,18 @@ void NrdDenoiser::UpdateResourceSet(VkDescriptorSet                      resourc
     }
   }
   vkUpdateDescriptorSets(m_Allocator->getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-#endif
 }
 
 void NrdDenoiser::DispatchNrd(VkCommandBuffer cmd, FrameResources& frameResources, const DenoiserResources& denoiserInputs)
 {
-#ifndef THESIS_ENABLE_NRD
-  (void)cmd;
-  (void)frameResources;
-  (void)denoiserInputs;
-  return;
-#else
   const nrd::DispatchDesc* dispatchDescs    = nullptr;
   uint32_t                 dispatchDescsNum = 0;
   const nrd::Identifier    denoiserIdentifier = kDenoiserIdentifier;
   assert(IsNrdSuccess(nrd::GetComputeDispatches(*m_Instance, &denoiserIdentifier, 1, dispatchDescs, dispatchDescsNum)));
 
+  // NRD decides the compute-pass order for the active denoiser. Vulkan only
+  // records the described pipelines, descriptors, dynamic constants, and
+  // barriers.
   for(uint32_t dispatchIndex = 0; dispatchIndex < dispatchDescsNum; ++dispatchIndex)
   {
     const nrd::DispatchDesc& dispatchDesc = dispatchDescs[dispatchIndex];
@@ -1027,7 +948,6 @@ void NrdDenoiser::DispatchNrd(VkCommandBuffer cmd, FrameResources& frameResource
     vkCmdDispatch(cmd, dispatchDesc.gridWidth, dispatchDesc.gridHeight, 1);
     InsertComputeBarrier(cmd);
   }
-#endif
 }
 
 void NrdDenoiser::ComposeDenoisedResult(VkCommandBuffer cmd,
@@ -1198,11 +1118,6 @@ const nvvk::Image& NrdDenoiser::ResolveDispatchImage(nrd::ResourceType          
                                                               uint16_t                          poolIndex,
                                                               const DenoiserResources& denoiserInputs) const
 {
-#ifndef THESIS_ENABLE_NRD
-  (void)resourceType;
-  (void)poolIndex;
-  return denoiserInputs.GetDiffuseRadianceHitDistanceImage();
-#else
   switch(resourceType)
   {
     case nrd::ResourceType::IN_MV:
@@ -1231,7 +1146,6 @@ const nvvk::Image& NrdDenoiser::ResolveDispatchImage(nrd::ResourceType          
       assert(false && "Unsupported NRD resource type in path-tracer integration");
       return m_DiffuseOutputImage;
   }
-#endif
 }
 
 void NrdDenoiser::TransitionImageToGeneral(VkCommandBuffer cmd, nvvk::Image& image, VkPipelineStageFlags2 dstStageMask) const
@@ -1278,7 +1192,6 @@ void NrdDenoiser::InsertComputeBarrier(VkCommandBuffer cmd) const
   vkCmdPipelineBarrier2(cmd, &dependencyInfo);
 }
 
-#ifdef THESIS_ENABLE_NRD
 VkDescriptorType NrdDenoiser::ToVkDescriptorType(nrd::DescriptorType descriptorType)
 {
   switch(descriptorType)
@@ -1395,6 +1308,5 @@ void NrdDenoiser::CopyMatrix(glm::mat4 matrix, float (&destination)[16])
 {
   std::memcpy(destination, glm::value_ptr(matrix), sizeof(destination));
 }
-#endif
 
 }  // namespace nvsamples
