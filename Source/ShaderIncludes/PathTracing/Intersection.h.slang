@@ -104,21 +104,21 @@ __generic<T : IFloat> T getAttribute(uint8_t* dataBufferAddress, BufferView buff
   return T(1);
 }
 
-int3 getTriangleIndices(uint8_t* dataBufferAddress, const TriangleMesh mesh, int primitiveID)
+uint3 getTriangleIndices(uint8_t* dataBufferAddress, const TriangleMesh mesh, uint primitiveID)
 {
-  // Supports both 16-bit and 32-bit index streams from imported glTF meshes.
-  if(mesh.indices.byteStride == sizeof(int16_t))
+  // glTF indices are unsigned; keep them unsigned so large 16-bit meshes do not sign-extend.
+  if(mesh.indices.byteStride == sizeof(uint16_t))
   {
-    int16_t3* indices = (int16_t3*)(dataBufferAddress + mesh.indices.offset);
+    uint16_t3* indices = (uint16_t3*)(dataBufferAddress + mesh.indices.offset);
     return indices[primitiveID];
   }
-  else if(mesh.indices.byteStride == sizeof(int32_t))
+  else if(mesh.indices.byteStride == sizeof(uint32_t))
   {
-    int3* indices = (int3*)(dataBufferAddress + mesh.indices.offset);
+    uint3* indices = (uint3*)(dataBufferAddress + mesh.indices.offset);
     return indices[primitiveID];
   }
 
-  return int3(-1);
+  return uint3(0);
 }
 
 __generic<T : IFloat> T getTriangleAttribute(uint8_t* dataBufferAddress, BufferView bufferView, uint3 attributeIndex, float3 barycentrics)
@@ -130,7 +130,7 @@ __generic<T : IFloat> T getTriangleAttribute(uint8_t* dataBufferAddress, BufferV
   return T(barycentrics.x) * attr0 + T(barycentrics.y) * attr1 + T(barycentrics.z) * attr2;
 }
 
-void BuildSurfaceBasis(GltfMesh mesh, int3 indices, float3 barycentrics, float3 shadingNormal, out float3 tangent, out float3 bitangent)
+void BuildSurfaceBasis(GltfMesh mesh, uint3 indices, float3 barycentrics, float3 shadingNormal, out float3 tangent, out float3 bitangent)
 {
   // If the asset has no tangent frame, build one procedurally so anisotropy / normal mapping still have a stable basis.
   if(mesh.triMesh.tangents.count == 0)
@@ -139,7 +139,7 @@ void BuildSurfaceBasis(GltfMesh mesh, int3 indices, float3 barycentrics, float3 
     return;
   }
 
-  const float4 tangentSample = getTriangleAttribute<float4>(mesh.gltfBuffer, mesh.triMesh.tangents, uint3(indices), barycentrics);
+  const float4 tangentSample = getTriangleAttribute<float4>(mesh.gltfBuffer, mesh.triMesh.tangents, indices, barycentrics);
   tangent                     = normalize(mul(float4(tangentSample.xyz, 0.0), ObjectToWorld4x3()));
   tangent                     = tangent - shadingNormal * dot(shadingNormal, tangent);
 
@@ -184,8 +184,8 @@ bool IsMaskedSurfaceHit(BuiltInTriangleIntersectionAttributes attr)
     return material.baseColorFactor.w < material.alphaCutoff;
   }
 
-  const int3   indices  = getTriangleIndices(mesh.gltfBuffer, mesh.triMesh, primitiveIndex);
-  const float2 texCoord = getTriangleAttribute<float2>(mesh.gltfBuffer, mesh.triMesh.texCoords, uint3(indices), barycentrics);
+  const uint3  indices  = getTriangleIndices(mesh.gltfBuffer, mesh.triMesh, primitiveIndex);
+  const float2 texCoord = getTriangleAttribute<float2>(mesh.gltfBuffer, mesh.triMesh.texCoords, indices, barycentrics);
   return ResolveBaseColor(material, texCoord).w < material.alphaCutoff;
 }
 
@@ -234,18 +234,18 @@ SurfaceData LoadSurfaceData(BuiltInTriangleIntersectionAttributes attr)
   const GltfMesh              mesh      = sceneInfo.meshes[instance.meshIndex];
   const GltfMetallicRoughness material  = sceneInfo.materials[instance.materialIndex];
 
-  const int3 indices = getTriangleIndices(mesh.gltfBuffer, mesh.triMesh, primitiveIndex);
+  const uint3 indices = getTriangleIndices(mesh.gltfBuffer, mesh.triMesh, primitiveIndex);
 
   const float3 position0 = getAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.positions, indices.x);
   const float3 position1 = getAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.positions, indices.y);
   const float3 position2 = getAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.positions, indices.z);
 
-  const float3 position = getTriangleAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.positions, uint3(indices), barycentrics);
+  const float3 position = getTriangleAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.positions, indices, barycentrics);
   const float3 normal = mesh.triMesh.normals.count > 0
-                            ? getTriangleAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.normals, uint3(indices), barycentrics)
+                            ? getTriangleAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.normals, indices, barycentrics)
                             : normalize(cross(position1 - position0, position2 - position0));
   const float2 texCoord = mesh.triMesh.texCoords.count > 0
-                              ? getTriangleAttribute<float2>(mesh.gltfBuffer, mesh.triMesh.texCoords, uint3(indices), barycentrics)
+                              ? getTriangleAttribute<float2>(mesh.gltfBuffer, mesh.triMesh.texCoords, indices, barycentrics)
                               : float2(0.0);
 
   const float3 worldPosition  = mul(float4(position, 1.0), ObjectToWorld4x3()).xyz;
@@ -396,6 +396,7 @@ void AccumulateEnvironmentDirectLight(inout PathPayload payload, SurfaceData sur
   const float3 contribution = payload.throughput * radiance * bsdf * (misWeight / lightPdf);
   payload.radiance += contribution;
   AccumulateDenoiserRadiance(payload, contribution);
+  StoreDiffuseDenoiserHitDistanceIfMissing(payload, kDenoiserFarHitDistance);
 }
 
 #endif

@@ -40,6 +40,7 @@ enum BindingPoints
   eViewZImage                       = 7,
   eDiffuseRadianceHitDistanceImage  = 8,
   eSpecularRadianceHitDistanceImage = 9,
+  eSpecularDemodulationFactorImage  = 10,
 };
 
 // ReSTIR uses a separate descriptor layout because the reuse passes need
@@ -63,6 +64,7 @@ enum ReSTIRDIBindingPoints
   eReSTIRDIViewZImage                     = 13,
   eReSTIRDIDiffuseRadianceHitDistanceImage = 14,
   eReSTIRDISpecularRadianceHitDistanceImage = 15,
+  eReSTIRDISpecularDemodulationFactorImage = 16,
 };
 
 struct RasterPushConstant
@@ -75,7 +77,8 @@ struct RasterPushConstant
 
 enum PathTraceFlags
 {
-  ePathTraceFlagAccumulate = 0x1u,
+  ePathTraceFlagAccumulate           = 0x1u,
+  ePathTraceFlagWriteDenoiserSignals = 0x2u,
 };
 
 struct PathTracePushConstant

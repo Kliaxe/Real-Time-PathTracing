@@ -35,6 +35,8 @@ struct DenoiserSettings
   uint32_t maxFastAccumulatedFrames = 6;
   float    diffusePrepassBlurRadius = 30.0f;
   float    specularPrepassBlurRadius = 50.0f;
+  // Larger values preserve more temporal history during motion, but can allow ghosting.
+  float    disocclusionThreshold    = 0.01f;
   bool     enableAntiFirefly        = false;
 };
 

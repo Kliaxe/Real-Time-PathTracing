@@ -49,6 +49,9 @@ public:
   const nvvk::Image& GetSpecularRadianceHitDistanceImage() const;
   nvvk::Image&       GetSpecularRadianceHitDistanceImage();
 
+  const nvvk::Image& GetSpecularDemodulationFactorImage() const;
+  nvvk::Image&       GetSpecularDemodulationFactorImage();
+
 private:
   void CreateOrResizeViewportResources(VkExtent2D viewportSize);
   void DestroyViewportResources();
@@ -64,6 +67,7 @@ private:
   nvvk::Image              m_ViewZImage;
   nvvk::Image              m_DiffuseRadianceHitDistanceImage;
   nvvk::Image              m_SpecularRadianceHitDistanceImage;
+  nvvk::Image              m_SpecularDemodulationFactorImage;
 };
 
 }  // namespace nvsamples

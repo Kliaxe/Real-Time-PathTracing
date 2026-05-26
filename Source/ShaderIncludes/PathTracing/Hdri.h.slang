@@ -32,16 +32,16 @@ float3 LatLongUvToDir(float2 uv)
 
 float3 SampleEnvironment(GltfSceneInfo sceneInfo, float3 direction)
 {
-  // Environment lookup order mirrors the runtime: procedural sky first, then HDRI, then constant background.
-  if(sceneInfo.useSky != 0)
-  {
-    return evalSimpleSky(sceneInfo.skySimpleParam, direction);
-  }
-
+  // HDRI has priority because the environment PDF below is built from the HDRI importance table.
   if(sceneInfo.useHdrEnv != 0 && sceneInfo.environmentTextureIndex >= 0)
   {
     const float2 uv = dirToLatLongUv(direction);
     return textures[sceneInfo.environmentTextureIndex].SampleLevel(uv, 0.0).xyz;
+  }
+
+  if(sceneInfo.useSky != 0)
+  {
+    return evalSimpleSky(sceneInfo.skySimpleParam, direction);
   }
 
   return sceneInfo.backgroundColor;

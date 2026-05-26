@@ -15,6 +15,7 @@ constexpr VkFormat kNormalRoughnessFormat  = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat kBaseColorMetalnessFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat kViewZFormat            = VK_FORMAT_R32_SFLOAT;
 constexpr VkFormat kRadianceHitDistFormat  = VK_FORMAT_R16G16B16A16_SFLOAT;
+constexpr VkFormat kSpecularDemodulationFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
 }  // namespace
 
@@ -32,6 +33,7 @@ void DenoiserResources::Destroy()
   m_Allocator->destroyImage(m_ViewZImage);
   m_Allocator->destroyImage(m_DiffuseRadianceHitDistanceImage);
   m_Allocator->destroyImage(m_SpecularRadianceHitDistanceImage);
+  m_Allocator->destroyImage(m_SpecularDemodulationFactorImage);
 
   m_MotionVectorsImage               = {};
   m_NormalRoughnessImage             = {};
@@ -39,6 +41,7 @@ void DenoiserResources::Destroy()
   m_ViewZImage                       = {};
   m_DiffuseRadianceHitDistanceImage  = {};
   m_SpecularRadianceHitDistanceImage = {};
+  m_SpecularDemodulationFactorImage  = {};
   m_ViewportSize                     = {};
 }
 
@@ -112,6 +115,16 @@ nvvk::Image& DenoiserResources::GetSpecularRadianceHitDistanceImage()
   return m_SpecularRadianceHitDistanceImage;
 }
 
+const nvvk::Image& DenoiserResources::GetSpecularDemodulationFactorImage() const
+{
+  return m_SpecularDemodulationFactorImage;
+}
+
+nvvk::Image& DenoiserResources::GetSpecularDemodulationFactorImage()
+{
+  return m_SpecularDemodulationFactorImage;
+}
+
 void DenoiserResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
 {
   if(viewportSize.width == 0 || viewportSize.height == 0)
@@ -139,6 +152,9 @@ void DenoiserResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
       CreateStorageImage(viewportSize, kRadianceHitDistFormat, "PathTraceDiffuseRadianceHitDistanceImage");
   m_SpecularRadianceHitDistanceImage =
       CreateStorageImage(viewportSize, kRadianceHitDistFormat, "PathTraceSpecularRadianceHitDistanceImage");
+  // NRD can denoise cleaner specular radiance if the material response is removed before filtering.
+  m_SpecularDemodulationFactorImage =
+      CreateStorageImage(viewportSize, kSpecularDemodulationFormat, "PathTraceSpecularDemodulationFactorImage");
 }
 
 void DenoiserResources::DestroyViewportResources()
@@ -149,6 +165,7 @@ void DenoiserResources::DestroyViewportResources()
   ScheduleImageDestroy(m_ViewZImage);
   ScheduleImageDestroy(m_DiffuseRadianceHitDistanceImage);
   ScheduleImageDestroy(m_SpecularRadianceHitDistanceImage);
+  ScheduleImageDestroy(m_SpecularDemodulationFactorImage);
 
   m_MotionVectorsImage               = {};
   m_NormalRoughnessImage             = {};
@@ -156,6 +173,7 @@ void DenoiserResources::DestroyViewportResources()
   m_ViewZImage                       = {};
   m_DiffuseRadianceHitDistanceImage  = {};
   m_SpecularRadianceHitDistanceImage = {};
+  m_SpecularDemodulationFactorImage  = {};
 }
 
 void DenoiserResources::ScheduleImageDestroy(nvvk::Image image)

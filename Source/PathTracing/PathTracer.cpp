@@ -155,7 +155,7 @@ void PathTracer::Render(const RenderInput& input)
   FrameState frameState = BeginPathTraceFrame(input, viewportSize);
   PrepareDenoiser(input, frameState);
   UpdateFrameDescriptors(input);
-  PrepareStorageImages(input);
+  PrepareStorageImages(input, frameState);
 
   const shaderio::PathTracePushConstant pushConstant = BuildPushConstant(input, frameState);
   // Push constants carry the small per-dispatch values; descriptors carry images, TLAS, and textures.
@@ -183,6 +183,7 @@ PathTracer::FrameState PathTracer::BeginPathTraceFrame(const RenderInput& input,
   // FrameState keeps history decisions together so the frame finishes with the same assumptions.
   frameState.viewportSize              = viewportSize;
   frameState.finalAccumulationEnabled  = IsAccumulationResolveMode(m_Settings.resolveMode);
+  frameState.denoiseEnabled            = IsDenoiseResolveMode(m_Settings.resolveMode);
   frameState.accumulationSignature     = MakeAccumulationSignature(input, viewportSize);
   frameState.denoiserSignature         = MakeDenoiserSignature(input, viewportSize);
 
@@ -205,6 +206,11 @@ PathTracer::FrameState PathTracer::BeginPathTraceFrame(const RenderInput& input,
 
 void PathTracer::PrepareDenoiser(const RenderInput& input, const FrameState& frameState)
 {
+  if(!frameState.denoiseEnabled)
+  {
+    return;
+  }
+
   // NRD needs guide buffers and matching camera history before the path trace pass writes signals.
   m_NrdDenoiser.PrepareFrame(NrdDenoiser::FrameInput{
                                  .sceneInfo          = input.sceneInfo,
@@ -216,18 +222,24 @@ void PathTracer::PrepareDenoiser(const RenderInput& input, const FrameState& fra
                              m_DenoiserResources);
 }
 
-void PathTracer::PrepareStorageImages(const RenderInput& input)
+void PathTracer::PrepareStorageImages(const RenderInput& input, const FrameState& frameState)
 {
-  // The ray generation shader writes beauty, accumulation, and denoiser guide images.
+  // The ray generation shader always writes beauty/accumulation. NRD guide images
+  // are only written for denoised frames so raw timing is not charged for NRD setup.
   TransitionStorageImageForWrite(input.cmd, m_AccumulationImage, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetMotionVectorsImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetNormalRoughnessImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetBaseColorMetalnessImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetViewZImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetDiffuseRadianceHitDistanceImage(),
-                                 VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetSpecularRadianceHitDistanceImage(),
-                                 VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+  if(frameState.denoiseEnabled)
+  {
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetMotionVectorsImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetNormalRoughnessImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetBaseColorMetalnessImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetViewZImage(), VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetDiffuseRadianceHitDistanceImage(),
+                                   VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetSpecularRadianceHitDistanceImage(),
+                                   VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetSpecularDemodulationFactorImage(),
+                                   VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+  }
 
   const VkImageMemoryBarrier2 outputBarrier{
       .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -255,6 +267,10 @@ shaderio::PathTracePushConstant PathTracer::BuildPushConstant(const RenderInput&
   if(frameState.finalAccumulationEnabled)
   {
     pathTraceFlags |= shaderio::ePathTraceFlagAccumulate;
+  }
+  if(frameState.denoiseEnabled)
+  {
+    pathTraceFlags |= shaderio::ePathTraceFlagWriteDenoiserSignals;
   }
 
   // Push constants carry per-dispatch data that changes more often than descriptors.
@@ -304,11 +320,22 @@ void PathTracer::FinishFrame(const FrameState& frameState)
 {
   // Store history signatures after all passes used the current frame state.
   m_LastAccumulationSignature = frameState.accumulationSignature;
-  m_LastDenoiserSignature     = frameState.denoiserSignature;
   m_HasAccumulationSignature  = true;
-  m_HasDenoiserSignature      = true;
   m_AccumulationInvalidated   = false;
   m_AccumulatedFrames         = frameState.finalAccumulationEnabled ? (m_AccumulatedFrames + 1) : 0;
+
+  if(frameState.denoiseEnabled)
+  {
+    m_LastDenoiserSignature = frameState.denoiserSignature;
+    m_HasDenoiserSignature  = true;
+  }
+  else
+  {
+    // If NRD is skipped for one or more frames, its temporal history no longer
+    // represents the image sequence. Restart cleanly next time denoising is enabled.
+    m_HasDenoiserSignature = false;
+    m_NrdDenoiser.InvalidateHistory();
+  }
 }
 
 void PathTracer::QueryRayTracingProperties()
@@ -345,6 +372,8 @@ void PathTracer::CreateDescriptorSetLayout()
   bindings.addBinding(shaderio::BindingPoints::eDiffuseRadianceHitDistanceImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
                       VK_SHADER_STAGE_RAYGEN_BIT_KHR);
   bindings.addBinding(shaderio::BindingPoints::eSpecularRadianceHitDistanceImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
+                      VK_SHADER_STAGE_RAYGEN_BIT_KHR);
+  bindings.addBinding(shaderio::BindingPoints::eSpecularDemodulationFactorImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
                       VK_SHADER_STAGE_RAYGEN_BIT_KHR);
 
   const uint32_t frameSetCount = std::max(1u, m_App->getFrameCycleSize());
@@ -476,7 +505,7 @@ void PathTracer::UpdateFrameDescriptors(const RenderInput& input)
 
   // Descriptor writes point the shader at the concrete resources for this frame.
   nvvk::WriteSetContainer write;
-  write.reserve(9);
+  write.reserve(10);
 
   // TLAS gives the ray tracing shader access to scene acceleration structures.
   write.append(m_DescPack.makeWrite(shaderio::BindingPoints::eTlas, frameSetIndex), *input.topLevelAS);
@@ -490,7 +519,7 @@ void PathTracer::UpdateFrameDescriptors(const RenderInput& input)
   accumulationImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
   write.append(m_DescPack.makeWrite(shaderio::BindingPoints::eAccumulationImage, frameSetIndex), accumulationImageInfo);
 
-  // NRD guide images are always bound because the shader writes them every path tracing pass.
+  // NRD guide images are always bound, but the shader only writes them when denoising is enabled.
   VkDescriptorImageInfo motionVectorsImageInfo = m_DenoiserResources.GetMotionVectorsImage().descriptor;
   motionVectorsImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
   write.append(m_DescPack.makeWrite(shaderio::BindingPoints::eMotionVectorsImage, frameSetIndex), motionVectorsImageInfo);
@@ -516,6 +545,11 @@ void PathTracer::UpdateFrameDescriptors(const RenderInput& input)
   specularRadianceHitDistanceImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
   write.append(m_DescPack.makeWrite(shaderio::BindingPoints::eSpecularRadianceHitDistanceImage, frameSetIndex),
                specularRadianceHitDistanceImageInfo);
+
+  VkDescriptorImageInfo specularDemodulationFactorImageInfo = m_DenoiserResources.GetSpecularDemodulationFactorImage().descriptor;
+  specularDemodulationFactorImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
+  write.append(m_DescPack.makeWrite(shaderio::BindingPoints::eSpecularDemodulationFactorImage, frameSetIndex),
+               specularDemodulationFactorImageInfo);
 
   vkUpdateDescriptorSets(m_Allocator->getDevice(), write.size(), write.data(), 0, nullptr);
 }

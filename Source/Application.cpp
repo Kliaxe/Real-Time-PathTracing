@@ -150,6 +150,7 @@ bool DrawDenoiserSettingsSection(const char* treeLabel, DenoiserSettings& settin
 
   changed |= ImGui::SliderFloat("Diffuse Prepass Radius", &settings.diffusePrepassBlurRadius, 0.0f, 64.0f, "%.1f");
   changed |= ImGui::SliderFloat("Specular Prepass Radius", &settings.specularPrepassBlurRadius, 0.0f, 64.0f, "%.1f");
+  changed |= ImGui::SliderFloat("Disocclusion Threshold", &settings.disocclusionThreshold, 0.001f, 0.20f, "%.3f");
 
   if(ImGui::Checkbox("Anti-Firefly", &settings.enableAntiFirefly))
   {

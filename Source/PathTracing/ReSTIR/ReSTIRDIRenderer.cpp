@@ -363,6 +363,8 @@ void ReSTIRDIRenderer::PrepareStorageImages(const RenderInput& input, bool denoi
                                    VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
     TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetSpecularRadianceHitDistanceImage(),
                                    VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetSpecularDemodulationFactorImage(),
+                                   VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
   }
 }
 
@@ -501,6 +503,8 @@ void ReSTIRDIRenderer::CreateDescriptorSetLayout()
                       allStages);
   bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDISpecularRadianceHitDistanceImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
                       allStages);
+  bindings.addBinding(shaderio::ReSTIRDIBindingPoints::eReSTIRDISpecularDemodulationFactorImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
+                      allStages);
 
   m_DescPack.init(bindings, m_Allocator->getDevice(), m_App->getFrameCycleSize(), VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
                   VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT);
@@ -608,6 +612,8 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
   diffuseRadianceHitDistanceImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
   VkDescriptorImageInfo specularRadianceHitDistanceImageInfo = m_DenoiserResources.GetSpecularRadianceHitDistanceImage().descriptor;
   specularRadianceHitDistanceImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
+  VkDescriptorImageInfo specularDemodulationFactorImageInfo = m_DenoiserResources.GetSpecularDemodulationFactorImage().descriptor;
+  specularDemodulationFactorImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
 
   std::array<VkDescriptorBufferInfo, 6> bufferInfos{
       // Reservoir buffer contains all three logical reservoir arrays.
@@ -628,7 +634,7 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
       .pAccelerationStructures    = &accel,
   };
 
-  std::array<VkWriteDescriptorSet, 15> writes{};
+  std::array<VkWriteDescriptorSet, 16> writes{};
   uint32_t                            writeCount = 0;
 
   // TLAS and output images are written individually because their descriptor types differ.
@@ -667,21 +673,23 @@ void ReSTIRDIRenderer::UpdateFrameDescriptors(const RenderInput& input)
   writes[writeCount].pBufferInfo = &bufferInfos[5];
   ++writeCount;
 
-  const std::array<uint32_t, 6> imageBindings{
+  const std::array<uint32_t, 7> imageBindings{
       shaderio::ReSTIRDIBindingPoints::eReSTIRDIMotionVectorsImage,
       shaderio::ReSTIRDIBindingPoints::eReSTIRDINormalRoughnessImage,
       shaderio::ReSTIRDIBindingPoints::eReSTIRDIBaseColorMetalnessImage,
       shaderio::ReSTIRDIBindingPoints::eReSTIRDIViewZImage,
       shaderio::ReSTIRDIBindingPoints::eReSTIRDIDiffuseRadianceHitDistanceImage,
       shaderio::ReSTIRDIBindingPoints::eReSTIRDISpecularRadianceHitDistanceImage,
+      shaderio::ReSTIRDIBindingPoints::eReSTIRDISpecularDemodulationFactorImage,
   };
-  const std::array<VkDescriptorImageInfo*, 6> imageInfos{
+  const std::array<VkDescriptorImageInfo*, 7> imageInfos{
       &motionVectorsImageInfo,
       &normalRoughnessImageInfo,
       &baseColorMetalnessImageInfo,
       &viewZImageInfo,
       &diffuseRadianceHitDistanceImageInfo,
       &specularRadianceHitDistanceImageInfo,
+      &specularDemodulationFactorImageInfo,
   };
   // NRD guide images are always bound; final shading only writes them when the flag is enabled.
   for(size_t i = 0; i < imageBindings.size(); ++i)

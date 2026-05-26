@@ -12,6 +12,7 @@ static const float kInvalidDenoiserViewZ      = 1.0e32;
 static const float kDenoiserMissHitDistance   = 65504.0;
 static const float4 kReblurHitDistanceParameters = float4(3.0, 0.1, 20.0, -25.0);
 static const float3 kMinDiffuseDemodulationFactor = float3(0.05, 0.05, 0.05);
+static const float3 kMinSpecularDemodulationFactor = float3(0.02, 0.02, 0.02);
 
 // Final ReSTIR ray tracing pass. The ray generation shader shades the selected
 // reservoir, while closest-hit/miss shaders are only used by optional secondary
@@ -37,11 +38,18 @@ float4 PackBaseColorMetalness(float3 baseColor, float metalness)
   return float4(saturate(baseColor), saturate(metalness));
 }
 
-float3 ComputeDiffuseDemodulationFactor(DISurface surface)
+void ComputeDenoiserMaterialFactors(DISurface surface, out float3 diffuseFactor, out float3 specularFactor)
 {
-  // Avoid dividing by near-black albedo when feeding demodulated diffuse radiance to NRD.
-  const float3 diffuseFactor = surface.albedo * (1.0 - surface.metallic);
-  return max(diffuseFactor, kMinDiffuseDemodulationFactor);
+  const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
+  const float3 viewDir = normalize(sceneInfo.cameraPosition - surface.worldPosition);
+  const float3 rf0 = lerp(float3(0.04, 0.04, 0.04), surface.albedo, surface.metallic);
+
+  // REBLUR works best when material response is removed before filtering.
+  // The specular factor is stored separately because the compose pass cannot
+  // reconstruct the exact primary view vector without extra scene inputs.
+  NRD_MaterialFactors(surface.shadingNormal, viewDir, surface.albedo, rf0, surface.roughness, diffuseFactor, specularFactor);
+  diffuseFactor  = max(diffuseFactor, kMinDiffuseDemodulationFactor);
+  specularFactor = max(specularFactor, kMinSpecularDemodulationFactor);
 }
 
 void WriteInvalidDenoiserSignals(int2 pixelPosition)
@@ -53,6 +61,7 @@ void WriteInvalidDenoiserSignals(int2 pixelPosition)
   viewZImage[pixelPosition]                       = kInvalidDenoiserViewZ;
   diffuseRadianceHitDistanceImage[pixelPosition]  = float4(0.0, 0.0, 0.0, 0.0);
   specularRadianceHitDistanceImage[pixelPosition] = float4(0.0, 0.0, 0.0, 0.0);
+  specularDemodulationFactorImage[pixelPosition]  = float4(1.0, 1.0, 1.0, 1.0);
 }
 
 void WriteDenoiserSignals(int2 pixelPosition,
@@ -76,13 +85,17 @@ void WriteDenoiserSignals(int2 pixelPosition,
   normalRoughnessImage[pixelPosition] = PackNrdNormalRoughness(surface.shadingNormal, surface.roughness);
   baseColorMetalnessImage[pixelPosition] = PackBaseColorMetalness(surface.albedo, surface.metallic);
   viewZImage[pixelPosition]           = viewZ;
-  const float3 diffuseDemodulationFactor = ComputeDiffuseDemodulationFactor(surface);
-  // Diffuse radiance is demodulated before denoising and remodulated by NRD.
+  float3 diffuseDemodulationFactor;
+  float3 specularDemodulationFactor;
+  ComputeDenoiserMaterialFactors(surface, diffuseDemodulationFactor, specularDemodulationFactor);
+  specularDemodulationFactorImage[pixelPosition] = float4(specularDemodulationFactor, 1.0);
+  // Both lobes are demodulated before denoising, then remodulated in NrdCompose.
   diffuseRadianceHitDistanceImage[pixelPosition] =
       PackReblurRadianceHitDistance(max(diffuseRadiance, float3(0.0)) / diffuseDemodulationFactor, diffuseHitDistance, viewZ,
                                     surface.roughness, true);
   specularRadianceHitDistanceImage[pixelPosition] =
-      PackReblurRadianceHitDistance(max(specularRadiance, float3(0.0)), specularHitDistance, viewZ, surface.roughness, false);
+      PackReblurRadianceHitDistance(max(specularRadiance, float3(0.0)) / specularDemodulationFactor,
+                                    specularHitDistance, viewZ, surface.roughness, false);
 }
 
 bool IsDepthDisoccluded(uint2 pixelPosition, DISurface surface)

@@ -17,7 +17,6 @@
 #include <nvshaders/slang_types.h>
 #include "nvshaders/random.h.slang"
 #include "nvshaders/sky_functions.h.slang"
-#include "ShaderIncludes/Pbr.h.slang"
 #include "ShaderIncludes/Camera.h.slang"
 #include "ShaderIo.h"
 #include "NRD.hlsli"
@@ -36,6 +35,7 @@ static const float kInvalidDenoiserViewZ     = 1.0e32;
 static const float kDenoiserMissHitDistance  = 65504.0;
 static const float4 kReblurHitDistanceParameters = float4(3.0, 0.1, 20.0, -25.0);
 static const float3 kMinDiffuseDemodulationFactor = float3(0.05, 0.05, 0.05);
+static const float3 kMinSpecularDemodulationFactor = float3(0.02, 0.02, 0.02);
 
 float4 PackNrdNormalRoughness(float3 shadingNormal, float roughness)
 {
@@ -54,15 +54,25 @@ float4 PackBaseColorMetalness(float3 baseColor, float metalness)
   return float4(saturate(baseColor), saturate(metalness));
 }
 
-float3 ComputeDiffuseDemodulationFactor(PathPayload payload)
+void ComputeDenoiserMaterialFactors(PathPayload payload, out float3 diffuseFactor, out float3 specularFactor)
 {
   if(payload.hasPrimarySurface == 0u)
   {
-    return float3(1.0, 1.0, 1.0);
+    diffuseFactor  = float3(1.0, 1.0, 1.0);
+    specularFactor = float3(1.0, 1.0, 1.0);
+    return;
   }
 
-  const float3 diffuseFactor = payload.primaryBaseColor * (1.0 - payload.primaryMetalness);
-  return max(diffuseFactor, kMinDiffuseDemodulationFactor);
+  const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
+  const float3 viewDir = normalize(sceneInfo.cameraPosition - payload.primaryWorldPosition);
+  const float3 rf0 = lerp(float3(0.04, 0.04, 0.04), payload.primaryBaseColor, payload.primaryMetalness);
+
+  // NRD recommends filtering material-independent radiance. Its helper gives
+  // the diffuse and preintegrated specular factors to remove before REBLUR.
+  NRD_MaterialFactors(payload.primaryShadingNormal, viewDir, payload.primaryBaseColor, rf0, payload.primaryRoughness,
+                      diffuseFactor, specularFactor);
+  diffuseFactor  = max(diffuseFactor, kMinDiffuseDemodulationFactor);
+  specularFactor = max(specularFactor, kMinSpecularDemodulationFactor);
 }
 
 void WriteDenoiserGuideBuffers(uint2 pixelPosition, GltfSceneInfo sceneInfo, PathPayload payload)
@@ -82,6 +92,7 @@ void WriteDenoiserGuideBuffers(uint2 pixelPosition, GltfSceneInfo sceneInfo, Pat
   normalRoughnessImage[int2(pixelPosition)] = float4(0.0, 0.0, 0.0, 0.0);
   baseColorMetalnessImage[int2(pixelPosition)] = float4(0.0, 0.0, 0.0, 0.0);
   viewZImage[int2(pixelPosition)]           = kInvalidDenoiserViewZ;
+  specularDemodulationFactorImage[int2(pixelPosition)] = float4(1.0, 1.0, 1.0, 1.0);
 }
 
 void WriteDenoiserNoisySignals(uint2 pixelPosition, PathPayload payload)
@@ -92,6 +103,7 @@ void WriteDenoiserNoisySignals(uint2 pixelPosition, PathPayload payload)
   {
     diffuseRadianceHitDistanceImage[imagePosition]  = float4(0.0, 0.0, 0.0, 0.0);
     specularRadianceHitDistanceImage[imagePosition] = float4(0.0, 0.0, 0.0, 0.0);
+    specularDemodulationFactorImage[imagePosition]  = float4(1.0, 1.0, 1.0, 1.0);
     return;
   }
 
@@ -99,14 +111,18 @@ void WriteDenoiserNoisySignals(uint2 pixelPosition, PathPayload payload)
   const float         primaryViewZ      = mul(float4(payload.primaryWorldPosition, 1.0), sceneInfo.viewMatrix).z;
   const float         diffuseHitDistance  = payload.hasDiffuseDenoiserHitDistance != 0u ? payload.diffuseDenoiserHitDistance : 0.0;
   const float specularHitDistance = payload.hasSpecularDenoiserHitDistance != 0u ? payload.specularDenoiserHitDistance : 0.0;
-  const float3 diffuseDemodulationFactor = ComputeDiffuseDemodulationFactor(payload);
+  float3 diffuseDemodulationFactor;
+  float3 specularDemodulationFactor;
+  ComputeDenoiserMaterialFactors(payload, diffuseDemodulationFactor, specularDemodulationFactor);
+  specularDemodulationFactorImage[imagePosition] = float4(specularDemodulationFactor, 1.0);
 
   diffuseRadianceHitDistanceImage[imagePosition] =
       PackReblurRadianceHitDistance(max(payload.diffuseDenoiserRadiance, float3(0.0)) / diffuseDemodulationFactor, diffuseHitDistance,
                                     primaryViewZ,
                                     payload.primaryRoughness, true);
   specularRadianceHitDistanceImage[imagePosition] =
-      PackReblurRadianceHitDistance(max(payload.specularDenoiserRadiance, float3(0.0)), specularHitDistance, primaryViewZ,
+      PackReblurRadianceHitDistance(max(payload.specularDenoiserRadiance, float3(0.0)) / specularDemodulationFactor,
+                                    specularHitDistance, primaryViewZ,
                                     payload.primaryRoughness, false);
 }
 
@@ -153,8 +169,11 @@ void rgenMain()
   payload.awaitingFirstBounceHitDistance = 0u;
 
   TraceRay(topLevelAS, 0, 0xFF, 0, 0, 0, ray, payload);
-  WriteDenoiserGuideBuffers(launchID, sceneInfo, payload);
-  WriteDenoiserNoisySignals(launchID, payload);
+  if((pushConst.flags & uint(PathTraceFlags::ePathTraceFlagWriteDenoiserSignals)) != 0u)
+  {
+    WriteDenoiserGuideBuffers(launchID, sceneInfo, payload);
+    WriteDenoiserNoisySignals(launchID, payload);
+  }
 
   const float3 sampleRadiance   = max(payload.radiance, float3(0.0));
   float3       resolvedRadiance = sampleRadiance;

@@ -168,10 +168,10 @@ void AccumulateEmissiveDirectLight(inout PathPayload payload, SurfaceData surfac
   const float3 contribution = payload.throughput * radiance * bsdf * (misWeight / lightPdf);
   payload.radiance += contribution;
   AccumulateDenoiserRadiance(payload, contribution);
+  StoreDiffuseDenoiserHitDistanceIfMissing(payload, distance);
 }
 
 #endif
-
 
 
 

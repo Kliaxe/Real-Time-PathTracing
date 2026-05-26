@@ -118,6 +118,7 @@ private:
     AccumulationSignature accumulationSignature{};
     DenoiserSignature     denoiserSignature{};
     bool                  finalAccumulationEnabled = false;
+    bool                  denoiseEnabled = false;
     bool                  denoiserHistoryInvalidated = false;
   };
 
@@ -130,7 +131,7 @@ private:
   void EnsureViewportResources(VkExtent2D viewportSize);
   FrameState BeginPathTraceFrame(const RenderInput& input, VkExtent2D viewportSize);
   void PrepareDenoiser(const RenderInput& input, const FrameState& frameState);
-  void PrepareStorageImages(const RenderInput& input);
+  void PrepareStorageImages(const RenderInput& input, const FrameState& frameState);
   shaderio::PathTracePushConstant BuildPushConstant(const RenderInput& input, const FrameState& frameState);
   void RecordPathTracePass(const RenderInput& input, const shaderio::PathTracePushConstant& pushConstant);
   void RunDenoiserIfNeeded(const RenderInput& input, const FrameState& frameState);

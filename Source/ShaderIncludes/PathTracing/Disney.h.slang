@@ -298,7 +298,8 @@ DisneyLobeSetup GetLobeSetup(DisneyMaterialData material, DisneyBrdfData brdf)
   // Separates "how much energy each lobe gets" from "how often each lobe is sampled".
   DisneyLobeSetup setup;
 
-  const float clearcoatEnergyLoss = 1.0 - (F_Schlick(0.04, 1.0, abs(brdf.LdotH)) * material.clearcoat);
+  // Lobe setup must not depend on the sampled light direction; continuation sampling builds it before L is known.
+  const float clearcoatEnergyLoss = 1.0 - (F_Schlick(0.04, 1.0, abs(brdf.NdotV)) * material.clearcoat);
   setup.diffuseWeight             = (1.0 - material.metallic) * (1.0 - material.transmission) * clearcoatEnergyLoss;
   setup.dielectricWeight          = setup.diffuseWeight;
   setup.metalWeight               = material.metallic * clearcoatEnergyLoss;

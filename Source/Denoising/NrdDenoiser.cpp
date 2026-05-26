@@ -378,7 +378,7 @@ void NrdDenoiser::CreateDescriptorSetLayouts()
   };
   NVVK_CHECK(vkCreateDescriptorSetLayout(device, &frameLayoutInfo, nullptr, &m_FrameSetLayout));
 
-  const std::array<VkDescriptorSetLayoutBinding, 10> composeBindings{{
+  const std::array<VkDescriptorSetLayoutBinding, 11> composeBindings{{
       VkDescriptorSetLayoutBinding{
           .binding         = 0,
           .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -435,6 +435,12 @@ void NrdDenoiser::CreateDescriptorSetLayouts()
       },
       VkDescriptorSetLayoutBinding{
           .binding         = 9,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+          .descriptorCount = 1,
+          .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
+      },
+      VkDescriptorSetLayoutBinding{
+          .binding         = 10,
           .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
           .descriptorCount = 1,
           .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -547,7 +553,7 @@ void NrdDenoiser::CreateFrameResources()
     const VkDescriptorPoolSize poolSizes[] = {
         VkDescriptorPoolSize{
             .type            = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-            .descriptorCount = m_InstanceDesc->descriptorPoolDesc.setsMaxNum * m_InstanceDesc->descriptorPoolDesc.perSetTexturesMaxNum + 2,
+            .descriptorCount = m_InstanceDesc->descriptorPoolDesc.setsMaxNum * m_InstanceDesc->descriptorPoolDesc.perSetTexturesMaxNum + 10,
         },
         VkDescriptorPoolSize{
             .type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
@@ -732,8 +738,8 @@ void NrdDenoiser::UpdateCommonSettings(const FrameInput& input)
   const shaderio::GltfSceneInfo& sceneInfo = *input.sceneInfo;
 
   // NRD receives current and previous camera transforms in view/clip space.
-  // The renderer has no jitter here, and motion vectors are written in screen
-  // pixel space by the path tracing and ReSTIR shaders.
+  // The renderer has no jitter here, and motion vectors are written as
+  // screen-UV deltas with Z as previous-viewZ minus current-viewZ.
   const glm::mat4 currentViewMatrix       = sceneInfo.viewMatrix;
   const glm::mat4 currentProjectionMatrix = sceneInfo.viewProjMatrix * sceneInfo.viewInvMatrix;
   const glm::mat4 previousViewMatrix      = m_HasPreviousMatrices ? m_PreviousViewMatrix : currentViewMatrix;
@@ -762,7 +768,10 @@ void NrdDenoiser::UpdateCommonSettings(const FrameInput& input)
   m_CommonSettings.rectSizePrev[1]      = static_cast<uint16_t>(input.viewportSize.height);
   m_CommonSettings.viewZScale           = 1.0f;
   m_CommonSettings.denoisingRange       = 500000.0f;
-  m_CommonSettings.disocclusionThreshold = 0.01f;
+  // This is NRD's local history rejection threshold. Higher values keep more
+  // reprojected history through camera motion, but can also make trails easier to see.
+  m_CommonSettings.disocclusionThreshold =
+      input.settings != nullptr ? input.settings->disocclusionThreshold : DenoiserSettings{}.disocclusionThreshold;
   m_CommonSettings.disocclusionThresholdAlternate = 0.05f;
   m_CommonSettings.splitScreen          = 0.0f;
   m_CommonSettings.frameIndex           = m_FrameIndex;
@@ -1011,12 +1020,17 @@ void NrdDenoiser::ComposeDenoisedResult(VkCommandBuffer cmd,
       .imageView   = denoiserInputs.GetSpecularRadianceHitDistanceImage().descriptor.imageView,
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
+  const VkDescriptorImageInfo specularDemodulationFactorImageInfo{
+      .sampler     = VK_NULL_HANDLE,
+      .imageView   = denoiserInputs.GetSpecularDemodulationFactorImage().descriptor.imageView,
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
   const VkDescriptorImageInfo outputStorageImageInfo{
       .sampler     = VK_NULL_HANDLE,
       .imageView   = outputImageView,
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
   };
-  const std::array<VkWriteDescriptorSet, 10> writes{{
+  const std::array<VkWriteDescriptorSet, 11> writes{{
       VkWriteDescriptorSet{
           .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet          = composeSet,
@@ -1093,6 +1107,14 @@ void NrdDenoiser::ComposeDenoisedResult(VkCommandBuffer cmd,
           .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet          = composeSet,
           .dstBinding      = 9,
+          .descriptorCount = 1,
+          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+          .pImageInfo      = &specularDemodulationFactorImageInfo,
+      },
+      VkWriteDescriptorSet{
+          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet          = composeSet,
+          .dstBinding      = 10,
           .descriptorCount = 1,
           .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
           .pImageInfo      = &outputStorageImageInfo,

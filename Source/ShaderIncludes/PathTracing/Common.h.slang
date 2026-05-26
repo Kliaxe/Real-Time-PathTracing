@@ -6,6 +6,7 @@
 #endif
 
 static const float kRayTMax                    = 1.0e32;
+static const float kDenoiserFarHitDistance     = 65504.0;
 static const float kInvPi                      = 0.31830988618;
 static const float kRayOriginFloor             = 1.0 / 32.0;
 static const float kRayOriginFloatEps          = 1.0 / 65536.0;
@@ -96,6 +97,7 @@ void StorePrimarySurfaceForDenoiser(inout PathPayload payload, SurfaceData surfa
 
 float3 ComputeDenoiserMotionVector(float2 pixelCenter, float3 worldPosition, GltfSceneInfo sceneInfo)
 {
+  // NRD's REBLUR path adds mv.xy directly to pixel UV, so XY is stored as a UV delta.
   const float2 currentUv = pixelCenter / sceneInfo.viewportSize;
 
   const float4 previousClipPosition = mul(float4(worldPosition, 1.0), sceneInfo.prevViewProjMatrix);
@@ -167,6 +169,19 @@ void StoreFirstBounceHitDistance(inout PathPayload payload, float hitDistance)
   }
 
   payload.awaitingFirstBounceHitDistance = 0u;
+}
+
+void StoreDiffuseDenoiserHitDistanceIfMissing(inout PathPayload payload, float hitDistance)
+{
+  if(payload.hasPrimarySurface == 0u || payload.depth != 0u || payload.hasDiffuseDenoiserHitDistance != 0u)
+  {
+    return;
+  }
+
+  // Direct-light next-event samples have no secondary ray hit. Give REBLUR the
+  // light distance instead of a zero fallback so its blur radius is not overly strict.
+  payload.diffuseDenoiserHitDistance    = max(hitDistance, 0.0);
+  payload.hasDiffuseDenoiserHitDistance = 1u;
 }
 
 bool IsFinalRadianceAccumulationEnabled()

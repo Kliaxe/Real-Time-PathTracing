@@ -16,6 +16,7 @@
 [[vk::binding(BindingPoints::eViewZImage)]]       RWTexture2D<float> viewZImage;
 [[vk::binding(BindingPoints::eDiffuseRadianceHitDistanceImage)]] RWTexture2D<float4> diffuseRadianceHitDistanceImage;
 [[vk::binding(BindingPoints::eSpecularRadianceHitDistanceImage)]] RWTexture2D<float4> specularRadianceHitDistanceImage;
+[[vk::binding(BindingPoints::eSpecularDemodulationFactorImage)]] RWTexture2D<float4> specularDemodulationFactorImage;
 
 #endif
 

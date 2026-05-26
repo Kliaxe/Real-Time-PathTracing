@@ -26,10 +26,12 @@
 [[vk::binding(6, 0)]] Texture2D<float4> inNoisyDiffuseRadianceHitDistance;
 [[vk::binding(7, 0)]] Texture2D<float4> inNoisySpecularRadianceHitDistance;
 [[vk::binding(8, 0)]] Texture2D<float4> inBaseColorMetalness;
-[[vk::binding(9, 0)]] RWTexture2D<float4> outImage;
+[[vk::binding(9, 0)]] Texture2D<float4> inSpecularDemodulationFactor;
+[[vk::binding(10, 0)]] RWTexture2D<float4> outImage;
 
 static const float kInvalidDenoiserViewZThreshold = 1.0e31;
 static const float3 kMinDiffuseDemodulationFactor = float3(0.05, 0.05, 0.05);
+static const float3 kMinSpecularDemodulationFactor = float3(0.02, 0.02, 0.02);
 
 struct ResolvePushConstants
 {
@@ -68,6 +70,13 @@ float3 ComputeDiffuseDemodulationFactor(float4 baseColorMetalness)
   return max(diffuseFactor, kMinDiffuseDemodulationFactor);
 }
 
+float3 ComputeSpecularDemodulationFactor(float4 packedSpecularFactor)
+{
+  // The ray tracing passes computed NRD_MaterialFactors with the exact primary-view vector.
+  // Compose only needs to reapply the stored factor after REBLUR has filtered pure specular radiance.
+  return max(packedSpecularFactor.rgb, kMinSpecularDemodulationFactor);
+}
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID)
@@ -91,16 +100,27 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
   const float4 noisyDiffusePacked  = inNoisyDiffuseRadianceHitDistance.Load(imagePosition);
   const float4 noisySpecularPacked = inNoisySpecularRadianceHitDistance.Load(imagePosition);
   const float4 baseColorMetalness  = inBaseColorMetalness.Load(imagePosition);
+  const float4 specularDemodulationFactorPacked = inSpecularDemodulationFactor.Load(imagePosition);
 
   const float4 diffuseResolved      = REBLUR_BackEnd_UnpackRadianceAndNormHitDist(diffusePacked);
   const float4 specularResolved     = REBLUR_BackEnd_UnpackRadianceAndNormHitDist(specularPacked);
   const float4 noisyDiffuseResolved = REBLUR_BackEnd_UnpackRadianceAndNormHitDist(noisyDiffusePacked);
   const float4 noisySpecularResolved = REBLUR_BackEnd_UnpackRadianceAndNormHitDist(noisySpecularPacked);
   const float3 diffuseDemodulationFactor = ComputeDiffuseDemodulationFactor(baseColorMetalness);
+  const float3 specularDemodulationFactor = ComputeSpecularDemodulationFactor(specularDemodulationFactorPacked);
   const float3 remodulatedDiffuse = (pushConstants.useMaterialDemodulation != 0u)
                                         ? max(diffuseResolved.rgb, float3(0.0)) * diffuseDemodulationFactor
                                         : max(diffuseResolved.rgb, float3(0.0));
-  const float3 combinedRadiance     = remodulatedDiffuse + max(specularResolved.rgb, float3(0.0));
+  const float3 remodulatedSpecular = (pushConstants.useMaterialDemodulation != 0u)
+                                         ? max(specularResolved.rgb, float3(0.0)) * specularDemodulationFactor
+                                         : max(specularResolved.rgb, float3(0.0));
+  const float3 noisyRemodulatedDiffuse = (pushConstants.useMaterialDemodulation != 0u)
+                                             ? max(noisyDiffuseResolved.rgb, float3(0.0)) * diffuseDemodulationFactor
+                                             : max(noisyDiffuseResolved.rgb, float3(0.0));
+  const float3 noisyRemodulatedSpecular = (pushConstants.useMaterialDemodulation != 0u)
+                                              ? max(noisySpecularResolved.rgb, float3(0.0)) * specularDemodulationFactor
+                                              : max(noisySpecularResolved.rgb, float3(0.0));
+  const float3 combinedRadiance     = remodulatedDiffuse + remodulatedSpecular;
 
   float3 outputRadiance = combinedRadiance;
 
@@ -119,16 +139,16 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
       outputRadiance = rawBeauty.rgb;
       break;
     case 3u:
-      outputRadiance = max(noisyDiffuseResolved.rgb, float3(0.0));
+      outputRadiance = noisyRemodulatedDiffuse;
       break;
     case 4u:
-      outputRadiance = max(noisySpecularResolved.rgb, float3(0.0));
+      outputRadiance = noisyRemodulatedSpecular;
       break;
     case 5u:
-      outputRadiance = max(diffuseResolved.rgb, float3(0.0));
+      outputRadiance = remodulatedDiffuse;
       break;
     case 6u:
-      outputRadiance = max(specularResolved.rgb, float3(0.0));
+      outputRadiance = remodulatedSpecular;
       break;
     case 7u:
       outputRadiance = VisualizeNormalRoughness(normalRoughness);
