@@ -33,7 +33,7 @@ ReSTIRDIBufferIndices GetDefaultReSTIRDIBufferIndices()
 
 ReSTIRDIInitialSamplingParameters GetDefaultReSTIRDIInitialSamplingParams()
 {
-  // Defaults favor the thesis ReSTIR DI path: many direct-light candidates, no BRDF candidates.
+  // Defaults favor the ReSTIR DI path: many direct-light candidates, no BRDF candidates.
   ReSTIRDIInitialSamplingParameters parameters{};
   parameters.brdfCutoff                      = 0.0001f;
   parameters.brdfRayMinT                     = 0.001f;
@@ -61,7 +61,7 @@ ReSTIRDITemporalResamplingParameters GetDefaultReSTIRDITemporalResamplingParams(
 
 ReSTIRDISpatialResamplingParameters GetDefaultReSTIRDISpatialResamplingParams()
 {
-  // Spatial reuse uses a moderate neighbor count and radius suitable for the experiment scenes.
+  // Spatial reuse uses a moderate neighbor count and radius for the default renderer settings.
   ReSTIRDISpatialResamplingParameters parameters{};
   parameters.numDisocclusionBoostSamples = 8;
   parameters.numSamples                  = 5;

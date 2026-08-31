@@ -1,0 +1,35 @@
+diff --git a/nvutils/parallel_work.hpp b/nvutils/parallel_work.hpp
+index d3bf920..2c8e367 100644
+--- a/nvutils/parallel_work.hpp
++++ b/nvutils/parallel_work.hpp
+@@ -25,3 +25,2 @@
+ #include <cstdint>
+-#include <execution>
+ #include <functional>
+@@ -156,2 +155,8 @@ private:
+ 
++// Returns the thread pool; creates it if it hasn't been created yet.
++// Safe to call from multiple threads, but for performance reasons, should
++// only be called if you know you'll run on multiple threads using the
++// pool functions.
++BS::thread_pool& get_thread_pool();
++
+ // This `typename F` makes the C++ compiler generate a different
+@@ -201,4 +206,6 @@ inline void parallel_batches(uint64_t numItems, F&& fn, uint32_t numThreads = 0)
+ 
+-    iota_view<uint64_t> batches(0, numBatches);
+-    std::for_each(std::execution::par_unseq, batches.begin(), batches.end(), worker);
++    const uint64_t         numBlocks  = ((BATCHSIZE == 1) ? numBatches : 0);
++    BS::thread_pool&       threadPool = get_thread_pool();
++    BS::multi_future<void> future     = threadPool.submit_loop<uint64_t>(0, numBatches, worker, numBlocks);
++    future.wait();
+   }
+@@ -206,8 +213,2 @@ inline void parallel_batches(uint64_t numItems, F&& fn, uint32_t numThreads = 0)
+ 
+-// Returns the thread pool; creates it if it hasn't been created yet.
+-// Safe to call from multiple threads, but for performance reasons, should
+-// only be called if you know you'll run on multiple threads using the
+-// pool functions.
+-BS::thread_pool& get_thread_pool();
+-
+ // Like parallel_batches, but provides a thread index from within the pool of threads.

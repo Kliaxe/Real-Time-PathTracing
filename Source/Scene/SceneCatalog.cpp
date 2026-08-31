@@ -173,7 +173,7 @@ void AddManyCornellLights(SceneDefinition& scene)
   }
 }
 
-// Material presets used by the built-in thesis scenes.
+// Material presets used by the built-in scenes.
 MaterialAttributes DielectricPreset()
 {
   MaterialAttributes mat{};

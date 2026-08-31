@@ -307,7 +307,7 @@ DIMaterial DIGetMaterial(DISurface surface)
 
 bool DIAreMaterialsSimilar(DIMaterial a, DIMaterial b)
 {
-  // Spatial reuse is restricted to the same material in this thesis renderer.
+  // Spatial reuse is restricted to the same material in this renderer.
   return a == b;
 }
 
@@ -364,8 +364,8 @@ bool IsSelfEmissiveSample(DISurface surface, EmissiveTriangleLight light)
 
 DILightInfo DILoadLightInfo(uint lightIndex)
 {
-  // Scene geometry and emissive-light indexing are static during thesis experiments,
-  // so previous-frame light references map directly to the current light list.
+  // Scene rebuilds invalidate temporal history, so previous-frame light
+  // references map directly to the current light list.
   const GltfSceneInfo sceneInfo = pushConst.sceneInfoAddress[0];
   const uint localLightCount    = sceneInfo.emissiveTriangleCount;
   const uint environmentPresent = HasEnvironmentLight(sceneInfo) ? 1u : 0u;
@@ -740,7 +740,7 @@ bool DIGetConservativeVisibility(DISurface surface, DILightSample lightSample)
 
 bool DIGetTemporalConservativeVisibility(DISurface surface, DILightSample lightSample)
 {
-  // Temporal reuse samples a previous-frame surface, but this thesis renderer
+  // Temporal reuse samples a previous-frame surface, but this renderer
   // keeps one current-frame TLAS. The visibility ray is therefore an
   // approximation from the current receiver.
   return EvaluateLightSampleVisibility(surface, lightSample);
@@ -748,9 +748,8 @@ bool DIGetTemporalConservativeVisibility(DISurface surface, DILightSample lightS
 
 int DITranslateLightIndex(uint lightIndex)
 {
-  // Scene geometry and emissive-light indexing are static during thesis
-  // experiments, so previous-frame light references map directly to the current
-  // light list.
+  // Scene rebuilds invalidate temporal history, so previous-frame light
+  // references map directly to the current light list.
   return lightIndex < GetTotalSupportedLightCount(pushConst.sceneInfoAddress[0]) ? int(lightIndex) : -1;
 }
 

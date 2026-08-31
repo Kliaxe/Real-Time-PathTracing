@@ -9,8 +9,10 @@
     {
       // Standard interactive run.
       "name": "RealTimePathTracing (CMake Tools)",
-      "type": "cppvsdbg",
+      "type": "cppdbg",
       "request": "launch",
+      "MIMode": "lldb",
+      "miDebuggerPath": "${env:LOCALAPPDATA}\\LLVM-MinGW\\bin\\lldb-mi.exe",
 
       // Resolved by CMake Tools (requires a successful configure).
       "program": "${command:cmake.launchTargetPath}",
@@ -25,7 +27,7 @@
       "environment": [
         {
           "name": "PATH",
-          "value": "${env:PATH};${command:cmake.launchTargetDirectory}"
+          "value": "${env:LOCALAPPDATA}\\LLVM-MinGW\\bin;${env:PATH};${command:cmake.launchTargetDirectory}"
         }
       ],
 
@@ -34,8 +36,10 @@
     {
       // Headless run (writes image next to the exe).
       "name": "RealTimePathTracing (Headless)",
-      "type": "cppvsdbg",
+      "type": "cppdbg",
       "request": "launch",
+      "MIMode": "lldb",
+      "miDebuggerPath": "${env:LOCALAPPDATA}\\LLVM-MinGW\\bin\\lldb-mi.exe",
 
       "program": "${command:cmake.launchTargetPath}",
 
@@ -46,7 +50,7 @@
       "environment": [
         {
           "name": "PATH",
-          "value": "${env:PATH};${command:cmake.launchTargetDirectory}"
+          "value": "${env:LOCALAPPDATA}\\LLVM-MinGW\\bin;${env:PATH};${command:cmake.launchTargetDirectory}"
         }
       ],
 
@@ -54,4 +58,3 @@
     }
   ]
 }
-

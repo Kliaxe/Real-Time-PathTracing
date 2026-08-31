@@ -2,9 +2,9 @@
 
 ![Renderer screenshot](Screenshots/Screenshot%201.png)
 
-This repository contains the renderer and report material for a master's thesis about real-time path tracing with ReSTIR direct illumination. The project uses Vulkan ray tracing, physically based shading, NVIDIA Real-Time Denoisers, and a small experiment runner for capturing the images and timings used in the thesis.
+Real-Time PathTracing is a personal Vulkan renderer for real-time path tracing, ReSTIR direct illumination, physically based shading, and NVIDIA Real-Time Denoisers.
 
-The code is built around the thesis work. It should make the tested ideas possible to inspect, run, and discuss.
+It started as a master's project focused on real-time path tracing with ReSTIR direct illumination and continues as an evolving personal rendering project.
 
 ## Tested Setup
 
@@ -15,19 +15,30 @@ The project has been tested on Windows with:
 - VRAM: 16,303 MiB
 - NVIDIA driver: 592.01
 
-Other Vulkan ray tracing capable NVIDIA GPUs may work. The thesis results and timings were produced on the setup above.
+Other Vulkan ray tracing capable NVIDIA GPUs may work. The captures and timings currently in this repository were produced on the setup above.
 
 ## Requirements
 
 The expected development setup is:
 
 - Windows
-- Visual Studio 2022 with C++ tools
-- CMake
+- Visual Studio Code with the CMake Tools and C/C++ extensions
+- CMake 3.23 or newer
+- LLVM MinGW (UCRT runtime), which provides Clang, LLDB, and the C++ runtime
 - Ninja
 - Vulkan SDK
 - Git LFS
 - Internet access during first CMake configure
+
+Install the standalone compiler and build tool without installing Visual Studio:
+
+```powershell
+winget install --id MartinStorsjo.LLVM-MinGW.UCRT --exact --scope user
+winget install --id Ninja-build.Ninja --exact --scope user
+.\Scripts\Bootstrap-LLVM-MinGW.ps1
+```
+
+The bootstrap script creates a stable LLVM MinGW path used by the CMake presets, so CMake Tools does not depend on the VS Code process inheriting WinGet's versioned `PATH`. Rerun it after updating LLVM MinGW.
 
 The first configure downloads external dependencies such as `nvpro_core2` and NVIDIA NRD. The content assets are managed through Git LFS, so run this after cloning if the assets are missing:
 
@@ -37,23 +48,18 @@ git lfs pull
 
 ## Build
 
-The PowerShell scripts are the easiest path on Windows. They enter the Visual Studio developer environment and call the same CMake presets used by the project.
+Use the CMake presets directly. VS Code CMake Tools invokes these same commands.
 
 ```powershell
-.\Scripts\Setup-CMake.ps1 -Config Release -Build -FirstFailureOnly
+cmake --preset x64-Release
+cmake --build --preset x64-Release --target RealTimePathTracing
 ```
 
 For a normal debug build:
 
 ```powershell
-.\Scripts\Setup-CMake.ps1 -Config Debug -Build -FirstFailureOnly
-```
-
-The same build can also be done manually with CMake:
-
-```powershell
-cmake --preset x64-Release
-cmake --build --preset x64-Release --target RealTimePathTracing
+cmake --preset x64-Debug
+cmake --build --preset x64-Debug --target RealTimePathTracing
 ```
 
 The executable is written to:
@@ -63,6 +69,15 @@ Binaries\Release\RealTimePathTracing.exe
 ```
 
 Use `Binaries\Debug\RealTimePathTracing.exe` for a debug build.
+
+## Visual Studio Code
+
+After reopening VS Code, use the CMake Tools status bar to select:
+
+1. Configure preset: `x64-Debug`
+2. Launch target: `RealTimePathTracing`
+
+Then select **Run and Debug** and launch `RealTimePathTracing (CMake Tools)`. The launch configuration builds through CMake Tools and debugs with the LLVM MinGW LLDB adapter.
 
 ## Run
 
@@ -74,44 +89,18 @@ To open the renderer:
 
 The application UI exposes the scene selection, render mode, ReSTIR settings, path tracing settings, and denoising options used during the project.
 
-## Run Thesis Experiments
-
-The renderer also has a small headless experiment runner for capturing repeatable images, metadata, and GPU timings.
-
-List available experiment groups:
-
-```powershell
-.\Binaries\Release\RealTimePathTracing.exe --list-experiments
-```
-
-Run a quick smoke experiment:
-
-```powershell
-.\Binaries\Release\RealTimePathTracing.exe --experiment restir-smoke
-```
-
-Run a specific experiment and choose the output folder:
-
-```powershell
-.\Binaries\Release\RealTimePathTracing.exe --experiment restir-di-minimal --experiment-output Results\restir-di-minimal
-```
-
-Experiment output is written under `Results/` by default. Each run writes captures and small metadata files, and the summary files contain the GPU timings used by the report.
-
 ## Repository Layout
 
-- `Source/`: application code, Vulkan renderer, path tracer, ReSTIR DI implementation, denoising integration, shaders, and experiment runner.
+- `Source/`: application code, Vulkan renderer, path tracer, ReSTIR DI implementation, denoising integration, and shaders.
 - `Content/`: models, textures, and HDRIs used by the renderer.
-- `Report/`: LaTeX thesis source, report images, and report helper scripts.
-- `Results/`: generated experiment captures and timing data.
-- `Docs/`: planning notes, references, and thesis support material.
-- `Scripts/`: CMake setup, build, and cleanup helpers.
+- `docs/`: project and agent documentation.
+- `Scripts/`: standalone LLVM MinGW bootstrap helper.
 
 ## Scope Notes
 
-The implementation is intentionally thesis-focused. ReSTIR is treated mainly as a direct illumination technique, while secondary path bounces are included to show how it can sit inside a path-tracing-style renderer. The code also includes denoising because real-time ray traced output is normally judged together with a reconstruction step.
+ReSTIR is currently treated mainly as a direct illumination technique, while secondary path bounces show how it can sit inside a path-tracing-style renderer. The code also includes denoising because real-time ray traced output is normally judged together with a reconstruction step.
 
-The timings in the report are measurements from this implementation on the tested machine. They are mainly useful for comparing the modes in this project.
+The timings are measurements from this implementation on the tested machine. They are mainly useful for comparing the modes in this project.
 
 ## Troubleshooting
 
@@ -121,7 +110,7 @@ If the program opens with missing scenes or textures, check that Git LFS downloa
 git lfs pull
 ```
 
-If CMake configure fails, check that Visual Studio C++ tools, Ninja, and the Vulkan SDK are installed and visible from the terminal. The first configure can take longer because dependencies are downloaded and built.
+If CMake configure fails, check that LLVM MinGW, Ninja, and the Vulkan SDK are installed and visible from a newly opened terminal. The first configure can take longer because dependencies are downloaded and built.
 
 For performance captures, prefer a Release build. Debug builds are useful for development and can produce misleading timings.
 

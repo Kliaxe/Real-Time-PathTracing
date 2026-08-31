@@ -10,23 +10,31 @@
     {
       "name": "base-x64",
       "displayName": "Base (x64)",
-      "description": "Common settings for all x64 presets.",
+      "description": "Common standalone LLVM MinGW settings for all x64 presets.",
       "hidden": true,
 
       "generator": "Ninja",
 
       "binaryDir": "${sourceDir}/Build/${presetName}",
 
+      "environment": {
+        "PATH": "$env{LOCALAPPDATA}/LLVM-MinGW/bin;$env{LOCALAPPDATA}/Microsoft/WinGet/Links;$penv{PATH}"
+      },
+
       "cacheVariables": {
+        "CMAKE_C_COMPILER": "$env{LOCALAPPDATA}/LLVM-MinGW/bin/x86_64-w64-mingw32-clang.exe",
+        "CMAKE_CXX_COMPILER": "$env{LOCALAPPDATA}/LLVM-MinGW/bin/x86_64-w64-mingw32-clang++.exe",
+        "CMAKE_RC_COMPILER": "x86_64-w64-mingw32-windres",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_INSTALL_PREFIX": "${sourceDir}/Install/${presetName}"
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/Install/${presetName}",
+        "CMAKE_MAKE_PROGRAM": "ninja"
       }
     },
 
     {
       "name": "x64-Debug",
       "displayName": "x64 Debug",
-      "description": "Ninja single-config Debug build.",
+      "description": "Standalone LLVM MinGW + Ninja Debug build.",
       "inherits": "base-x64",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
@@ -35,7 +43,7 @@
     {
       "name": "x64-Release",
       "displayName": "x64 Release",
-      "description": "Ninja single-config Release build.",
+      "description": "Standalone LLVM MinGW + Ninja Release build.",
       "inherits": "base-x64",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
@@ -44,7 +52,7 @@
     {
       "name": "x64-RelWithDebInfo",
       "displayName": "x64 RelWithDebInfo",
-      "description": "Ninja single-config RelWithDebInfo build.",
+      "description": "Standalone LLVM MinGW + Ninja RelWithDebInfo build.",
       "inherits": "base-x64",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo"
@@ -53,7 +61,7 @@
     {
       "name": "x64-MinSizeRel",
       "displayName": "x64 MinSizeRel",
-      "description": "Ninja single-config MinSizeRel build.",
+      "description": "Standalone LLVM MinGW + Ninja MinSizeRel build.",
       "inherits": "base-x64",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "MinSizeRel"
@@ -84,4 +92,3 @@
     }
   ]
 }
-

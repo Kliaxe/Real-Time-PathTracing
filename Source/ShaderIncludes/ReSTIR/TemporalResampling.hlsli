@@ -213,7 +213,7 @@ ReSTIRDIReservoir ReSTIRDIRunTemporalResampling(
                 && (!selectedPreviousSample || tparams.enableVisibilityShortcut == 0))
             {
                 // This is an approximation from the current receiver because
-                // the thesis renderer keeps only the current TLAS.
+                // the renderer keeps only the current TLAS.
                 if (!DIGetTemporalConservativeVisibility(surface, selectedSampleAtTemporal))
                 {
                     temporalP = 0;

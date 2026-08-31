@@ -12,7 +12,6 @@ Build/
 Install/
 Intermediate/
 Binaries/
-Results/
 
 # Optional IDE build roots (Visual Studio CMakeSettings.json uses ./out/)
 out/
@@ -75,4 +74,3 @@ CMakeUserPresets.json
 
 log_*.txt
 *.ini
-

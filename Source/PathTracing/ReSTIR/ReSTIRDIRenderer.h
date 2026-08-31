@@ -24,7 +24,7 @@ class Application;
 namespace nvsamples
 {
 
-// Thesis ReSTIR DI renderer. It records the initial-sampling, temporal,
+// Real-Time PathTracing ReSTIR DI renderer. It records the initial-sampling, temporal,
 // spatial, and final-shading passes, then optionally feeds the result through
 // the shared NRD denoising path.
 // CPU responsibility: own Vulkan state, update descriptors/parameters, and

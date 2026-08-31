@@ -4,22 +4,22 @@ project(RealTimePathTracing_Source LANGUAGES CXX)
 # Single app lives directly under Source/
 #
 
-set(_thesis_extra_shader_includes
+set(_real_time_path_tracing_extra_shader_includes
     "${CMAKE_SOURCE_DIR}/Source"
 )
 
-if(DEFINED THESIS_NRD_SOURCE_DIR)
-    list(APPEND _thesis_extra_shader_includes
-        "${THESIS_NRD_SOURCE_DIR}/Shaders/Include"
+if(DEFINED REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR)
+    list(APPEND _real_time_path_tracing_extra_shader_includes
+        "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders/Include"
     )
 endif()
 
-setup_thesis_app(
+setup_real_time_path_tracing_app(
     TARGET     RealTimePathTracing
     SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}"
     SHADER_DIR "${CMAKE_CURRENT_LIST_DIR}/Shaders"
     EXTRA_SHADER_INCLUDES
-        ${_thesis_extra_shader_includes}
+        ${_real_time_path_tracing_extra_shader_includes}
 )
 
 # Keep scene-system sources explicit so they are compiled even though the shared
@@ -27,15 +27,6 @@ setup_thesis_app(
 target_sources(RealTimePathTracing PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/Application.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/Application.h"
-    "${CMAKE_CURRENT_LIST_DIR}/Experiments/ExperimentController.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/Experiments/ExperimentController.h"
-    "${CMAKE_CURRENT_LIST_DIR}/Experiments/ExperimentGpuTimer.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/Experiments/ExperimentGpuTimer.h"
-    "${CMAKE_CURRENT_LIST_DIR}/Experiments/ExperimentMetadataWriter.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/Experiments/ExperimentMetadataWriter.h"
-    "${CMAKE_CURRENT_LIST_DIR}/Experiments/ExperimentPlan.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/Experiments/ExperimentPlan.h"
-    "${CMAKE_CURRENT_LIST_DIR}/Experiments/ExperimentTypes.h"
     "${CMAKE_CURRENT_LIST_DIR}/Scene/SceneCatalog.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/Scene/SceneCatalog.h"
     "${CMAKE_CURRENT_LIST_DIR}/Scene/SceneAssetCatalog.cpp"
@@ -73,11 +64,11 @@ target_sources(RealTimePathTracing PRIVATE
 )
 
 if(NOT TARGET NRD)
-    message(FATAL_ERROR "NRD is required by the thesis denoising path, but the NRD target was not created.")
+    message(FATAL_ERROR "NRD is required by the renderer denoising path, but the NRD target was not created.")
 endif()
 
 target_link_libraries(RealTimePathTracing PRIVATE NRD)
 target_include_directories(RealTimePathTracing PRIVATE
-    "${THESIS_NRD_SOURCE_DIR}/Include"
-    "${THESIS_NRD_SOURCE_DIR}/Integration"
+    "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Include"
+    "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Integration"
 )

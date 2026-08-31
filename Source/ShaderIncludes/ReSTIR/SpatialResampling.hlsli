@@ -15,7 +15,7 @@ float2 LoadReSTIRNeighborOffset(uint sampleIdx)
     return RESTIR_NEIGHBOR_OFFSETS_BUFFER[sampleIdx].offset;
 }
 
-// The thesis renderer keeps ray-traced bias correction enabled in the ReSTIR
+// The renderer keeps ray-traced bias correction enabled in the ReSTIR
 // passes. The macro is still used by the included reservoir code to compile the
 // relevant normalization path.
 #ifndef RESTIR_ALLOWED_BIAS_CORRECTION

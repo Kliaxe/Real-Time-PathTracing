@@ -35,8 +35,8 @@ else()
     if(NVPROCORE2_DOWNLOAD)
         include(FetchContent)
 
-        # Default git tag/branch
-        set(NVPRO_GIT_TAG "main" CACHE STRING "Git tag/branch for nvpro_core2")
+        # Pin the dependency to the revision validated with this renderer and Vulkan SDK.
+        set(NVPRO_GIT_TAG "71e33ddc6920fe7ebdb3d3d7f4cd44b5b025c54e" CACHE STRING "Pinned nvpro_core2 revision" FORCE)
 
         # Try to determine nvpro_core2 location from the repo origin.
         execute_process(
@@ -86,11 +86,50 @@ else()
 
         message(STATUS "Will clone from: ${NVPRO_GIT_URL} (branch/tag: ${NVPRO_GIT_TAG})")
 
-        # Clone depth=1 to keep configure fast and avoid full history.
+        # Fetch just the pinned revision so a clean build does not follow upstream main.
         execute_process(
-            COMMAND git clone --depth 1 --branch "${NVPRO_GIT_TAG}" "${NVPRO_GIT_URL}" "${CMAKE_BINARY_DIR}/_deps/nvpro_core2"
+            COMMAND git init "${CMAKE_BINARY_DIR}/_deps/nvpro_core2"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            RESULT_VARIABLE _nvpro_git_result
         )
+        if(NOT _nvpro_git_result EQUAL 0)
+            message(FATAL_ERROR "Failed to initialize the nvpro_core2 checkout.")
+        endif()
+
+        execute_process(
+            COMMAND git -C "${CMAKE_BINARY_DIR}/_deps/nvpro_core2" remote add origin "${NVPRO_GIT_URL}"
+            RESULT_VARIABLE _nvpro_git_result
+        )
+        if(NOT _nvpro_git_result EQUAL 0)
+            message(FATAL_ERROR "Failed to configure the nvpro_core2 remote.")
+        endif()
+
+        execute_process(
+            COMMAND git -C "${CMAKE_BINARY_DIR}/_deps/nvpro_core2" fetch --depth 1 origin "${NVPRO_GIT_TAG}"
+            RESULT_VARIABLE _nvpro_git_result
+        )
+        if(NOT _nvpro_git_result EQUAL 0)
+            message(FATAL_ERROR "Failed to fetch the pinned nvpro_core2 revision: ${NVPRO_GIT_TAG}")
+        endif()
+
+        execute_process(
+            COMMAND git -C "${CMAKE_BINARY_DIR}/_deps/nvpro_core2" checkout --detach FETCH_HEAD
+            RESULT_VARIABLE _nvpro_git_result
+        )
+        if(NOT _nvpro_git_result EQUAL 0)
+            message(FATAL_ERROR "Failed to check out the pinned nvpro_core2 revision: ${NVPRO_GIT_TAG}")
+        endif()
+
+        # LLVM MinGW's libc++ does not implement std::execution policies.
+        # Remove this patch when the pinned nvpro_core2 revision no longer uses them here.
+        execute_process(
+            COMMAND git -C "${CMAKE_BINARY_DIR}/_deps/nvpro_core2" apply --whitespace=nowarn
+                "${CMAKE_SOURCE_DIR}/CMake/Patches/nvpro-core2-use-thread-pool.patch"
+            RESULT_VARIABLE _nvpro_git_result
+        )
+        if(NOT _nvpro_git_result EQUAL 0)
+            message(FATAL_ERROR "Failed to apply the nvpro_core2 LLVM MinGW compatibility patch.")
+        endif()
 
         # Retry find after cloning
         find_path(NvproCore2_ROOT
@@ -116,4 +155,3 @@ if(NvproCore2_FOUND)
     # Setup.cmake creates the nvpro2::* targets (nvvk, nvapp, nvslang, ...)
     include("${NvproCore2_ROOT}/nvpro_core2/cmake/Setup.cmake")
 endif()
-

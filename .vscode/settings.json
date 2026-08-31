@@ -8,8 +8,8 @@
   // Build when launching (cmake.launchTargetPath / cmake.launchTargetDirectory triggers a build).
   "cmake.buildBeforeRun": true,
 
-  // Prefer the VS developer environment (ensures cl/link/lib are correct).
-  "cmake.useVsDeveloperEnvironment": "always",
+  // LLVM MinGW provides the compiler, linker, C++ runtime, and Windows headers.
+  "cmake.useVsDeveloperEnvironment": "never",
 
   // Reasonable defaults; you can change these from the CMake Tools status bar.
   "cmake.configurePreset": "x64-Debug",
