@@ -26,7 +26,6 @@
 
 #include "PathTracing/PathTracer.h"
 #include "PathTracing/ReSTIR/PT/ReSTIRPTRenderer.h"
-#include "PathTracing/ReSTIR/ReSTIRDIRenderer.h"
 #include "Scene/SceneAssetCatalog.h"
 #include "Scene/SceneResolver.h"
 #include "Scene/SceneRenderer.h"
@@ -46,10 +45,6 @@ class Application : public nvapp::IAppElement
   {
     eRasterizer = 0,
     ePathTracing,
-    eReSTIRDI,
-    // ReSTIR PT Enhanced is a peer of ReSTIR DI, not a replacement for it. DI is
-    // kept intact so the two can be compared directly from the UI, which is also
-    // how the unified-reservoir change in Section 6.1 is evaluated.
     eReSTIRPTEnhanced,
   };
 
@@ -88,11 +83,9 @@ private:
   void UpdateSceneBuffer(VkCommandBuffer cmd);
   void RasterScene(VkCommandBuffer cmd);
   void PathTraceScene(VkCommandBuffer cmd);
-  void ReSTIRDIScene(VkCommandBuffer cmd);
   void ReSTIRPTScene(VkCommandBuffer cmd);
   void InvalidateRenderHistory();
   bool IsPathTracerRenderMode() const;
-  bool IsReSTIRDIRenderMode() const;
   bool IsReSTIRPTRenderMode() const;
 
 private:
@@ -101,7 +94,7 @@ private:
   // nvapp gives Application the frame callbacks; this pointer is borrowed for the app lifetime.
   nvapp::Application*                    m_App = nullptr;
 
-  // Shared Vulkan services used by scene upload, raster preview, path tracing, and ReSTIR DI.
+  // Shared Vulkan services used by scene upload, raster preview, path tracing, and ReSTIR PT.
   nvvk::ResourceAllocator                m_Allocator;
   nvvk::StagingUploader                  m_StagingUploader;
   nvvk::SamplerPool                      m_SamplerPool;
@@ -120,7 +113,7 @@ private:
   std::vector<nvsamples::AssetEntry>     m_ModelAssets;
   std::vector<nvsamples::AssetEntry>     m_HdriAssets;
   std::vector<nvsamples::SceneDefinition> m_SceneDefinitions;
-  RenderMode                             m_RenderMode = RenderMode::eReSTIRDI;
+  RenderMode                             m_RenderMode = RenderMode::eReSTIRPTEnhanced;
   size_t                                 m_SelectedSceneIndex = 0;
   size_t                                 m_SelectedHdriIndex = 0;
   bool                                   m_SceneReloadRequested = false;
@@ -134,7 +127,6 @@ private:
   // Application wires these systems together but keeps their responsibilities separate.
   std::unique_ptr<nvsamples::SceneAssetCatalog> m_SceneAssetCatalog;
   std::unique_ptr<nvsamples::PathTracer>        m_PathTracer;
-  std::unique_ptr<nvsamples::ReSTIRDIRenderer>  m_ReSTIRDI;
   std::unique_ptr<nvsamples::ReSTIRPTRenderer>  m_ReSTIRPT;
   std::unique_ptr<nvsamples::SceneResolver>     m_SceneResolver;
   std::unique_ptr<nvsamples::SceneRenderer>     m_SceneRenderer;

@@ -21,7 +21,6 @@
 #define SHADERIO_H
 
 #include "Common/IoGltf.h"
-#include "ReSTIR/Parameters.h"
 #include "ReSTIR/PTParameters.h"
 
 NAMESPACE_SHADERIO_BEGIN()
@@ -42,30 +41,6 @@ enum BindingPoints
   eDiffuseRadianceHitDistanceImage  = 8,
   eSpecularRadianceHitDistanceImage = 9,
   eSpecularDemodulationFactorImage  = 10,
-};
-
-// ReSTIR uses a separate descriptor layout because the reuse passes need
-// reservoir buffers, current/previous surface buffers, and denoiser signal
-// targets in addition to the normal path-tracing resources.
-enum ReSTIRDIBindingPoints
-{
-  eReSTIRDITextures            = 0,
-  eReSTIRDITlas                = 1,
-  eReSTIRDIOutputImage         = 2,
-  eReSTIRDIAccumulationImage   = 3,
-  eReSTIRDILightReservoirBuffer = 4,
-  eReSTIRDICurrentSurfaceBuffer = 5,
-  eReSTIRDIPreviousSurfaceBuffer = 6,
-  eReSTIRDINeighborOffsetBuffer = 7,
-  eReSTIRDIParamsBuffer        = 8,
-  eReSTIRDIDebugBuffer         = 9,
-  eReSTIRDIMotionVectorsImage             = 10,
-  eReSTIRDINormalRoughnessImage           = 11,
-  eReSTIRDIBaseColorMetalnessImage        = 12,
-  eReSTIRDIViewZImage                     = 13,
-  eReSTIRDIDiffuseRadianceHitDistanceImage = 14,
-  eReSTIRDISpecularRadianceHitDistanceImage = 15,
-  eReSTIRDISpecularDemodulationFactorImage = 16,
 };
 
 struct RasterPushConstant
@@ -91,115 +66,6 @@ struct PathTracePushConstant
   uint           flags;
 };
 
-enum ReSTIRFlags
-{
-  eReSTIRFlagAccumulate           = 0x1u,
-  eReSTIRFlagWriteDenoiserSignals = 0x2u,
-};
-
-enum ReSTIRDebugView
-{
-  eReSTIRDebugViewDisabled = 0u,
-  eReSTIRDebugViewCandidateKind = 1u,
-  eReSTIRDebugViewTargetPdf = 2u,
-  eReSTIRDebugViewReservoirWeight = 3u,
-  eReSTIRDebugViewReservoirAge = 4u,
-  eReSTIRDebugViewTemporalStatus = 5u,
-  eReSTIRDebugViewSpatialStatus = 6u,
-  eReSTIRDebugViewShiftJacobian = 7u,
-  eReSTIRDebugViewReuseCount = 8u,
-  eReSTIRDebugViewDepthDisocclusion = 9u,
-};
-
-enum ReSTIRShiftStatus
-{
-  eReSTIRShiftStatusNone = 0u,
-  eReSTIRShiftStatusAccepted = 1u,
-  eReSTIRShiftStatusRejectedNoHistory = 2u,
-  eReSTIRShiftStatusRejectedSurface = 3u,
-  eReSTIRShiftStatusRejectedTargetPdf = 4u,
-};
-
-struct ReSTIRDIParameters
-{
-  // Packed uniform block consumed by every ReSTIR pass. The nested structs come
-  // from the shared ReSTIR include code, so C++ only fills values and keeps the
-  // layout stable.
-  ReSTIRRuntimeParameters                runtimeParams;
-  ReSTIRReservoirBufferParameters        reservoirBufferParams;
-  ReSTIRDIBufferIndices                  bufferIndices;
-  ReSTIRDIInitialSamplingParameters      initialSampling;
-  ReSTIRDITemporalResamplingParameters   temporalResampling;
-  ReSTIRDISpatialResamplingParameters    spatialResampling;
-  ReSTIRDIShadingParameters              shading;
-};
-
-struct ReSTIRDIPushConstant
-{
-  GltfSceneInfo* sceneInfoAddress;
-  uint           accumulatedFrames;
-  uint           flags;
-  uint           secondaryPathMaxBounces;
-  uint           debugView;
-};
-
-struct ReSTIRDISurface
-{
-  // G-buffer record stored between ReSTIR passes. It intentionally carries the
-  // material values needed for direct-light evaluation so later passes do not
-  // have to re-run the closest-hit material path.
-  float3 worldPosition;
-  float  linearDepth;
-  float3 shadingNormal;
-  float  roughness;
-  float3 geometricNormal;
-  float  metallic;
-  float3 tangent;
-  float  specular;
-  float3 bitangent;
-  float  specularTint;
-  float3 albedo;
-  float  transmission;
-  float3 emission;
-  float  attenuationDistance;
-  float3 attenuationColor;
-  float  volumeThickness;
-  float3 sheenColor;
-  float  refractionIndex;
-  float  clearcoat;
-  float  clearcoatRoughness;
-  float  sheenRoughness;
-  float  subsurface;
-  float  anisotropy;
-  uint   materialIndex;
-  uint   instanceIndex;
-  uint   primitiveIndex;
-  uint   isFrontFace;
-  uint   valid;
-  uint   pad2;
-  uint   pad3;
-  uint   pad4;
-  uint   pad5;
-};
-
-struct ReSTIRNeighborOffset
-{
-  float2 offset;
-  float2 pad;
-};
-
-struct ReSTIRDebugPixel
-{
-  float targetPdf;
-  float reservoirWeight;
-  float shiftJacobian;
-  float reuseCount;
-  uint  lightKind;
-  uint  reservoirAge;
-  uint  temporalStatus;
-  uint  spatialStatus;
-};
-
 struct ReSTIRPTParameters
 {
   // Packed uniform block consumed by every ReSTIR PT pass. The nested structs come
@@ -217,10 +83,9 @@ struct ReSTIRPTParameters
   ReSTIRPTNeeParameters                nee;
 };
 
-// Descriptor binding numbers for the ReSTIR PT passes. Independent from the DI
-// set because the two renderers bind different resources: PT has no neighbor
-// offset table (spatial reuse uses pairing textures) and carries a path reservoir
-// rather than a light reservoir.
+// Descriptor binding numbers for the ReSTIR PT passes. Part of the CPU/Slang ABI:
+// these values must match descriptor-set creation in ReSTIRPTRenderer and the
+// binding attributes in PTGlobals.h.slang.
 enum ReSTIRPTBindingPoints
 {
   eReSTIRPTTextures              = 0,
@@ -277,9 +142,6 @@ struct ReSTIRPTLightTileSample
   float invSourcePdf;
 };
 
-// Debug views specific to ReSTIR PT. The shared ReSTIRDebugView enum describes
-// reservoir state that both renderers have; these describe the path-tracing
-// reference that only PT carries.
 enum ReSTIRPTFlags
 {
   // Accumulate the resolved image over frames (mirrors ePathTraceFlagAccumulate).
@@ -307,8 +169,6 @@ struct ReSTIRPTPushConstant
   uint           accumulatedFrames;
   uint           maxBounces;
   uint           flags;
-  uint           debugView;
-  uint           pad0;
 };
 
 // Why a shift produced (or failed to produce) a sample. Ordered so that anything
@@ -337,10 +197,10 @@ enum ReSTIRPTShiftOutcome
 };
 // Per-pixel surface record written by initial sampling and read by later passes,
 // so they never have to re-trace the primary ray or re-resolve the material.
-// Deliberately smaller than ReSTIRDISurface: DI stores the full material because
-// it re-evaluates direct lighting during reuse, whereas PT reuse replays and
-// reconnects paths and needs only geometry plus the terms driving the shift's
-// surface-similarity and reconnection tests.
+// Deliberately reduced: reuse replays and reconnects paths rather than
+// re-evaluating shading, so this carries only geometry plus the terms that drive
+// the shift's surface-similarity and reconnection tests. Anything a shift needs
+// beyond that comes from re-tracing the point, not from this record.
 struct ReSTIRPTSurface
 {
   float3 worldPosition;
@@ -377,17 +237,12 @@ struct ReSTIRPTPairedShift
 };
 
 CHECK_STRUCT_ALIGNMENT(ReSTIRPTPairedShift)
-CHECK_STRUCT_ALIGNMENT(ReSTIRDISurface)
-CHECK_STRUCT_ALIGNMENT(ReSTIRDIParameters)
-CHECK_STRUCT_ALIGNMENT(ReSTIRDIPushConstant)
 CHECK_STRUCT_ALIGNMENT(ReSTIRPTParameters)
 CHECK_STRUCT_ALIGNMENT(ReSTIRPTPushConstant)
 CHECK_STRUCT_ALIGNMENT(ReSTIRPTSurface)
 #ifdef __cplusplus
 #include <cstddef>
 #include <type_traits>
-
-static_assert(sizeof(ReSTIRPackedDIReservoir) == 24, "Packed ReSTIR DI reservoir layout must match the shader storage buffer.");
 
 // Supplemental Algorithm 1 compresses the ReSTIR PT reservoir from 88 to 64 bytes.
 // Two reservoir sets are required for temporal reuse, so this size is the dominant

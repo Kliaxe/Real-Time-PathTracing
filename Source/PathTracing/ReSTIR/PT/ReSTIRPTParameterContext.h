@@ -29,12 +29,8 @@ struct ReSTIRPTStaticParameters
   uint32_t renderHeight = 0;
 };
 
-// Reservoir storage pitches for a given render resolution.
-//
-// Intentionally duplicates the block-linear math used by ReSTIR DI rather than
-// sharing its return type: the two renderers own independent shader ABIs and are
-// expected to diverge (PT additionally carries pairing textures and a duplication
-// map). Sharing the struct would couple the ABIs for four lines of arithmetic.
+// Reservoir storage pitches for a given render resolution. Reservoirs are stored
+// block-linear, so the pitches are measured in whole blocks rather than pixels.
 ReSTIRPTReservoirBufferParameters CalculateReSTIRPTReservoirBufferParameters(uint32_t renderWidth, uint32_t renderHeight);
 
 ReSTIRPTBufferIndices                GetDefaultReSTIRPTBufferIndices();

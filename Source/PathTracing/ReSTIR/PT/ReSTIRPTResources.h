@@ -22,10 +22,8 @@ namespace nvsamples
 // This class does not decide what a pass does. It only guarantees that the GPU
 // memory used by those passes exists and matches the current resolution.
 //
-// Compared with ReSTIRDIResources there is no neighbor-offset table: DI picks
-// spatial neighbors from a fixed low-discrepancy offset list, whereas PT's paired
-// spatial reuse derives neighbors from pairing textures instead. Those arrive with
-// the spatial pass and are not allocated here yet.
+// There is no neighbour-offset table: Section 3's paired spatial reuse derives
+// neighbours from the pairing textures, which are allocated here instead.
 class ReSTIRPTResources
 {
 public:

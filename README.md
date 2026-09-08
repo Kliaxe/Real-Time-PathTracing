@@ -2,9 +2,9 @@
 
 ![Renderer screenshot](Screenshots/Screenshot%201.png)
 
-Real-Time PathTracing is a personal Vulkan renderer for real-time path tracing, ReSTIR direct illumination, physically based shading, and NVIDIA Real-Time Denoisers.
+Real-Time PathTracing is a personal Vulkan renderer for real-time path tracing, ReSTIR PT Enhanced path resampling, physically based shading, and NVIDIA Real-Time Denoisers.
 
-It started as a master's project focused on real-time path tracing with ReSTIR direct illumination and continues as an evolving personal rendering project.
+It started as a master's project focused on real-time path tracing with ReSTIR direct illumination, and continues as an evolving personal rendering project now built around ReSTIR PT Enhanced (Lin, Kettunen & Wyman, I3D 2026).
 
 ## Tested Setup
 
@@ -87,18 +87,20 @@ To open the renderer:
 .\Binaries\Release\RealTimePathTracing.exe
 ```
 
-The application UI exposes the scene selection, render mode, ReSTIR settings, path tracing settings, and denoising options used during the project.
+The application UI exposes the scene selection, render mode, ReSTIR PT settings, path tracing settings, and denoising options used during the project.
 
 ## Repository Layout
 
-- `Source/`: application code, Vulkan renderer, path tracer, ReSTIR DI implementation, denoising integration, and shaders.
+- `Source/`: application code, Vulkan renderer, path tracer, ReSTIR PT Enhanced implementation, denoising integration, and shaders.
 - `Content/`: models, textures, and HDRIs used by the renderer.
 - `docs/`: project and agent documentation.
 - `Scripts/`: standalone LLVM MinGW bootstrap helper.
 
 ## Scope Notes
 
-ReSTIR is currently treated mainly as a direct illumination technique, while secondary path bounces show how it can sit inside a path-tracing-style renderer. The code also includes denoising because real-time ray traced output is normally judged together with a reconstruction step.
+ReSTIR is applied to whole paths rather than to direct lighting alone: direct and global illumination share one reservoir, and reuse happens through shift mappings between pixels. The code also includes denoising because real-time ray traced output is normally judged together with a reconstruction step.
+
+The reference path tracer is kept alongside it, because the correctness gate for the resampler is that it converges to the same image.
 
 The timings are measurements from this implementation on the tested machine. They are mainly useful for comparing the modes in this project.
 

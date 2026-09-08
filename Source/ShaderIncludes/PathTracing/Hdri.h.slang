@@ -89,9 +89,10 @@ float EvaluateEnvironmentLightPdf(GltfSceneInfo sceneInfo, float3 receiverNormal
 
 float2 ExpandEnvironmentJitterFromScalar(float sampleValue)
 {
-  // DI reservoirs expose two uniform samples. HDRI texel selection needs one
-  // sample for the CDF and a 2D jitter within the chosen texel, so expand the
-  // second scalar into a stable decorrelated pair.
+  // The caller has one uniform sample left to spend, but HDRI texel selection
+  // needs a CDF probe plus a 2D jitter within the chosen texel. Expand the
+  // remaining scalar into a stable decorrelated pair rather than drawing again,
+  // so the sampling stream stays reproducible for replay.
   const float2 jitter = frac(float2(sampleValue * 0.7548776662466927 + 0.5, sampleValue * 0.5698402909980532 + 0.25));
   return jitter;
 }

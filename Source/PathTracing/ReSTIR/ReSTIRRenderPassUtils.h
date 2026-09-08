@@ -2,7 +2,6 @@
 
 #include <volk/volk.h>
 
-#include "PathTracing/ReSTIR/ReSTIRDIRendererTypes.h"
 #include "Shaders/ShaderIo.h"
 #include "nvvk/check_error.hpp"
 #include "nvvk/resources.hpp"

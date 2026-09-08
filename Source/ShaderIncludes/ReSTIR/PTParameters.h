@@ -8,22 +8,21 @@
 // the comments below refer to that paper; equation numbers likewise.
 //
 // Keep this file plain C-like: it is included by C++ and shader code, so every
-// field must stay ABI-stable and explicitly padded. This mirrors the contract of
-// the sibling ReSTIR DI file, ReSTIR/Parameters.h.
+// field must stay ABI-stable and explicitly padded.
 
 #ifdef __cplusplus
 #include <stdint.h>
 #else
-// Guarded because ShaderIo.h pulls in both this file and the ReSTIR DI parameter
-// header, and Slang warns on redefining the alias. Either header must still work
-// when included on its own by a shader that uses only one of the two renderers.
+// Guarded because a shader may reach this header through more than one include
+// path, and Slang warns on redefining the alias.
 #ifndef uint32_t
 #define uint32_t uint
 #endif
 #endif // __cplusplus
 
-// Reservoirs use the same block-linear storage scheme as ReSTIR DI so both
-// renderers can share the pitch math in ReSTIRUtils. Measured in pixels.
+// Reservoirs are stored block-linear so that pixels near each other in screen
+// space are near each other in memory, which is what makes a spatial neighbour
+// lookup hit cache. Measured in pixels.
 #define RESTIR_PT_RESERVOIR_BLOCK_SIZE 16
 
 // ---------------------------------------------------------------------------

@@ -81,21 +81,6 @@ inline bool DrawDenoiserSettingsSection(const char* treeLabel, DenoiserSettings&
   return changed;
 }
 
-inline bool DrawReSTIRDebugViewControl(shaderio::ReSTIRDebugView& debugView, const char* methodTagLabel)
-{
-  int view = static_cast<int>(debugView);
-  const char* debugViews[] = {"Disabled", methodTagLabel, "Target PDF", "Reservoir Weight", "Reservoir Age",
-                              "Temporal Status", "Spatial Status", "Shift Jacobian", "Reuse Count",
-                              "Depth Disocclusion"};
-  if(!ImGui::Combo("Debug View", &view, debugViews, IM_ARRAYSIZE(debugViews)))
-  {
-    return false;
-  }
-
-  debugView = static_cast<shaderio::ReSTIRDebugView>(view);
-  return true;
-}
-
 inline bool DrawBounceLimitControl(const char* label, uint32_t& settingValue, uint32_t bounceLimit)
 {
   int value = static_cast<int>(settingValue);

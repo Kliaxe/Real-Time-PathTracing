@@ -53,6 +53,33 @@ constexpr VkShaderStageFlags kReSTIRPTPushConstantStages = VK_SHADER_STAGE_RAYGE
                                                            | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT;
 static_assert(sizeof(shaderio::ReSTIRPTPushConstant) <= 256, "ReSTIR PT push constants must fit Vulkan's minimum 256-byte limit.");
 
+// Memory barrier with the acceleration-structure access bit left off.
+//
+// nvvk::cmdMemoryBarrier infers its access masks from the stage masks, and any
+// destination stage set containing RAY_TRACING_SHADER unconditionally picks up
+// ACCELERATION_STRUCTURE_READ. Vulkan forbids that bit when the destination also
+// names another shader stage, unless the rayQuery feature is enabled - and this
+// renderer never issues an inline query, since the hybrid shift needs the payload
+// that only a pipeline trace carries, so the feature is not requested.
+//
+// Dropping the bit is not merely a workaround for the validation message: none of
+// these barriers guard the acceleration structure. They order reservoir, surface,
+// pairing and work-list memory between passes. The TLAS is built and synchronized
+// by the scene runtime before any of this is recorded.
+//
+// Everything else is nvpro's own inference, so the ordering these barriers
+// establish is unchanged.
+constexpr VkAccessFlags2 InferAccessWithoutAccelerationStructure(VkPipelineStageFlags2 stages, bool read)
+{
+  return nvvk::inferAccessMaskFromStage(stages, read) & ~VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+}
+
+void CmdReSTIRPTMemoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStages, VkPipelineStageFlags2 dstStages)
+{
+  nvvk::cmdMemoryBarrier(cmd, srcStages, dstStages, InferAccessWithoutAccelerationStructure(srcStages, false),
+                         InferAccessWithoutAccelerationStructure(dstStages, true));
+}
+
 VkShaderModuleCreateInfo GetInitialSamplingShaderCode()
 {
   return nvsamples::GetShaderModuleCreateInfo(std::span(ReSTIRPTInitialSampling_slang));
@@ -305,12 +332,12 @@ ReSTIRPTRenderer::FrameState ReSTIRPTRenderer::BeginFrame(const RenderInput& inp
 {
   FrameState frameState{};
   frameState.viewportSize          = viewportSize;
-  frameState.restirDebugActive     = m_Settings.common.debugView != shaderio::eReSTIRDebugViewDisabled;
+  frameState.referenceRadianceActive = m_Settings.common.referencePathTracer;
   frameState.accumulationSignature = MakeReSTIRPTAccumulationSignature(*input.sceneInfo, input.topLevelAS->address, viewportSize);
   frameState.denoiseEnabled        = IsDenoiseResolveMode(m_Settings.common.resolveMode);
-  // A debug view replaces the beauty image, so there is nothing meaningful to
-  // denoise and no reason to pay for the guide-buffer writes.
-  frameState.denoiserSignalsNeeded = frameState.denoiseEnabled && !frameState.restirDebugActive;
+  // The reference view replaces the beauty image with an unresampled one, so the
+  // guide buffers would describe a different render than the signals do.
+  frameState.denoiserSignalsNeeded = frameState.denoiseEnabled && !frameState.referenceRadianceActive;
   frameState.denoiserSignature = MakeReSTIRPTDenoiserHistorySignature(*input.sceneInfo, input.topLevelAS->address, viewportSize);
 
   // The signature tells us when accumulated pixels no longer describe the same image.
@@ -428,11 +455,8 @@ shaderio::ReSTIRPTPushConstant ReSTIRPTRenderer::BuildPushConstant(const RenderI
   {
     flags |= shaderio::eReSTIRPTFlagAccumulate;
   }
-  if(m_Settings.common.debugView == shaderio::eReSTIRDebugViewCandidateKind)
+  if(m_Settings.common.referencePathTracer)
   {
-    // The candidate-kind slot is repurposed for PT as the reference comparison:
-    // it substitutes the plain path-traced radiance for the resampled estimate
-    // while leaving every downstream step identical.
     flags |= shaderio::eReSTIRPTFlagReferenceRadiance;
   }
   if(UseSortedPrepass())
@@ -448,7 +472,6 @@ shaderio::ReSTIRPTPushConstant ReSTIRPTRenderer::BuildPushConstant(const RenderI
       .accumulatedFrames = IsAccumulationResolveMode(m_Settings.common.resolveMode) ? m_AccumulatedFrames : 0u,
       .maxBounces        = m_Settings.initialSampling.maxBounces,
       .flags             = flags,
-      .debugView         = static_cast<uint32_t>(m_Settings.common.debugView),
   };
 }
 
@@ -480,10 +503,10 @@ void ReSTIRPTRenderer::RunDenoiserIfNeeded(const RenderInput& input, const Frame
     return;
   }
 
-  if(frameState.restirDebugActive)
+  if(frameState.referenceRadianceActive)
   {
-    // Debug views replace the beauty image, so NRD history must not continue
-    // through them: it would reproject a frame that was never a rendered image.
+    // The reference image comes from a different estimator, so NRD history must not
+    // continue across the switch: it would reproject frames from both.
     m_NrdDenoiser.InvalidateHistory();
     return;
   }
@@ -637,7 +660,7 @@ void ReSTIRPTRenderer::RecordPasses(const RenderInput& input, const shaderio::Re
                                                  | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
                                                  | VK_PIPELINE_STAGE_2_TRANSFER_BIT
                                                  | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
-  nvvk::cmdMemoryBarrier(input.cmd, kFrameStages, kFrameStages);
+  CmdReSTIRPTMemoryBarrier(input.cmd, kFrameStages, kFrameStages);
 
   // Section 6.1. Presampling has to complete before any pixel reads a tile, and it
   // depends on nothing this frame produces, so it goes first.
@@ -646,7 +669,7 @@ void ReSTIRPTRenderer::RecordPasses(const RenderInput& input, const shaderio::Re
     {
       RunLightTilePass(input, pushConstant);
     }
-    nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
   }
 
   {
@@ -656,7 +679,7 @@ void ReSTIRPTRenderer::RecordPasses(const RenderInput& input, const shaderio::Re
   if(IsReSTIRPTTemporalResamplingEnabled(m_Settings.common.resamplingMode))
   {
     // Initial sampling writes the candidate reservoirs that temporal reuse reads.
-    nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+    CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
                            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
     RunTemporalPass(input, pushConstant);
   }
@@ -675,7 +698,7 @@ void ReSTIRPTRenderer::RecordPasses(const RenderInput& input, const shaderio::Re
     // sorted pre-pass divergence documented in ReSTIRPTSettings.h - that survives
     // full ALL_COMMANDS serialization of the whole pass, so it is not a
     // synchronization fault at all. Adding this changed nothing observable.
-    nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+    CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
                            VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
     // Section 3. Each pixel shifts its own path into its partner's domain and
@@ -694,7 +717,7 @@ void ReSTIRPTRenderer::RecordPasses(const RenderInput& input, const shaderio::Re
       {
         RunSpatialPrepass(input, pushConstant);
       }
-      nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
+      CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
                              VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
     }
 
@@ -704,12 +727,12 @@ void ReSTIRPTRenderer::RecordPasses(const RenderInput& input, const shaderio::Re
   }
 
   // The reuse passes write the reservoirs that final shading reads.
-  nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
   {
     RunFinalShadingPass(input, pushConstant);
   }
   // Leave the image writes visible to post processing.
-  nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
   // Section 5's map describes the reservoirs this frame ended with, so it runs
   // last - after every pass that can still change them. It reads the same array
@@ -723,7 +746,7 @@ void ReSTIRPTRenderer::RecordPasses(const RenderInput& input, const shaderio::Re
     {
       RunDuplicationMapPass(input, pushConstant);
     }
-    nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
   }
 
 }
@@ -770,12 +793,12 @@ void ReSTIRPTRenderer::RunSortedSpatialPrepass(const RenderInput& input, const s
   // can land while the previous frame is still reading the counts - which
   // corrupts the launch size, and makes the traced pass read work list entries
   // that were never scattered.
-  nvvk::cmdMemoryBarrier(input.cmd,
+  CmdReSTIRPTMemoryBarrier(input.cmd,
                          VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
                              | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
                          VK_PIPELINE_STAGE_2_TRANSFER_BIT);
   vkCmdFillBuffer(input.cmd, counters.buffer, 0, counters.bufferSize, 0);
-  nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
   // 1. Append the pairs that need a shift to the work list, and write the
   //    paired-shift record for every REJECTED pair - the traced pass never visits
@@ -785,7 +808,7 @@ void ReSTIRPTRenderer::RunSortedSpatialPrepass(const RenderInput& input, const s
     DispatchReSTIRComputePass(input.cmd, m_PrepassClassifyPipeline, m_PipelineLayout, descriptorSet,
                               kReSTIRPTPushConstantStages, pushConstant, viewportSize, kPrepassSortGroupSize);
   }
-  nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
   // 2. Publish the launch size the first pass counted.
   {
@@ -794,13 +817,13 @@ void ReSTIRPTRenderer::RunSortedSpatialPrepass(const RenderInput& input, const s
     vkCmdPushConstants(input.cmd, m_PipelineLayout, kReSTIRPTPushConstantStages, 0, sizeof(pushConstant), &pushConstant);
     vkCmdDispatch(input.cmd, 1, 1, 1);
   }
-  nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
 
   // The work list is read by the ray tracing stage, and the same buffer's tail is
   // read by the indirect-draw stage as the launch dimensions. Both dependencies
   // are on this one barrier.
-  nvvk::cmdMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+  CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT);
 
   // 4. Trace exactly the surviving pairs, in bucket order. The count lives only on

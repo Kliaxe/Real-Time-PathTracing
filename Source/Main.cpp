@@ -60,9 +60,6 @@ int main(int argc, char** argv)
   VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
   };
-  VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
-  };
   nvvk::ContextInitInfo vkSetup = {
       .instanceExtensions = {VK_EXT_DEBUG_UTILS_EXTENSION_NAME},
       .deviceExtensions =
@@ -70,12 +67,11 @@ int main(int argc, char** argv)
               {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME},
               {VK_EXT_SHADER_OBJECT_EXTENSION_NAME, &shaderObjectFeatures},
               // Request the core ray tracing pieces used by the path tracer
-              // reference and the current ReSTIR DI ray tracing passes.
+              // reference and the ReSTIR PT ray tracing passes. Ray query is not
+              // among them: every trace in this renderer is a pipeline trace, and
+              // the hybrid shift needs the payload a pipeline trace carries.
               {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, &accelerationStructureFeatures},
               {VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, &rayTracingPipelineFeatures},
-              // ReSTIR DI uses inline visibility tests when evaluating and
-              // rechecking selected light samples.
-              {VK_KHR_RAY_QUERY_EXTENSION_NAME, &rayQueryFeatures},
               {VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME},
           },
   };

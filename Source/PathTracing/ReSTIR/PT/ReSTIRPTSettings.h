@@ -11,9 +11,8 @@ namespace nvsamples
 
 // User-facing switches for the whole ReSTIR PT Enhanced renderer.
 //
-// Deliberately smaller than ReSTIRDICommonSettings' surface area. Several DI
-// knobs have no PT counterpart and are absent by construction rather than by
-// omission:
+// Deliberately small. Several knobs a ReSTIR DI implementation would need have no
+// counterpart here, and are absent by construction rather than by omission:
 //   - bias correction mode: DI picks between 1/M, MIS-like, and ray-traced
 //     normalization. PT's bias correction is the shift Jacobian plus pairwise
 //     MIS; it is structural, not a mode.
@@ -28,10 +27,11 @@ struct ReSTIRPTCommonSettings
   RenderResolveMode         resolveMode    = RenderResolveMode::eOff;
   // Resampling mode controls which reuse passes are recorded.
   ReSTIRPTResamplingMode    resamplingMode = ReSTIRPTResamplingMode::eTemporalAndSpatial;
-  // ReSTIR debug views replace the beauty image before denoising. Shared with the
-  // DI renderer because the views (target pdf, reservoir weight, shift Jacobian,
-  // ...) describe reservoir state, which both methods have.
-  shaderio::ReSTIRDebugView debugView         = shaderio::eReSTIRDebugViewDisabled;
+  // Substitute the plain path-traced radiance for the resampled estimate, leaving
+  // every other step of the frame identical. The correctness gate: with reuse off
+  // the two must converge to the same image. It replaces the beauty image, so the
+  // denoiser stands down while it is on.
+  bool                      referencePathTracer = false;
   DenoiserDebugView         denoiserDebugView = DenoiserDebugView::eFinal;
   // Initial sampling draws ONE BSDF lobe at the primary hit, so each frame only one
   // of the two hit distances exists and the other is zero, which is what NRD asks

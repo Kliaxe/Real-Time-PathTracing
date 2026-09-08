@@ -10,12 +10,12 @@
 #include "PathTracing/ReSTIR/PT/ReSTIRPTRendererTypes.h"
 #include "PathTracing/ReSTIR/PT/ReSTIRPTResources.h"
 #include "PathTracing/ReSTIR/PT/ReSTIRPTSettings.h"
-// Frame parity tracking and ray-tracing pass helpers are renderer-agnostic and
-// shared with ReSTIR DI.
+// Frame parity tracking and ray-tracing pass helpers, kept separate from the
+// renderer because they are ordinary Vulkan plumbing with no ReSTIR PT specifics.
 #include "PathTracing/ReSTIR/ReSTIRFrameContext.h"
 #include "PathTracing/ReSTIR/ReSTIRRenderPassUtils.h"
-// NRD integration is shared with the path tracer and ReSTIR DI; PT differs only in
-// which pass produces the signals.
+// NRD integration is shared with the reference path tracer; the renderers differ
+// only in which pass produces the signals.
 #include "Denoising/DenoiserResources.h"
 #include "Denoising/NrdDenoiser.h"
 #include "nvvk/descriptors.hpp"
@@ -33,21 +33,17 @@ namespace nvsamples
 // Real-Time PathTracing ReSTIR PT Enhanced renderer.
 //
 // Implements "ReSTIR PT Enhanced" (Lin, Kettunen, Wyman; I3D 2026) from the paper
-// rather than porting an existing implementation. It is a sibling of
-// ReSTIRDIRenderer, not a specialization: the two share infrastructure (resolve
-// modes, frame parity, pass helpers) but own independent shader ABIs and pass
-// sequences. In particular PT unifies direct and global illumination into one
-// reservoir (Section 6.1), so it has no separate direct-lighting pass.
+// rather than porting an existing implementation. Direct and global illumination
+// share one reservoir (Section 6.1), so there is no separate direct-lighting pass.
 //
 // CPU responsibility: own Vulkan state, update descriptors/parameters, and record
 // the pass sequence. Shader responsibility: perform the resampling math.
 //
-// Current pass sequence is initial sampling (ray tracing) then final shading
-// (compute). The temporal and spatial reuse passes arrive with the hybrid shift;
-// until then the resampling mode selector has no reuse to enable, and the renderer
-// is a 1spp path tracer routed through the reservoir plumbing. That configuration
-// is the correctness gate: it must converge to the same image as the standalone
-// path tracer.
+// Pass sequence: light tiles, initial sampling, temporal reuse, the spatial
+// pre-pass and spatial reuse, final shading, and the duplication map. Every reuse
+// pass is optional; with all of them off the renderer is a 1spp path tracer routed
+// through the reservoir plumbing, which is the correctness gate - that
+// configuration must converge to the same image as the reference path tracer.
 class ReSTIRPTRenderer
 {
 public:
@@ -91,7 +87,7 @@ private:
     VkExtent2D            viewportSize{};
     AccumulationSignature accumulationSignature{};
     DenoiserSignature     denoiserSignature{};
-    bool                  restirDebugActive = false;
+    bool                  referenceRadianceActive = false;
     bool                  denoiseEnabled    = false;
     // Final shading writes NRD guide buffers only when NRD will consume them, so a
     // debug view - which replaces the beauty image - suppresses them.
@@ -157,7 +153,7 @@ private:
 
   ReSTIRFrameContext m_FrameContext;
   ReSTIRPTResources    m_Resources;
-  // NRD input images and the denoiser itself, shared with the path tracer and DI.
+  // NRD input images and the denoiser itself, shared with the reference path tracer.
   DenoiserResources    m_DenoiserResources;
   NrdDenoiser          m_NrdDenoiser;
   // Parameter context is recreated when viewport-dependent reservoir layout changes.
@@ -168,11 +164,11 @@ private:
   nvvk::DescriptorPack m_DescPack;
   VkPipelineLayout     m_PipelineLayout = VK_NULL_HANDLE;
   // Initial sampling traces the path tree; final shading only resolves reservoirs,
-  // so unlike ReSTIR DI it needs no rays and is a compute pass.
+  // which needs no rays, so it is a compute pass.
   RayTracingPassState m_InitialSamplingPass;
-  // Temporal reuse. A ray tracing pass rather than compute (which is what ReSTIR DI
-  // uses) because the hybrid shift traces: one ray per replayed bounce plus one for
-  // the reconnection, driven from a loop in ray generation.
+  // Temporal reuse. A ray tracing pass rather than compute, because the hybrid
+  // shift traces: one ray per replayed bounce plus one for the reconnection, driven
+  // from a loop in ray generation.
   RayTracingPassState m_TemporalPass;
   // Spatial reuse. Reads the temporal output array and writes a third one, so a
   // pixel never reads a neighbour that another invocation is concurrently
