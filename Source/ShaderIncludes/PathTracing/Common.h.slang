@@ -138,6 +138,62 @@ void AccumulateDenoiserRadiance(inout PathPayload payload, float3 radiance)
   payload.specularDenoiserRadiance += radiance;
 }
 
+// Observation hook for every radiance contribution the path tracer produces.
+//
+// A plain path tracer sums contributions into payload.radiance. ReSTIR PT instead
+// treats each one as a candidate path and streams it through RIS, so it needs to
+// see them individually rather than as a sum. Defining this macro lets a shader
+// observe each contribution without changing how the path itself is sampled.
+//
+// The hook is additive, not a replacement: payload.radiance keeps accumulating
+// normally, so a ReSTIR PT pass carries the plain path-traced answer for the same
+// sample alongside its reservoir. That makes the two directly comparable in one
+// pass, which is how the resampled result is validated against the reference.
+#ifndef PATH_TRACING_ON_CONTRIBUTION
+#define PATH_TRACING_ON_CONTRIBUTION(payload, contribution)
+#endif
+
+// As above, but for a site whose contribution is not already an unbiased estimate
+// on its own - it carries a separate weight. Kept distinct from the unweighted
+// hook because an observer usually needs the two factors apart: the contribution
+// is what another domain could reconstruct, the weight is what only this sample
+// knows.
+#ifndef PATH_TRACING_ON_CONTRIBUTION_WEIGHTED
+#define PATH_TRACING_ON_CONTRIBUTION_WEIGHTED(payload, contribution, candidateWeight)
+#endif
+
+// Announces an emissive next-event-estimation sample just before its contribution
+// is accumulated. Empty for a plain path tracer; ReSTIR PT uses it to adopt the
+// light vertex as a reconnection anchor, which is the only way a path too short to
+// contain an interior vertex can be shifted to another pixel.
+//
+// lightIndex indexes the emissive triangle list, so the sampled point can be
+// rebuilt later from the light itself rather than from a stored world position.
+#ifndef PATH_TRACING_ON_NEE_EMISSIVE
+#define PATH_TRACING_ON_NEE_EMISSIVE(payload, lightIndex, barycentrics, radiance, lightPdf, distance)
+#endif
+
+// Single funnel for radiance contributions. Every site that adds light to a path
+// must route through here so the hook above cannot miss one.
+void AccumulatePathContribution(inout PathPayload payload, float3 contribution)
+{
+  payload.radiance += contribution;
+  AccumulateDenoiserRadiance(payload, contribution);
+  PATH_TRACING_ON_CONTRIBUTION(payload, contribution);
+}
+
+// Same funnel for a site that produced its contribution through a sampling process
+// with its own unbiased contribution weight, such as RIS over several candidates.
+// The radiance sum takes the product, which is the estimate; the hook receives both
+// factors, because a resampler stores them separately.
+void AccumulatePathContributionWithWeight(inout PathPayload payload, float3 contribution, float candidateWeight)
+{
+  const float3 estimate = contribution * candidateWeight;
+  payload.radiance += estimate;
+  AccumulateDenoiserRadiance(payload, estimate);
+  PATH_TRACING_ON_CONTRIBUTION_WEIGHTED(payload, contribution, candidateWeight);
+}
+
 void BeginFirstBounceDenoiserSignal(inout PathPayload payload, uint sampledLobeKind)
 {
   if(payload.hasPrimarySurface == 0u)

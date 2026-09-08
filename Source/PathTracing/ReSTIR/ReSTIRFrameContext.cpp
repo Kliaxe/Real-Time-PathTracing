@@ -1,15 +1,15 @@
-#include "ReSTIRDIFrameContext.h"
+#include "ReSTIRFrameContext.h"
 
 namespace nvsamples
 {
 
-void ReSTIRDIFrameContext::InvalidateHistory()
+void ReSTIRFrameContext::InvalidateHistory()
 {
   // Frame zero is treated as "no previous frame" by the shader-side temporal pass.
   m_FrameIndex = 0;
 }
 
-void ReSTIRDIFrameContext::EnsureViewport(VkExtent2D viewportSize)
+void ReSTIRFrameContext::EnsureViewport(VkExtent2D viewportSize)
 {
   if(m_ViewportSize.width == viewportSize.width && m_ViewportSize.height == viewportSize.height)
   {
@@ -21,23 +21,23 @@ void ReSTIRDIFrameContext::EnsureViewport(VkExtent2D viewportSize)
   InvalidateHistory();
 }
 
-void ReSTIRDIFrameContext::AdvanceFrame()
+void ReSTIRFrameContext::AdvanceFrame()
 {
   ++m_FrameIndex;
 }
 
-uint32_t ReSTIRDIFrameContext::GetFrameIndex() const
+uint32_t ReSTIRFrameContext::GetFrameIndex() const
 {
   return m_FrameIndex;
 }
 
-uint32_t ReSTIRDIFrameContext::GetCurrentHistoryIndex() const
+uint32_t ReSTIRFrameContext::GetCurrentHistoryIndex() const
 {
   // Even/odd frame parity selects which surface buffer receives this frame.
   return m_FrameIndex & 1u;
 }
 
-uint32_t ReSTIRDIFrameContext::GetPreviousHistoryIndex() const
+uint32_t ReSTIRFrameContext::GetPreviousHistoryIndex() const
 {
   // With two buffers, previous is always the opposite parity.
   return 1u - GetCurrentHistoryIndex();

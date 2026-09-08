@@ -9,7 +9,7 @@ namespace nvsamples
 
 // Tiny frame-history tracker for ReSTIR. It separates "which frame is this?"
 // from the renderer so buffer ping-pong and temporal invalidation stay obvious.
-class ReSTIRDIFrameContext
+class ReSTIRFrameContext
 {
 public:
   // Resets temporal history and returns the next frame to frame index zero.

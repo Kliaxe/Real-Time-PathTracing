@@ -25,6 +25,7 @@
 #include <glm/vec2.hpp>
 
 #include "PathTracing/PathTracer.h"
+#include "PathTracing/ReSTIR/PT/ReSTIRPTRenderer.h"
 #include "PathTracing/ReSTIR/ReSTIRDIRenderer.h"
 #include "Scene/SceneAssetCatalog.h"
 #include "Scene/SceneResolver.h"
@@ -34,6 +35,8 @@
 
 namespace nvsamples
 {
+
+
 // Core application element role:
 // - Owns rendering/runtime systems and per-frame orchestration.
 // - Keeps scene/UI/rendering logic isolated from Main.cpp bootstrap code.
@@ -44,6 +47,10 @@ class Application : public nvapp::IAppElement
     eRasterizer = 0,
     ePathTracing,
     eReSTIRDI,
+    // ReSTIR PT Enhanced is a peer of ReSTIR DI, not a replacement for it. DI is
+    // kept intact so the two can be compared directly from the UI, which is also
+    // how the unified-reservoir change in Section 6.1 is evaluated.
+    eReSTIRPTEnhanced,
   };
 
   enum
@@ -67,6 +74,7 @@ public:
   std::shared_ptr<nvutils::CameraManipulator> GetCameraManipulator() const;
 
 private:
+  // Applies CLI startup overrides once the renderers exist to receive them.
   void DiscoverAssets();
   void RebuildSceneFromSelection();
   void PostProcess(VkCommandBuffer cmd);
@@ -81,9 +89,11 @@ private:
   void RasterScene(VkCommandBuffer cmd);
   void PathTraceScene(VkCommandBuffer cmd);
   void ReSTIRDIScene(VkCommandBuffer cmd);
+  void ReSTIRPTScene(VkCommandBuffer cmd);
   void InvalidateRenderHistory();
   bool IsPathTracerRenderMode() const;
   bool IsReSTIRDIRenderMode() const;
+  bool IsReSTIRPTRenderMode() const;
 
 private:
   static constexpr uint32_t              kMaxTextureDescriptors = 4096;
@@ -125,6 +135,7 @@ private:
   std::unique_ptr<nvsamples::SceneAssetCatalog> m_SceneAssetCatalog;
   std::unique_ptr<nvsamples::PathTracer>        m_PathTracer;
   std::unique_ptr<nvsamples::ReSTIRDIRenderer>  m_ReSTIRDI;
+  std::unique_ptr<nvsamples::ReSTIRPTRenderer>  m_ReSTIRPT;
   std::unique_ptr<nvsamples::SceneResolver>     m_SceneResolver;
   std::unique_ptr<nvsamples::SceneRenderer>     m_SceneRenderer;
   std::unique_ptr<nvsamples::SceneRuntime>      m_SceneRuntime;

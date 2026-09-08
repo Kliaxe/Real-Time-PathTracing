@@ -9,9 +9,9 @@
 
 #include "Denoising/DenoiserResources.h"
 #include "Denoising/NrdDenoiser.h"
-#include "PathTracing/ReSTIR/ReSTIRDIFrameContext.h"
+#include "PathTracing/ReSTIR/ReSTIRFrameContext.h"
 #include "PathTracing/ReSTIR/ReSTIRDIRendererTypes.h"
-#include "PathTracing/ReSTIR/ReSTIRDIRenderPassUtils.h"
+#include "PathTracing/ReSTIR/ReSTIRRenderPassUtils.h"
 #include "PathTracing/ReSTIR/ReSTIRDIResources.h"
 #include "PathTracing/ReSTIR/ReSTIRDISettings.h"
 #include "nvvk/descriptors.hpp"
@@ -56,7 +56,7 @@ public:
 private:
   using AccumulationSignature = ReSTIRDIAccumulationSignature;
   using DenoiserSignature     = ReSTIRDIDenoiserHistorySignature;
-  using RayTracingPassState   = ReSTIRDIRayTracingPassState;
+  using RayTracingPassState   = ReSTIRRayTracingPassState;
 
   struct FrameState
   {
@@ -130,7 +130,7 @@ private:
   DenoiserSignature     m_LastDenoiserSignature{};
 
   // ReSTIR owns one frame context, one parameter context, and the GPU buffers.
-  ReSTIRDIFrameContext                      m_FrameContext;
+  ReSTIRFrameContext                      m_FrameContext;
   ReSTIRDIResources                         m_Resources;
   // Parameter context is recreated when viewport-dependent reservoir layout changes.
   std::unique_ptr<ReSTIRDIParameterContext> m_ParameterContext;

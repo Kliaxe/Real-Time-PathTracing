@@ -32,57 +32,6 @@ constexpr VkShaderStageFlags kReSTIRDIPushConstantStages = VK_SHADER_STAGE_RAYGE
                                                            | VK_SHADER_STAGE_COMPUTE_BIT;
 static_assert(sizeof(shaderio::ReSTIRDIPushConstant) <= 256, "ReSTIR DI push constants must fit Vulkan's minimum 256-byte limit.");
 
-void TransitionStorageImageForWrite(VkCommandBuffer cmd, nvvk::Image& image, VkPipelineStageFlags2 dstStageMask)
-{
-  if(image.image == VK_NULL_HANDLE)
-  {
-    return;
-  }
-
-  if(image.descriptor.imageLayout == VK_IMAGE_LAYOUT_GENERAL)
-  {
-    // The image is already in the right layout, but this still orders previous writes before this pass.
-    const VkImageMemoryBarrier2 imageBarrier{
-        .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
-        .srcAccessMask = VK_ACCESS_2_NONE,
-        .dstStageMask  = dstStageMask,
-        .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-        .oldLayout     = VK_IMAGE_LAYOUT_GENERAL,
-        .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
-        .image         = image.image,
-        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
-    };
-    const VkDependencyInfo dependencyInfo{
-        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers    = &imageBarrier,
-    };
-    vkCmdPipelineBarrier2(cmd, &dependencyInfo);
-    return;
-  }
-
-  const VkImageMemoryBarrier2 imageBarrier{
-      .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-      .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
-      .srcAccessMask = VK_ACCESS_2_NONE,
-      .dstStageMask  = dstStageMask,
-      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-      .oldLayout     = image.descriptor.imageLayout,
-      .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
-      .image         = image.image,
-      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
-  };
-  const VkDependencyInfo dependencyInfo{
-      .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .imageMemoryBarrierCount = 1,
-      .pImageMemoryBarriers    = &imageBarrier,
-  };
-  // First use this frame moves the image into GENERAL so ray tracing shaders can write it.
-  vkCmdPipelineBarrier2(cmd, &dependencyInfo);
-  image.descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-}
-
 VkShaderModuleCreateInfo GetInitialSamplingShaderCode()
 {
   return nvsamples::GetShaderModuleCreateInfo(std::span(GenerateInitialSamples_slang));
@@ -149,8 +98,8 @@ void ReSTIRDIRenderer::Destroy()
   m_NrdDenoiser.Destroy();
   m_DenoiserResources.Destroy();
   m_Resources.Destroy();
-  DestroyReSTIRDIRayTracingPass(m_Allocator, m_InitialSamplingPass);
-  DestroyReSTIRDIRayTracingPass(m_Allocator, m_FinalShadingPass);
+  DestroyReSTIRRayTracingPass(m_Allocator, m_InitialSamplingPass);
+  DestroyReSTIRRayTracingPass(m_Allocator, m_FinalShadingPass);
 
   for(VkPipeline& computePipeline : m_ComputePipelines)
   {
@@ -179,7 +128,7 @@ void ReSTIRDIRenderer::Destroy()
 
 bool ReSTIRDIRenderer::IsReady() const
 {
-  return m_PipelineLayout != VK_NULL_HANDLE && IsReSTIRDIRayTracingPassReady(m_InitialSamplingPass) && IsReSTIRDIRayTracingPassReady(m_FinalShadingPass)
+  return m_PipelineLayout != VK_NULL_HANDLE && IsReSTIRRayTracingPassReady(m_InitialSamplingPass) && IsReSTIRRayTracingPassReady(m_FinalShadingPass)
          && m_ComputePipelines[static_cast<size_t>(ComputePass::eTemporal)] != VK_NULL_HANDLE
          && m_ComputePipelines[static_cast<size_t>(ComputePass::eSpatial)] != VK_NULL_HANDLE;
 }
@@ -349,7 +298,7 @@ shaderio::ReSTIRDIParameters ReSTIRDIRenderer::BuildShaderParameters()
 void ReSTIRDIRenderer::PrepareStorageImages(const RenderInput& input, bool denoiserSignalsNeeded)
 {
   // The ray tracing passes write directly into the accumulation and output images.
-  TransitionReSTIRDIStorageImages(input.cmd, const_cast<nvvk::Image&>(m_Resources.GetAccumulationImage()),
+  TransitionReSTIRStorageImages(input.cmd, const_cast<nvvk::Image&>(m_Resources.GetAccumulationImage()),
                                  input.gBuffers->getColorImage(input.renderedImageIndex),
                                  VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
   if(denoiserSignalsNeeded)
@@ -548,13 +497,13 @@ void ReSTIRDIRenderer::CreateParameterBuffers()
 
 void ReSTIRDIRenderer::CreateInitialSamplingPipeline()
 {
-  CreateReSTIRDIRayTracingPass(m_Allocator, m_RtProperties, m_PipelineLayout, GetInitialSamplingShaderCode(), 2u,
+  CreateReSTIRRayTracingPass(m_Allocator, m_RtProperties, m_PipelineLayout, GetInitialSamplingShaderCode(), 2u,
                                "ReSTIR DI Initial Sampling Pipeline", m_InitialSamplingPass);
 }
 
 void ReSTIRDIRenderer::CreateFinalShadingPipeline()
 {
-  CreateReSTIRDIRayTracingPass(m_Allocator, m_RtProperties, m_PipelineLayout, GetFinalShadingShaderCode(),
+  CreateReSTIRRayTracingPass(m_Allocator, m_RtProperties, m_PipelineLayout, GetFinalShadingShaderCode(),
                                std::max(1u, m_PipelineBounceLimit + 1u), "ReSTIR DI Final Shading Pipeline",
                                m_FinalShadingPass);
 }
@@ -562,9 +511,9 @@ void ReSTIRDIRenderer::CreateFinalShadingPipeline()
 void ReSTIRDIRenderer::CreateComputePipelines()
 {
   m_ComputePipelines[static_cast<size_t>(ComputePass::eTemporal)] =
-      CreateReSTIRDIComputePipeline(m_Allocator, m_PipelineLayout, GetTemporalShaderCode(), "ReSTIR DI Temporal Pipeline");
+      CreateReSTIRComputePipeline(m_Allocator, m_PipelineLayout, GetTemporalShaderCode(), "ReSTIR DI Temporal Pipeline");
   m_ComputePipelines[static_cast<size_t>(ComputePass::eSpatial)] =
-      CreateReSTIRDIComputePipeline(m_Allocator, m_PipelineLayout, GetSpatialShaderCode(), "ReSTIR DI Spatial Pipeline");
+      CreateReSTIRComputePipeline(m_Allocator, m_PipelineLayout, GetSpatialShaderCode(), "ReSTIR DI Spatial Pipeline");
 }
 
 void ReSTIRDIRenderer::EnsureParameterContext(VkExtent2D viewportSize)
@@ -767,7 +716,7 @@ void ReSTIRDIRenderer::RunInitialSamplingPass(const RenderInput& input, const sh
 {
   nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR DI Initial Sampling");
   const uint32_t frameSetIndex = GetReSTIRDIFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
-  TraceReSTIRDIRayTracingPass(input.cmd, m_InitialSamplingPass, m_PipelineLayout, *m_DescPack.getSetPtr(frameSetIndex),
+  TraceReSTIRRayTracingPass(input.cmd, m_InitialSamplingPass, m_PipelineLayout, *m_DescPack.getSetPtr(frameSetIndex),
                             kReSTIRDIPushConstantStages, pushConstant, input.gBuffers->getSize());
 }
 
@@ -775,7 +724,7 @@ void ReSTIRDIRenderer::RunTemporalPass(const RenderInput& input, const shaderio:
 {
   nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR DI Temporal Resampling");
   const uint32_t frameSetIndex = GetReSTIRDIFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
-  DispatchReSTIRDIComputePass(input.cmd, m_ComputePipelines[static_cast<size_t>(ComputePass::eTemporal)], m_PipelineLayout,
+  DispatchReSTIRComputePass(input.cmd, m_ComputePipelines[static_cast<size_t>(ComputePass::eTemporal)], m_PipelineLayout,
                             *m_DescPack.getSetPtr(frameSetIndex), kReSTIRDIPushConstantStages, pushConstant, input.gBuffers->getSize(),
                             kComputeGroupSize);
 }
@@ -784,7 +733,7 @@ void ReSTIRDIRenderer::RunSpatialPass(const RenderInput& input, const shaderio::
 {
   nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR DI Spatial Resampling");
   const uint32_t frameSetIndex = GetReSTIRDIFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
-  DispatchReSTIRDIComputePass(input.cmd, m_ComputePipelines[static_cast<size_t>(ComputePass::eSpatial)], m_PipelineLayout,
+  DispatchReSTIRComputePass(input.cmd, m_ComputePipelines[static_cast<size_t>(ComputePass::eSpatial)], m_PipelineLayout,
                             *m_DescPack.getSetPtr(frameSetIndex), kReSTIRDIPushConstantStages, pushConstant, input.gBuffers->getSize(),
                             kComputeGroupSize);
 }
@@ -793,7 +742,7 @@ void ReSTIRDIRenderer::RunFinalShadingPass(const RenderInput& input, const shade
 {
   nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR DI Final Shading");
   const uint32_t frameSetIndex = GetReSTIRDIFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
-  TraceReSTIRDIRayTracingPass(input.cmd, m_FinalShadingPass, m_PipelineLayout, *m_DescPack.getSetPtr(frameSetIndex),
+  TraceReSTIRRayTracingPass(input.cmd, m_FinalShadingPass, m_PipelineLayout, *m_DescPack.getSetPtr(frameSetIndex),
                             kReSTIRDIPushConstantStages, pushConstant, input.gBuffers->getSize());
 }
 

@@ -47,6 +47,7 @@ int main(int argc, char** argv)
   nvutils::ParameterParser   cli(nvutils::getExecutablePath().stem().string());
   nvutils::ParameterRegistry reg;
   reg.add({"headless", "Run in headless mode"}, &appInfo.headless, true);
+  reg.add({"frames", "Frames to render in headless mode"}, &appInfo.headlessFrameCount);
   cli.add(reg);
   cli.parse(argc, argv);
 

@@ -258,6 +258,154 @@ SceneDefinition CornellScene(const char* label, bool manyLights)
   return scene;
 }
 
+// A deliberately layered scene for measuring temporal reuse under motion.
+//
+// The rest of the catalog is poor at this: a closed room or a single centred model
+// gives a reprojected pixel a compatible surface almost everywhere, so disocclusion
+// - the case dual motion vectors (Section 6.4) exist to rescue - barely occurs and
+// cannot be measured. Here a row of narrow pillars stands far in front of the back
+// wall, so lateral camera motion sweeps them across it and each pillar edge exposes
+// wall that had no history in the previous frame.
+SceneDefinition DisocclusionScene()
+{
+  SceneDefinition scene{};
+  scene.label = "Disocclusion Pillars";
+  AddCornellRoom(scene);
+  AddSingleCornellLight(scene);
+
+  // Near the camera and thin, so a small camera movement moves each pillar many
+  // pixels across a background that is nearly stationary. The gaps matter as much
+  // as the pillars: they are what the wall is revealed through.
+  static constexpr float kPillarZ      = 1.35f;
+  static constexpr float kPillarHeight = 1.75f;
+  static constexpr float kPillarHalf   = 0.16f;
+  const float            pillarX[4]    = {-1.70f, -0.60f, 0.55f, 1.65f};
+
+  for(int i = 0; i < 4; ++i)
+  {
+    scene.models.push_back(MaterialModelEntry("Pillar " + std::to_string(i), "Models/Cube.glb",
+                                              ComposeTransform(glm::vec3(pillarX[i], kPillarHeight, kPillarZ),
+                                                               glm::vec3(0.0f),
+                                                               glm::vec3(kPillarHalf, kPillarHeight, kPillarHalf)),
+                                              DiffuseMaterial(glm::vec3(0.62f, 0.60f, 0.58f))));
+  }
+
+  // A second, shallower layer. Two depths of occluder mean a disoccluded pixel is
+  // sometimes revealed by a pillar and sometimes by a sphere, so the test is not
+  // measuring one specific silhouette.
+  scene.models.push_back(MaterialModelEntry("Front Sphere", "Models/Sphere.glb",
+                                            ComposeTransform(glm::vec3(-1.05f, 0.52f, 0.35f), glm::vec3(0.0f),
+                                                             glm::vec3(0.52f)),
+                                            DiffuseMaterial(glm::vec3(0.70f, 0.35f, 0.25f))));
+  scene.models.push_back(MaterialModelEntry("Mid Sphere", "Models/Sphere.glb",
+                                            ComposeTransform(glm::vec3(1.05f, 0.45f, -0.55f), glm::vec3(0.0f),
+                                                             glm::vec3(0.45f)),
+                                            DiffuseMaterial(glm::vec3(0.30f, 0.45f, 0.70f))));
+  return scene;
+}
+
+// A scene where choosing the light actually matters, for measuring RIS-based NEE
+// (Section 6.1).
+//
+// "Cornell Many Lights" does not test this: its 24 ceiling panels have similar
+// power and all illuminate the whole room, so a power-weighted draw is already
+// close to the best proposal available and resampling has nothing to improve. The
+// regime RIS is built for is the opposite one - most lights are irrelevant to any
+// given surface, and which ones are irrelevant depends on where the surface is.
+//
+// So: a long corridor, lights spread down its whole length, and their power spread
+// over roughly 60x. The brightest emitters are the ones a power CDF
+// picks most often, and from any particular point most of them are far away, behind
+// a partition, or facing the wrong way. Resampling against a target that knows the
+// receiving surface is what recovers the nearby dim light that actually lights it.
+SceneDefinition ScatteredLightsScene()
+{
+  SceneDefinition scene{};
+  scene.label = "Scattered Lights";
+
+  static constexpr float kHalfWidth  = 3.0f;
+  static constexpr float kHalfLength = 12.0f;
+  static constexpr float kHeight     = 4.0f;
+  static constexpr float kHalfPi     = 1.57079632679f;
+
+  const MaterialAttributes shell = DiffuseMaterial(glm::vec3(0.62f));
+
+  scene.models.push_back(MaterialModelEntry("Floor", "Models/Plane.glb",
+                                            ComposeTransform(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f),
+                                                             glm::vec3(kHalfWidth, 1.0f, kHalfLength)),
+                                            shell));
+  scene.models.push_back(MaterialModelEntry("Ceiling", "Models/Plane.glb",
+                                            ComposeTransform(glm::vec3(0.0f, kHeight, 0.0f), glm::vec3(0.0f),
+                                                             glm::vec3(kHalfWidth, 1.0f, kHalfLength)),
+                                            shell));
+  scene.models.push_back(MaterialModelEntry("Left Wall", "Models/Plane.glb",
+                                            ComposeTransform(glm::vec3(-kHalfWidth, kHeight * 0.5f, 0.0f),
+                                                             glm::vec3(0.0f, 0.0f, kHalfPi),
+                                                             glm::vec3(kHeight * 0.5f, 1.0f, kHalfLength)),
+                                            DiffuseMaterial(glm::vec3(0.70f, 0.28f, 0.22f))));
+  scene.models.push_back(MaterialModelEntry("Right Wall", "Models/Plane.glb",
+                                            ComposeTransform(glm::vec3(kHalfWidth, kHeight * 0.5f, 0.0f),
+                                                             glm::vec3(0.0f, 0.0f, kHalfPi),
+                                                             glm::vec3(kHeight * 0.5f, 1.0f, kHalfLength)),
+                                            DiffuseMaterial(glm::vec3(0.24f, 0.52f, 0.30f))));
+  scene.models.push_back(MaterialModelEntry("Far Wall", "Models/Plane.glb",
+                                            ComposeTransform(glm::vec3(0.0f, kHeight * 0.5f, -kHalfLength),
+                                                             glm::vec3(kHalfPi, 0.0f, 0.0f),
+                                                             glm::vec3(kHalfWidth, 1.0f, kHeight * 0.5f)),
+                                            shell));
+  scene.models.push_back(MaterialModelEntry("Near Wall", "Models/Plane.glb",
+                                            ComposeTransform(glm::vec3(0.0f, kHeight * 0.5f, kHalfLength),
+                                                             glm::vec3(kHalfPi, 0.0f, 0.0f),
+                                                             glm::vec3(kHalfWidth, 1.0f, kHeight * 0.5f)),
+                                            shell));
+
+  // Partitions with alternating gaps. Without them every light reaches every
+  // surface and distance alone decides relevance, which is a much weaker test:
+  // occlusion is the part the RIS target deliberately does NOT model, so the
+  // estimator has to stay correct where its own target is most wrong.
+  for(int i = 0; i < 5; ++i)
+  {
+    const float z    = -9.0f + static_cast<float>(i) * 4.0f;
+    const float side = (i % 2 == 0) ? -1.0f : 1.0f;
+    scene.models.push_back(MaterialModelEntry("Partition " + std::to_string(i), "Models/Cube.glb",
+                                              ComposeTransform(glm::vec3(side * 1.35f, kHeight * 0.5f, z),
+                                                               glm::vec3(0.0f),
+                                                               glm::vec3(1.65f, kHeight * 0.5f, 0.12f)),
+                                              DiffuseMaterial(glm::vec3(0.58f, 0.56f, 0.60f))));
+  }
+
+  // 132 emitters. The power range is the point: a CDF proportional to power spends
+  // most of its samples on the few brightest, and those are uniformly distributed
+  // along the corridor rather than near any particular shading point.
+  int lightIndex = 0;
+  for(int row = 0; row < 22; ++row)
+  {
+    for(int column = 0; column < 6; ++column)
+    {
+      const float z = -11.0f + static_cast<float>(row) * (22.0f / 21.0f);
+      const float x = -2.4f + static_cast<float>(column) * 0.96f;
+      const float y = 0.8f + static_cast<float>((row * 6 + column) % 5) * 0.72f;
+
+      // Deterministic but strongly varying: an integer hash spread across two
+      // decades, so neighbouring emitters are not similar and the distribution is
+      // reproducible run to run.
+      const int   hash      = (lightIndex * 2654435761u) % 97u;
+      const float intensity = 0.12f + static_cast<float>(hash) * 0.075f;
+      const glm::vec3 tint(0.55f + 0.45f * static_cast<float>((hash + 0) % 7) / 6.0f,
+                           0.55f + 0.45f * static_cast<float>((hash + 3) % 5) / 4.0f,
+                           0.55f + 0.45f * static_cast<float>((hash + 5) % 11) / 10.0f);
+
+      scene.models.push_back(MaterialModelEntry("Light " + std::to_string(lightIndex), "Models/Plane.glb",
+                                                ComposeTransform(glm::vec3(x, y, z), glm::vec3(kHalfPi, 0.0f, 0.0f),
+                                                                 glm::vec3(0.11f, 1.0f, 0.11f)),
+                                                EmissiveMaterial(tint * intensity)));
+      ++lightIndex;
+    }
+  }
+
+  return scene;
+}
+
 SceneDefinition SponzaStudioScene()
 {
   SceneDefinition scene{};
@@ -280,6 +428,7 @@ std::vector<SceneDefinition> CreateSceneCatalog()
   scenes.push_back(SingleModelScene("Area Light", "Models/AreaLight/AreaLight.gltf"));
   scenes.push_back(CornellScene("Cornell Box", false));
   scenes.push_back(CornellScene("Cornell Many Lights", true));
+  scenes.push_back(DisocclusionScene());
   scenes.push_back(SponzaStudioScene());
   scenes.push_back(SingleModelScene("Fireplace", "Models/Fireplace/Fireplace.gltf"));
   scenes.push_back(SingleModelScene("Mill", "Models/Mill/Mill.gltf"));
@@ -295,6 +444,11 @@ std::vector<SceneDefinition> CreateSceneCatalog()
   scenes.push_back(DragonVariantScene("Dragon Metallic", MetallicPreset()));
   scenes.push_back(DragonVariantScene("Dragon Glass", GlassPreset()));
   scenes.push_back(DragonVariantScene("Dragon Clearcoat", ClearcoatPreset()));
+
+  // Appended rather than grouped with the other room scenes on purpose: inserting
+  // it earlier would renumber every scene after it, and the scene index is what the
+  // headless harness and every recorded measurement refer to.
+  scenes.push_back(ScatteredLightsScene());
 
   return scenes;
 }

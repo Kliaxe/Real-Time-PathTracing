@@ -394,8 +394,7 @@ void AccumulateEnvironmentDirectLight(inout PathPayload payload, SurfaceData sur
   // MIS balances the explicit environment sample against the chance of the path continuation BSDF having sampled the same direction.
   const float  misWeight = MisMixWeight(lightPdf, bsdfPdf);
   const float3 contribution = payload.throughput * radiance * bsdf * (misWeight / lightPdf);
-  payload.radiance += contribution;
-  AccumulateDenoiserRadiance(payload, contribution);
+  AccumulatePathContribution(payload, contribution);
   StoreDiffuseDenoiserHitDistanceIfMissing(payload, kDenoiserFarHitDistance);
 }
 

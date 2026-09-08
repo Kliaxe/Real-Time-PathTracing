@@ -43,6 +43,7 @@
 #include <imgui/backends/imgui_impl_vulkan.h>
 #include <imgui/imgui.h>
 #include <algorithm>
+#include <fstream>
 #include <memory>
 #include <span>
 #include <string>
@@ -77,12 +78,16 @@
 #include <nvvk/formats.hpp>
 #include <nvvk/gbuffers.hpp>
 #include <nvvk/graphics_pipeline.hpp>
+#include <nvvk/helpers.hpp>
 #include <nvvk/sampler_pool.hpp>
 #include <nvvk/validation_settings.hpp>
 
 #include "Common/GltfUtils.hpp"
 #include "Common/PathUtils.hpp"
 #include "Common/Utils.hpp"
+// Renderer control surfaces live with their renderers; Application only calls them.
+#include "PathTracing/Common/RendererUi.h"
+#include "PathTracing/ReSTIR/PT/ReSTIRPTUi.h"
 #include "Scene/SceneAssetCatalog.h"
 #include "Scene/SceneResolver.h"
 #include "Scene/SceneRenderer.h"
@@ -96,70 +101,6 @@ namespace nvsamples
 {
 namespace
 {
-
-bool DrawResolveModeControl(RenderResolveMode& resolveMode, const char* label = "Resolve")
-{
-  int mode = static_cast<int>(resolveMode);
-  const char* resolveModes[] = {"Off", "Accumulate", "Denoise"};
-  if(!ImGui::Combo(label, &mode, resolveModes, IM_ARRAYSIZE(resolveModes)))
-  {
-    return false;
-  }
-
-  resolveMode = static_cast<RenderResolveMode>(mode);
-  return true;
-}
-
-bool DrawDenoiserDebugViewControl(DenoiserDebugView& debugView, const char* label = "Denoiser Output")
-{
-  int view = static_cast<int>(debugView);
-  const char* debugViews[] = {"Final",          "Raw Beauty",      "Denoised Beauty", "Diffuse Input", "Specular Input",
-                              "Denoised Diffuse", "Denoised Specular", "Normal Roughness", "ViewZ",         "Motion Vectors"};
-  if(!ImGui::Combo(label, &view, debugViews, IM_ARRAYSIZE(debugViews)))
-  {
-    return false;
-  }
-
-  debugView = static_cast<DenoiserDebugView>(view);
-  return true;
-}
-
-bool DrawDenoiserSettingsSection(const char* treeLabel, DenoiserSettings& settings)
-{
-  if(!ImGui::TreeNodeEx(treeLabel))
-  {
-    return false;
-  }
-
-  bool changed = false;
-
-  int maxAccumulatedFrames = static_cast<int>(settings.maxAccumulatedFrames);
-  if(ImGui::SliderInt("Max Accumulated Frames", &maxAccumulatedFrames, 1, 63))
-  {
-    settings.maxAccumulatedFrames = static_cast<uint32_t>(maxAccumulatedFrames);
-    changed = true;
-  }
-
-  int maxFastAccumulatedFrames = static_cast<int>(settings.maxFastAccumulatedFrames);
-  if(ImGui::SliderInt("Max Fast Accumulated Frames", &maxFastAccumulatedFrames, 0, static_cast<int>(settings.maxAccumulatedFrames)))
-  {
-    settings.maxFastAccumulatedFrames = static_cast<uint32_t>(maxFastAccumulatedFrames);
-    changed = true;
-  }
-
-  changed |= ImGui::SliderFloat("Diffuse Prepass Radius", &settings.diffusePrepassBlurRadius, 0.0f, 64.0f, "%.1f");
-  changed |= ImGui::SliderFloat("Specular Prepass Radius", &settings.specularPrepassBlurRadius, 0.0f, 64.0f, "%.1f");
-  changed |= ImGui::SliderFloat("Disocclusion Threshold", &settings.disocclusionThreshold, 0.001f, 0.20f, "%.3f");
-
-  if(ImGui::Checkbox("Anti-Firefly", &settings.enableAntiFirefly))
-  {
-    changed = true;
-  }
-
-  ImGui::TreePop();
-  return changed;
-}
-
 bool DrawReSTIRCommonControls(ReSTIRDICommonSettings& settings, const char* resamplingLabel)
 {
   bool changed = false;
@@ -175,33 +116,6 @@ bool DrawReSTIRCommonControls(ReSTIRDICommonSettings& settings, const char* resa
   }
 
   return changed;
-}
-
-bool DrawReSTIRDebugViewControl(shaderio::ReSTIRDebugView& debugView, const char* methodTagLabel)
-{
-  int view = static_cast<int>(debugView);
-  const char* debugViews[] = {"Disabled", methodTagLabel, "Target PDF", "Reservoir Weight", "Reservoir Age",
-                              "Temporal Status", "Spatial Status", "Shift Jacobian", "Reuse Count",
-                              "Depth Disocclusion"};
-  if(!ImGui::Combo("Debug View", &view, debugViews, IM_ARRAYSIZE(debugViews)))
-  {
-    return false;
-  }
-
-  debugView = static_cast<shaderio::ReSTIRDebugView>(view);
-  return true;
-}
-
-bool DrawBounceLimitControl(const char* label, uint32_t& settingValue, uint32_t bounceLimit)
-{
-  int value = static_cast<int>(settingValue);
-  if(!ImGui::SliderInt(label, &value, 0, static_cast<int>(bounceLimit)))
-  {
-    return false;
-  }
-
-  settingValue = static_cast<uint32_t>(value);
-  return true;
 }
 
 void DrawTransmissionBounceHint(uint32_t bounceCount)
@@ -259,29 +173,6 @@ bool DrawReSTIRResamplingSection(const char* treeLabel, ReSTIRDITemporalResampli
   changed |= DrawReSTIRSpatialControls(spatialSettings, maxRadius);
   ImGui::TreePop();
   return changed;
-}
-
-void DrawResolveStatus(RenderResolveMode resolveMode, uint32_t accumulatedFrames)
-{
-  if(IsAccumulationResolveMode(resolveMode))
-  {
-    ImGui::Text("Accumulated Frames: %u", accumulatedFrames);
-    return;
-  }
-
-  if(IsDenoiseResolveMode(resolveMode))
-  {
-    ImGui::TextUnformatted("Resolve Mode: Denoise");
-    return;
-  }
-
-  ImGui::TextUnformatted("Resolve Mode: Off");
-}
-
-void DrawReSTIRMethodFooter(const char* description, RenderResolveMode resolveMode, uint32_t accumulatedFrames)
-{
-  ImGui::TextWrapped("%s", description);
-  DrawResolveStatus(resolveMode, accumulatedFrames);
 }
 
 }  // namespace
@@ -362,6 +253,11 @@ void Application::onAttach(nvapp::Application* app)
         .allocator             = &m_Allocator,
         .maxTextureDescriptors = kMaxTextureDescriptors,
     });
+    m_ReSTIRPT         = std::make_unique<nvsamples::ReSTIRPTRenderer>(nvsamples::ReSTIRPTRenderer::CreateInfo{
+        .app                   = m_App,
+        .allocator             = &m_Allocator,
+        .maxTextureDescriptors = kMaxTextureDescriptors,
+    });
     m_SceneRuntime      = std::make_unique<nvsamples::SceneRuntime>(nvsamples::SceneRuntime::CreateInfo{
         .app             = m_App,
         .allocator       = &m_Allocator,
@@ -370,7 +266,10 @@ void Application::onAttach(nvapp::Application* app)
     });
     m_PathTracer->Initialize();
     m_ReSTIRDI->Initialize();
+    m_ReSTIRPT->Initialize();
     DiscoverAssets();
+    // Applied between discovery and scene build: discovery populates the catalog
+    // and picks a default scene index, which a startup override then replaces.
     CreateScene(true);
     CreateRasterDescriptorSetLayout();
     CreateRasterPipelineLayout();
@@ -395,6 +294,7 @@ void Application::onDetach()
 
     m_PathTracer->Destroy();
     m_ReSTIRDI->Destroy();
+    m_ReSTIRPT->Destroy();
     m_SceneRuntime->Destroy();
 
     m_GBuffers.deinit();
@@ -425,7 +325,7 @@ void Application::onUIRender()
       if(ImGui::CollapsingHeader("Renderer", ImGuiTreeNodeFlags_DefaultOpen))
       {
         int renderMode = static_cast<int>(m_RenderMode);
-        const char* renderModes[] = {"Rasterizer", "Path Tracing", "ReSTIR DI"};
+        const char* renderModes[] = {"Rasterizer", "Path Tracing", "ReSTIR DI", "ReSTIR PT Enhanced"};
         if(ImGui::Combo("Mode", &renderMode, renderModes, IM_ARRAYSIZE(renderModes)))
         {
           m_RenderMode = static_cast<RenderMode>(renderMode);
@@ -592,6 +492,76 @@ void Application::onUIRender()
                 "This DI mode uses ReSTIR direct-light reservoirs and path-traced secondary bounces for reflections and indirect transport.",
               restirDiSettings.common.resolveMode,
               m_ReSTIRDI->GetAccumulatedFrameCount());
+          }
+        }
+        else if(m_RenderMode == RenderMode::eReSTIRPTEnhanced)
+        {
+          if(m_ReSTIRPT == nullptr)
+          {
+            ImGui::TextWrapped("ReSTIR PT Enhanced mode is present in the UI, but the renderer was not created.");
+          }
+          else
+          {
+            nvsamples::ReSTIRPTSettings& restirPtSettings = m_ReSTIRPT->GetSettings();
+
+            if(!m_ReSTIRPT->IsReady())
+            {
+              // Settings are drawn regardless of readiness: the parameter set is the
+              // deliverable of this checkpoint, and the viewport falls back to the
+              // rasterizer meanwhile.
+              ImGui::TextWrapped(
+                  "Renderer passes are not implemented yet, so the viewport falls back to the rasterizer. The parameter set below is live and editable.");
+              ImGui::Separator();
+            }
+
+            invalidateRenderHistory |= DrawReSTIRPTCommonControls(restirPtSettings.common);
+
+            // Fall back to a fixed slider range until the ray tracing pipeline
+            // reports the device's actual recursion limit. Either way the limit is
+            // capped by the reconnection-length field's capacity, since a longer
+            // path could not record where it reconnected.
+            const uint32_t deviceBounceLimit = m_ReSTIRPT->IsReady() ? m_ReSTIRPT->GetPipelineBounceLimit() : 16u;
+            const uint32_t bounceLimit       = std::min(deviceBounceLimit, RESTIR_PT_MAX_BOUNCES);
+            invalidateRenderHistory |= DrawReSTIRPTInitialSamplingSection(restirPtSettings.initialSampling, restirPtSettings.nee, bounceLimit);
+            invalidateRenderHistory |= DrawReSTIRPTShiftSection(restirPtSettings.shift);
+            invalidateRenderHistory |= DrawReSTIRPTResamplingSection(restirPtSettings.temporalResampling,
+                                                                    restirPtSettings.spatialResampling, 128.0f);
+            invalidateRenderHistory |= DrawReSTIRPTDecorrelationSection(restirPtSettings.decorrelation);
+            invalidateRenderHistory |= DrawReSTIRPTShadingSection(restirPtSettings.shading);
+            invalidateRenderHistory |= DrawReSTIRPTNeeSection(restirPtSettings.nee);
+
+            if(ImGui::TreeNodeEx("Debug"))
+            {
+              // Only the reference comparison is exposed. The rest of the shared
+              // ReSTIRDebugView entries describe DI reservoir state that ReSTIR PT
+              // either cannot produce (there is no reservoir age: PT does not cache
+              // visibility) or has no pass for yet, so offering them would advertise
+              // controls that do nothing.
+              bool showReference = (restirPtSettings.common.debugView == shaderio::eReSTIRDebugViewCandidateKind);
+              if(ImGui::Checkbox("Reference Path Tracer", &showReference))
+              {
+                restirPtSettings.common.debugView =
+                    showReference ? shaderio::eReSTIRDebugViewCandidateKind : shaderio::eReSTIRDebugViewDisabled;
+                invalidateRenderHistory = true;
+              }
+              ImGui::TextDisabled("Substitutes the plain path-traced answer for the resampled estimate through an otherwise identical pipeline. With reuse disabled the two must converge to the same image.");
+              ImGui::TreePop();
+            }
+
+            if(IsDenoiseResolveMode(restirPtSettings.common.resolveMode))
+            {
+              if(DrawDenoiserDebugViewControl(restirPtSettings.common.denoiserDebugView))
+              {
+                invalidateRenderHistory = true;
+              }
+
+              invalidateRenderHistory |=
+                  DrawDenoiserSettingsSection("Denoiser Settings##ReSTIRPT", restirPtSettings.common.denoiserSettings);
+            }
+
+            DrawReSTIRMethodFooter(
+                "ReSTIR PT Enhanced resamples whole paths via shift mappings, and unifies direct and global illumination into a single reservoir.",
+                restirPtSettings.common.resolveMode, m_ReSTIRPT->GetAccumulatedFrameCount());
           }
         }
         else
@@ -771,6 +741,7 @@ void Application::onRender(VkCommandBuffer cmd)
       return;
     }
 
+
     // The active renderer writes eImgRendered; post processing always consumes that same image.
     UpdateSceneBuffer(cmd);
     if(IsPathTracerRenderMode() && m_PathTracer != nullptr && m_PathTracer->IsReady())
@@ -781,8 +752,20 @@ void Application::onRender(VkCommandBuffer cmd)
     {
       ReSTIRDIScene(cmd);
     }
+    else if(IsReSTIRPTRenderMode() && m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
+    {
+      ReSTIRPTScene(cmd);
+    }
     else
     {
+      // TEMPORARY (ReSTIR PT checkpoint 0): selecting ReSTIR PT while its passes do
+      // not exist lands here and rasterizes instead. This is a silent renderer
+      // substitution, which the repo's hard-cut policy normally forbids - a
+      // headless capture taken in PT mode today is a raster image, not a PT one.
+      // It exists only so the viewport stays usable while the parameter set is
+      // reviewed, and the UI states it explicitly in PT mode.
+      // Delete criteria: remove this note once ReSTIRPTRenderer::IsReady() returns
+      // true in checkpoint 1; from then on PT mode always reaches ReSTIRPTScene.
       RasterScene(cmd);
     }
     PostProcess(cmd);
@@ -815,7 +798,6 @@ std::shared_ptr<nvutils::CameraManipulator> Application::GetCameraManipulator() 
 {
   return m_CameraManip;
 }
-
 void Application::DiscoverAssets()
 {
   const nvsamples::SceneAssetCatalogData catalogData = m_SceneAssetCatalog->Discover();
@@ -830,6 +812,7 @@ void Application::DiscoverAssets()
   {
     LOGW("%s\n", warning.c_str());
   }
+
 }
 
 void Application::RebuildSceneFromSelection()
@@ -924,6 +907,10 @@ void Application::UpdateTextures()
     if(m_PathTracer != nullptr && m_PathTracer->IsReady())
     {
       m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_PathTracer->GetDescriptorPack(), kMaxTextureDescriptors);
+    }
+    if(m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
+    {
+      m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_ReSTIRPT->GetDescriptorPack(), kMaxTextureDescriptors);
     }
     if(m_ReSTIRDI != nullptr && m_ReSTIRDI->IsReady())
     {
@@ -1049,6 +1036,20 @@ void Application::ReSTIRDIScene(VkCommandBuffer cmd)
     });
 }
 
+void Application::ReSTIRPTScene(VkCommandBuffer cmd)
+{
+    // ReSTIR PT receives the same scene interface as the other ray tracing renderers,
+    // but owns its reservoir and pairing resources internally.
+    m_ReSTIRPT->Render(nvsamples::ReSTIRPTRenderer::RenderInput{
+        .cmd                = cmd,
+        .sceneResource      = &m_SceneRuntime->GetSceneResource(),
+        .sceneInfo          = &m_SceneRuntime->GetSceneInfo(),
+        .topLevelAS         = &m_SceneRuntime->GetTopLevelAccelerationStructure(),
+        .gBuffers           = &m_GBuffers,
+        .renderedImageIndex = eImgRendered,
+    });
+}
+
 void Application::InvalidateRenderHistory()
 {
     // Any scene, camera, lighting, or renderer setting change makes temporal histories untrustworthy.
@@ -1061,6 +1062,10 @@ void Application::InvalidateRenderHistory()
     {
       m_ReSTIRDI->InvalidateHistory();
     }
+    if(m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
+    {
+      m_ReSTIRPT->InvalidateHistory();
+    }
 }
 
 bool Application::IsPathTracerRenderMode() const
@@ -1071,6 +1076,11 @@ bool Application::IsPathTracerRenderMode() const
 bool Application::IsReSTIRDIRenderMode() const
 {
   return m_RenderMode == RenderMode::eReSTIRDI;
+}
+
+bool Application::IsReSTIRPTRenderMode() const
+{
+  return m_RenderMode == RenderMode::eReSTIRPTEnhanced;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

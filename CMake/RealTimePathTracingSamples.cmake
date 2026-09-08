@@ -110,10 +110,26 @@ function(setup_real_time_path_tracing_app)
         endforeach()
     endif()
 
+    # Shader optimization is NOT implied by the build type: compile_slang defaults to
+    # -O0 -g1 for every configuration, so a Release binary would still run
+    # unoptimized SPIR-V. That is fine for debugging and actively misleading for
+    # measurement - at -O0 nothing is inlined and register pressure is wildly
+    # unrepresentative, which distorts the cost of long, divergent shaders far more
+    # than short ones and makes two variants of the same pass incomparable.
+    #
+    # Debug info is left on in both cases: compile_slang treats a DEBUG_LEVEL of 0 as
+    # "not set" and substitutes 1, so asking for it would be a lie in the build file.
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(_ShaderOptimizationLevel 0)
+    else()
+        set(_ShaderOptimizationLevel 3)
+    endif()
+
     compile_slang(
         "${_ShaderSlangFiles}"
         "${_ShaderOutputDir}"
         _GeneratedShaderHeaders
+        OPTIMIZATION_LEVEL ${_ShaderOptimizationLevel}
         EXTRA_FLAGS ${_ShaderIncludeFlags}
     )
 

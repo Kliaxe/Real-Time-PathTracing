@@ -88,7 +88,6 @@ void NrdDenoiser::Initialize()
 
   m_ReblurSettings.maxAccumulatedFrameNum      = 30;
   m_ReblurSettings.maxFastAccumulatedFrameNum  = 6;
-  m_ReblurSettings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::OFF;
 
   CreateVulkanState();
 }
@@ -162,6 +161,21 @@ void NrdDenoiser::ApplyDenoiserSettings(const DenoiserSettings& settings)
   m_ReblurSettings.diffusePrepassBlurRadius    = settings.diffusePrepassBlurRadius;
   m_ReblurSettings.specularPrepassBlurRadius   = settings.specularPrepassBlurRadius;
   m_ReblurSettings.enableAntiFirefly           = settings.enableAntiFirefly;
+  // Per renderer, not global: only a renderer that leaves one lobe's hit distance
+  // at zero wants NRD to go looking for a replacement.
+  switch(settings.hitDistanceReconstructionMode)
+  {
+    case HitDistanceReconstructionMode::eArea3x3:
+      m_ReblurSettings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
+      break;
+    case HitDistanceReconstructionMode::eArea5x5:
+      m_ReblurSettings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_5X5;
+      break;
+    case HitDistanceReconstructionMode::eOff:
+    default:
+      m_ReblurSettings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::OFF;
+      break;
+  }
 }
 
 void NrdDenoiser::Denoise(VkCommandBuffer cmd,

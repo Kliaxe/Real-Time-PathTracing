@@ -59,7 +59,7 @@ private:
   nvapp::Application*             m_App       = nullptr;
   nvvk::ResourceAllocator*        m_Allocator = nullptr;
   VkExtent2D                      m_ViewportSize{};
-  // Indexed by ReSTIRDIFrameContext current/previous history index.
+  // Indexed by ReSTIRFrameContext current/previous history index.
   std::array<nvvk::Buffer, 2>     m_SurfaceBuffers{};
   nvvk::Buffer                    m_LightReservoirBuffer;
   nvvk::Buffer                    m_NeighborOffsetBuffer;

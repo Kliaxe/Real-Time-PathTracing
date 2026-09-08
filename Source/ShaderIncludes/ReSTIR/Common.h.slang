@@ -23,6 +23,39 @@ bool CompareRelativeDifference(float reference, float candidate, float threshold
   return (threshold <= 0) || abs(reference - candidate) <= threshold * max(reference, candidate);
 }
 
+// Material similarity gate for spatial reuse.
+//
+// Normal and depth agreement is not sufficient on its own: two pixels can sit on
+// the same flat wall yet straddle a texture or material boundary, and a path
+// anchored to one material shifts poorly onto the other. Rejecting on material as
+// well is cheap next to the shift it avoids.
+//
+// Compares the terms that actually drive the shift's BSDF evaluation - roughness
+// and metalness decide the lobe, albedo decides the throughput.
+bool IsMaterialSimilar(float ourRoughness, float theirRoughness, float ourMetallic, float theirMetallic,
+                       float3 ourAlbedo, float3 theirAlbedo)
+{
+  const float kRoughnessTolerance = 0.25;
+  const float kMetallicTolerance  = 0.25;
+  const float kAlbedoTolerance    = 0.25;
+
+  if(abs(ourRoughness - theirRoughness) > kRoughnessTolerance)
+  {
+    return false;
+  }
+  if(abs(ourMetallic - theirMetallic) > kMetallicTolerance)
+  {
+    return false;
+  }
+
+  // Relative albedo difference, so dark materials are not held to an absolute
+  // tolerance that they can never exceed.
+  const float3 albedoDelta = abs(ourAlbedo - theirAlbedo);
+  const float3 albedoScale = max(max(ourAlbedo, theirAlbedo), float3(1.0e-3));
+  return max(max(albedoDelta.x / albedoScale.x, albedoDelta.y / albedoScale.y), albedoDelta.z / albedoScale.z)
+         <= kAlbedoTolerance;
+}
+
 bool IsValidNeighbor(float3 ourNorm, float3 theirNorm, float ourDepth, float theirDepth, float normalThreshold, float depthThreshold)
 {
   return dot(theirNorm.xyz, ourNorm.xyz) >= normalThreshold && CompareRelativeDifference(ourDepth, theirDepth, depthThreshold);

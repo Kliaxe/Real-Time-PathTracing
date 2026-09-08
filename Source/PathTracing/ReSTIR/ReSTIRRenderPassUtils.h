@@ -16,7 +16,7 @@ class ResourceAllocator;
 namespace nvsamples
 {
 
-struct ReSTIRDIRayTracingPassState
+struct ReSTIRRayTracingPassState
 {
   // A ray tracing pass is the pipeline plus its shader binding table.
   VkPipeline                  pipeline = VK_NULL_HANDLE;
@@ -25,33 +25,38 @@ struct ReSTIRDIRayTracingPassState
   nvvk::SBTGenerator::Regions sbtRegions{};
 };
 
-inline bool IsReSTIRDIRayTracingPassReady(const ReSTIRDIRayTracingPassState& passState)
+inline bool IsReSTIRRayTracingPassReady(const ReSTIRRayTracingPassState& passState)
 {
   // The SBT buffer is required by vkCmdTraceRaysKHR even when the pipeline exists.
   return passState.pipeline != VK_NULL_HANDLE && passState.sbtBuffer.buffer != VK_NULL_HANDLE;
 }
 
-void CreateReSTIRDIRayTracingPass(nvvk::ResourceAllocator* allocator,
+void CreateReSTIRRayTracingPass(nvvk::ResourceAllocator* allocator,
                                   const VkPhysicalDeviceRayTracingPipelinePropertiesKHR& rtProperties,
                                   VkPipelineLayout pipelineLayout,
                                   const VkShaderModuleCreateInfo& shaderCode,
                                   uint32_t maxPipelineRayRecursionDepth,
                                   const char* debugName,
-                                  ReSTIRDIRayTracingPassState& passState);
+                                  ReSTIRRayTracingPassState& passState);
 
-void DestroyReSTIRDIRayTracingPass(nvvk::ResourceAllocator* allocator, ReSTIRDIRayTracingPassState& passState);
+void DestroyReSTIRRayTracingPass(nvvk::ResourceAllocator* allocator, ReSTIRRayTracingPassState& passState);
 
-VkPipeline CreateReSTIRDIComputePipeline(nvvk::ResourceAllocator* allocator,
+VkPipeline CreateReSTIRComputePipeline(nvvk::ResourceAllocator* allocator,
                                          VkPipelineLayout pipelineLayout,
                                          const VkShaderModuleCreateInfo& shaderCode,
                                          const char* debugName);
 
-void TransitionReSTIRDIStorageImages(VkCommandBuffer cmd, nvvk::Image& accumulationImage, VkImage outputImage,
+void TransitionReSTIRStorageImages(VkCommandBuffer cmd, nvvk::Image& accumulationImage, VkImage outputImage,
                                      VkPipelineStageFlags2 destinationStages);
 
+// Makes one storage image writable by the next pass. Separate from the pair above
+// because the denoiser guide buffers are optional: they are transitioned only in
+// the frames whose resolve mode will actually feed NRD.
+void TransitionStorageImageForWrite(VkCommandBuffer cmd, nvvk::Image& image, VkPipelineStageFlags2 dstStageMask);
+
 template <typename TPushConstant>
-void TraceReSTIRDIRayTracingPass(VkCommandBuffer cmd,
-                                 const ReSTIRDIRayTracingPassState& passState,
+void TraceReSTIRRayTracingPass(VkCommandBuffer cmd,
+                                 const ReSTIRRayTracingPassState& passState,
                                  VkPipelineLayout pipelineLayout,
                                  VkDescriptorSet descriptorSet,
                                  VkShaderStageFlags pushConstantStages,
@@ -67,7 +72,7 @@ void TraceReSTIRDIRayTracingPass(VkCommandBuffer cmd,
 }
 
 template <typename TPushConstant>
-void DispatchReSTIRDIComputePass(VkCommandBuffer cmd,
+void DispatchReSTIRComputePass(VkCommandBuffer cmd,
                                  VkPipeline pipeline,
                                  VkPipelineLayout pipelineLayout,
                                  VkDescriptorSet descriptorSet,

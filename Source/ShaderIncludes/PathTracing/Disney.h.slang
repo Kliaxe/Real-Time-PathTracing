@@ -585,6 +585,56 @@ float3 EvaluateSurfaceBsdf(SurfaceData surface, float3 viewDir, float3 lightDir,
   return broad + spec + glass + coat;
 }
 
+// Evaluates one specific proposal group for a fixed direction, returning that
+// group's contribution and the JOINT density p(omega, lobe) = P(lobe) * p(omega|lobe).
+//
+// This is the exact inverse of what SampleSurfaceBsdf does: it divides the same
+// group's contribution by the same joint density. Feeding back the lobe that
+// sampler chose therefore reproduces its bsdfOverPdf exactly.
+//
+// Needed by shift mappings, which redirect a path through a geometrically fixed
+// direction and must reproduce the base path's per-lobe factorization. The
+// full-mixture EvaluateSurfaceBsdf cannot: it sums all groups and reports a
+// marginal PDF, and it derives group probabilities from the sampled direction
+// rather than from the shading-normal probe the sampler used.
+float3 EvaluateSurfaceBsdfGroup(SurfaceData surface, float3 viewDir, float3 lightDir, uint lobeKind, out float pdf)
+{
+  const DisneyMaterialData material = GetDisneyMaterialData(surface);
+  // Group probabilities must come from the same probe setup the sampler used, or
+  // the reproduced density will not match the one the base path divided by.
+  const DisneyBrdfData  probeBrdf  = PrepareBrdfData(surface, material, viewDir, surface.shadingNormal);
+  const DisneyLobeSetup setup      = GetLobeSetup(material, probeBrdf);
+  const DisneyBrdfData  sampleBrdf = PrepareBrdfData(surface, material, viewDir, lightDir);
+
+  float  conditionalPdf   = 0.0;
+  float  groupProbability = 0.0;
+  float3 contribution     = float3(0.0);
+
+  if(lobeKind == 0u)
+  {
+    contribution     = EvaluateBroadBsdfGroup(material, sampleBrdf, setup, conditionalPdf);
+    groupProbability = BroadGroupProbability(setup);
+  }
+  else if(lobeKind == 1u)
+  {
+    contribution     = EvaluateReflectionBsdfGroup(material, sampleBrdf, setup, conditionalPdf);
+    groupProbability = ReflectionGroupProbability(setup);
+  }
+  else if(lobeKind == 2u)
+  {
+    contribution     = EvaluateGlassBsdfGroup(material, sampleBrdf, setup, conditionalPdf);
+    groupProbability = setup.glassProbability;
+  }
+  else
+  {
+    contribution     = EvaluateClearcoatBsdfGroup(material, sampleBrdf, setup, conditionalPdf);
+    groupProbability = setup.clearcoatProbability;
+  }
+
+  pdf = groupProbability * conditionalPdf;
+  return contribution;
+}
+
 float3 EvaluateDirectLightBsdf(SurfaceData surface, float3 viewDir, float3 lightDir, out float pdf)
 {
   // Explicit direct lighting estimates only the broad cosine-proposal BSDF group. Glossy / transmission groups are owned by continuation rays.

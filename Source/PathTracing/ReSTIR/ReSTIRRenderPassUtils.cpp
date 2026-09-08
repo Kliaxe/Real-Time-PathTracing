@@ -1,6 +1,6 @@
 #include <array>
 
-#include "ReSTIRDIRenderPassUtils.h"
+#include "ReSTIRRenderPassUtils.h"
 
 #include <string>
 #include <vector>
@@ -11,13 +11,13 @@
 namespace nvsamples
 {
 
-void CreateReSTIRDIRayTracingPass(nvvk::ResourceAllocator* allocator,
+void CreateReSTIRRayTracingPass(nvvk::ResourceAllocator* allocator,
                                   const VkPhysicalDeviceRayTracingPipelinePropertiesKHR& rtProperties,
                                   VkPipelineLayout pipelineLayout,
                                   const VkShaderModuleCreateInfo& shaderCode,
                                   uint32_t maxPipelineRayRecursionDepth,
                                   const char* debugName,
-                                  ReSTIRDIRayTracingPassState& passState)
+                                  ReSTIRRayTracingPassState& passState)
 {
   VkDevice device = allocator->getDevice();
 
@@ -125,7 +125,7 @@ void CreateReSTIRDIRayTracingPass(nvvk::ResourceAllocator* allocator,
   vkDestroyShaderModule(device, shaderModule, nullptr);
 }
 
-void DestroyReSTIRDIRayTracingPass(nvvk::ResourceAllocator* allocator, ReSTIRDIRayTracingPassState& passState)
+void DestroyReSTIRRayTracingPass(nvvk::ResourceAllocator* allocator, ReSTIRRayTracingPassState& passState)
 {
   if(allocator == nullptr)
   {
@@ -141,7 +141,7 @@ void DestroyReSTIRDIRayTracingPass(nvvk::ResourceAllocator* allocator, ReSTIRDIR
   passState.pipeline = VK_NULL_HANDLE;
 }
 
-VkPipeline CreateReSTIRDIComputePipeline(nvvk::ResourceAllocator* allocator,
+VkPipeline CreateReSTIRComputePipeline(nvvk::ResourceAllocator* allocator,
                                          VkPipelineLayout pipelineLayout,
                                          const VkShaderModuleCreateInfo& shaderCode,
                                          const char* debugName)
@@ -169,7 +169,58 @@ VkPipeline CreateReSTIRDIComputePipeline(nvvk::ResourceAllocator* allocator,
   return pipeline;
 }
 
-void TransitionReSTIRDIStorageImages(VkCommandBuffer cmd, nvvk::Image& accumulationImage, VkImage outputImage,
+void TransitionStorageImageForWrite(VkCommandBuffer cmd, nvvk::Image& image, VkPipelineStageFlags2 dstStageMask)
+{
+  if(image.image == VK_NULL_HANDLE)
+  {
+    return;
+  }
+
+  if(image.descriptor.imageLayout == VK_IMAGE_LAYOUT_GENERAL)
+  {
+    // The image is already in the right layout, but this still orders previous writes before this pass.
+    const VkImageMemoryBarrier2 imageBarrier{
+        .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
+        .srcAccessMask = VK_ACCESS_2_NONE,
+        .dstStageMask  = dstStageMask,
+        .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+        .oldLayout     = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
+        .image         = image.image,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
+    };
+    const VkDependencyInfo dependencyInfo{
+        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers    = &imageBarrier,
+    };
+    vkCmdPipelineBarrier2(cmd, &dependencyInfo);
+    return;
+  }
+
+  const VkImageMemoryBarrier2 imageBarrier{
+      .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+      .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
+      .srcAccessMask = VK_ACCESS_2_NONE,
+      .dstStageMask  = dstStageMask,
+      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+      .oldLayout     = image.descriptor.imageLayout,
+      .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
+      .image         = image.image,
+      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
+  };
+  const VkDependencyInfo dependencyInfo{
+      .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .imageMemoryBarrierCount = 1,
+      .pImageMemoryBarriers    = &imageBarrier,
+  };
+  // First use this frame moves the image into GENERAL so shaders can write it.
+  vkCmdPipelineBarrier2(cmd, &dependencyInfo);
+  image.descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+}
+
+void TransitionReSTIRStorageImages(VkCommandBuffer cmd, nvvk::Image& accumulationImage, VkImage outputImage,
                                      VkPipelineStageFlags2 destinationStages)
 {
   std::array<VkImageMemoryBarrier2, 2> imageBarriers{};

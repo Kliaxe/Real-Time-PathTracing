@@ -6,22 +6,13 @@
 #include "ShaderIncludes/PathTracing/MonteCarlo.h.slang"
 #include "ShaderIncludes/PathTracing/Disney.h.slang"
 #include "ShaderIncludes/PathTracing/Intersection.h.slang"
+// EvaluateEmissiveTriangleDiscreteProbability lives here so presampling passes can
+// use the distribution without the ray tracing code below it.
+#include "ShaderIncludes/PathTracing/LightDistribution.h.slang"
 
 // -------------------------------------------------------------------------
 //    Emissive triangle sampling
 // -------------------------------------------------------------------------
-
-float EvaluateEmissiveTriangleDiscreteProbability(GltfSceneInfo sceneInfo, uint lightIndex)
-{
-  // Reconstructs one light's discrete probability mass from the normalized prefix CDF built on the CPU.
-  if(sceneInfo.emissiveTriangleCount == 0 || lightIndex >= sceneInfo.emissiveTriangleCount)
-  {
-    return 0.0;
-  }
-
-  const float previous = lightIndex > 0 ? sceneInfo.emissiveTriangleCdf[lightIndex - 1] : 0.0;
-  return max(sceneInfo.emissiveTriangleCdf[lightIndex] - previous, 0.0);
-}
 
 float EvaluateEmissiveTriangleCosine(GltfMetallicRoughness material, float3 geometricNormal, float3 directionToReceiver)
 {
@@ -166,8 +157,14 @@ void AccumulateEmissiveDirectLight(inout PathPayload payload, SurfaceData surfac
   // MIS keeps the direct-light sample and BSDF-hit path from double counting the same emissive contribution.
   const float misWeight = MisMixWeight(lightPdf, bsdfPdf);
   const float3 contribution = payload.throughput * radiance * bsdf * (misWeight / lightPdf);
-  payload.radiance += contribution;
-  AccumulateDenoiserRadiance(payload, contribution);
+
+  // Publishes the light vertex before the contribution is accumulated, so a
+  // resampler can adopt it as a reconnection anchor. Short paths - direct lighting
+  // at the primary hit above all - have no interior vertex to reconnect at, and
+  // without this they cannot be shifted at all.
+  PATH_TRACING_ON_NEE_EMISSIVE(payload, sampleIndex, bary, radiance, lightPdf, distance);
+
+  AccumulatePathContribution(payload, contribution);
   StoreDiffuseDenoiserHitDistanceIfMissing(payload, distance);
 }
 
