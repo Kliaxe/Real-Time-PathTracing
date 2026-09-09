@@ -71,6 +71,19 @@ inline bool DrawDenoiserSettingsSection(const char* treeLabel, DenoiserSettings&
   changed |= ImGui::SliderFloat("Diffuse Prepass Radius", &settings.diffusePrepassBlurRadius, 0.0f, 64.0f, "%.1f");
   changed |= ImGui::SliderFloat("Specular Prepass Radius", &settings.specularPrepassBlurRadius, 0.0f, 64.0f, "%.1f");
   changed |= ImGui::SliderFloat("Disocclusion Threshold", &settings.disocclusionThreshold, 0.001f, 0.20f, "%.3f");
+  changed |= ImGui::SliderFloat("Max Blur Radius", &settings.maxBlurRadius, 0.0f, 60.0f, "%.1f");
+
+  if(ImGui::TreeNodeEx("Hit Distance Normalization"))
+  {
+    // Scene-scale dependent. Raise A when transport is longer than a few units, or
+    // every hit distance saturates and the denoiser blurs at its widest radius.
+    changed |= ImGui::SliderFloat("Hit Distance A", &settings.hitDistanceA, 0.1f, 100.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Hit Distance B", &settings.hitDistanceB, 0.0f, 10.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Hit Distance C", &settings.hitDistanceC, 1.0f, 50.0f, "%.1f");
+    ImGui::TextDisabled(
+        "REBLUR divides hit distance by (A + |viewZ| * B) * lerp(C, 1, f(roughness)) and saturates. Anything longer normalizes to 1 and gets the widest blur.");
+    ImGui::TreePop();
+  }
 
   if(ImGui::Checkbox("Anti-Firefly", &settings.enableAntiFirefly))
   {

@@ -148,8 +148,20 @@ void NrdDenoiser::PrepareFrame(const FrameInput& input, const DenoiserResources&
   }
   UpdateCommonSettings(input);
 
-  assert(IsNrdSuccess(nrd::SetCommonSettings(*m_Instance, m_CommonSettings)));
-  assert(IsNrdSuccess(nrd::SetDenoiserSettings(*m_Instance, kDenoiserIdentifier, &m_ReblurSettings)));
+  // Kept out of assert(): NDEBUG removes the whole expression, so wrapping these
+  // would mean NRD never receives camera matrices, frame index or REBLUR settings
+  // in a release build - and it fails silently, because a denoiser with no settings
+  // still dispatches, it just denoises against garbage.
+  const nrd::Result commonSettingsResult = nrd::SetCommonSettings(*m_Instance, m_CommonSettings);
+  assert(IsNrdSuccess(commonSettingsResult));
+  const nrd::Result denoiserSettingsResult = nrd::SetDenoiserSettings(*m_Instance, kDenoiserIdentifier, &m_ReblurSettings);
+  assert(IsNrdSuccess(denoiserSettingsResult));
+  if(!IsNrdSuccess(commonSettingsResult) || !IsNrdSuccess(denoiserSettingsResult))
+  {
+    // Leave the invalidation pending so the next frame retries from a clean history
+    // rather than accumulating onto settings NRD rejected.
+    return;
+  }
 
   m_HistoryInvalidated = false;
 }
@@ -161,6 +173,11 @@ void NrdDenoiser::ApplyDenoiserSettings(const DenoiserSettings& settings)
   m_ReblurSettings.diffusePrepassBlurRadius    = settings.diffusePrepassBlurRadius;
   m_ReblurSettings.specularPrepassBlurRadius   = settings.specularPrepassBlurRadius;
   m_ReblurSettings.enableAntiFirefly           = settings.enableAntiFirefly;
+  m_ReblurSettings.maxBlurRadius               = settings.maxBlurRadius;
+  // Same three values the shaders normalize with; see DenoiserSettings.
+  m_ReblurSettings.hitDistanceParameters.A     = settings.hitDistanceA;
+  m_ReblurSettings.hitDistanceParameters.B     = settings.hitDistanceB;
+  m_ReblurSettings.hitDistanceParameters.C     = settings.hitDistanceC;
   // Per renderer, not global: only a renderer that leaves one lobe's hit distance
   // at zero wants NRD to go looking for a replacement.
   switch(settings.hitDistanceReconstructionMode)
@@ -794,8 +811,11 @@ void NrdDenoiser::UpdateCommonSettings(const FrameInput& input)
   m_CommonSettings.isMotionVectorInWorldSpace        = false;
   m_CommonSettings.isHistoryConfidenceAvailable      = false;
   m_CommonSettings.isDisocclusionThresholdMixAvailable = false;
-  m_CommonSettings.isBaseColorMetalnessAvailable     = m_EnableMaterialDemodulation;
   m_CommonSettings.enableValidation                  = false;
+  // Base colour / metalness is no longer an NRD input: 4.17 dropped
+  // IN_BASECOLOR_METALNESS, which earlier versions used only to patch motion vectors
+  // where specular motion prevailed. The image itself is still produced, because the
+  // compose pass needs it to rebuild the diffuse demodulation factor.
 
   m_PreviousViewMatrix       = currentViewMatrix;
   m_PreviousProjectionMatrix = currentProjectionMatrix;
@@ -946,7 +966,17 @@ void NrdDenoiser::DispatchNrd(VkCommandBuffer cmd, FrameResources& frameResource
   const nrd::DispatchDesc* dispatchDescs    = nullptr;
   uint32_t                 dispatchDescsNum = 0;
   const nrd::Identifier    denoiserIdentifier = kDenoiserIdentifier;
-  assert(IsNrdSuccess(nrd::GetComputeDispatches(*m_Instance, &denoiserIdentifier, 1, dispatchDescs, dispatchDescsNum)));
+  // Kept out of assert() for the same reason as the settings calls above: under
+  // NDEBUG the call would disappear, dispatchDescsNum would stay 0, and the loop
+  // below would record nothing at all - leaving the output images at whatever they
+  // last held, which reads as a black image rather than as a failure.
+  const nrd::Result dispatchResult =
+      nrd::GetComputeDispatches(*m_Instance, &denoiserIdentifier, 1, dispatchDescs, dispatchDescsNum);
+  assert(IsNrdSuccess(dispatchResult));
+  if(!IsNrdSuccess(dispatchResult) || dispatchDescs == nullptr)
+  {
+    return;
+  }
 
   // NRD decides the compute-pass order for the active denoiser. Vulkan only
   // records the described pipelines, descriptors, dynamic constants, and
@@ -1160,8 +1190,6 @@ const nvvk::Image& NrdDenoiser::ResolveDispatchImage(nrd::ResourceType          
       return denoiserInputs.GetMotionVectorsImage();
     case nrd::ResourceType::IN_NORMAL_ROUGHNESS:
       return denoiserInputs.GetNormalRoughnessImage();
-    case nrd::ResourceType::IN_BASECOLOR_METALNESS:
-      return denoiserInputs.GetBaseColorMetalnessImage();
     case nrd::ResourceType::IN_VIEWZ:
       return denoiserInputs.GetViewZImage();
     case nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST:

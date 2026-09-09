@@ -54,7 +54,28 @@ struct DenoiserSettings
   float    specularPrepassBlurRadius = 50.0f;
   // Larger values preserve more temporal history during motion, but can allow ghosting.
   float    disocclusionThreshold    = 0.01f;
-  bool     enableAntiFirefly        = false;
+  // On by default, matching NRD's own default since 4.17: it is cheap, and at one
+  // sample per pixel the input reliably contains fireflies that the spatial filter
+  // would otherwise smear into blobs.
+  bool     enableAntiFirefly        = true;
+  // REBLUR's hit distance normalization, mirroring nrd::ReblurHitDistanceParameters:
+  //   f = (A + |viewZ| * B) * lerp(C, 1, specMagicCurve(roughness))
+  // and the denoiser sees hitDist / f, saturated to [0, 1].
+  //
+  // These are scene-scale dependent, which is why they are settings rather than
+  // constants. At the defaults the diffuse factor is only A + 0.1*|viewZ|, so on a
+  // scene whose transport is longer than a few units every hit distance normalizes
+  // to 1 and REBLUR picks its widest blur for every pixel - which reads as shadows
+  // dissolving. Raising A (and B for depth-dependent scenes) is the lever for that.
+  //
+  // The shaders normalize hit distances with the SAME values, fed to them by the
+  // renderer, because NRD's filter and the front-end packing must agree on the
+  // normalization or the denoiser interprets the signal on a different scale.
+  float    hitDistanceA            = 3.0f;
+  float    hitDistanceB            = 0.1f;
+  float    hitDistanceC            = 20.0f;
+  // Widest spatial blur REBLUR may apply, in pixels.
+  float    maxBlurRadius           = 30.0f;
   // Off by default: a renderer that always has both hit distances must not pay for
   // reconstruction, and telling NRD that gaps are expected when they are not makes
   // it repair signals that were already correct.

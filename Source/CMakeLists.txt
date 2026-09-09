@@ -9,7 +9,12 @@ set(_real_time_path_tracing_extra_shader_includes
 )
 
 if(DEFINED REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR)
+    # NRD.hlsli lives in "Shaders" as of NRD 4.17; it was under "Shaders/Include"
+    # up to 4.16, and the generated NRDConfig.hlsli is still written to both. Both
+    # directories are listed so the pinned tag can move either way without the
+    # shader build silently failing to find the header.
     list(APPEND _real_time_path_tracing_extra_shader_includes
+        "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders"
         "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders/Include"
     )
 endif()

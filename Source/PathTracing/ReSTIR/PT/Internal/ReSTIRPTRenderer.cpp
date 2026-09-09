@@ -472,6 +472,9 @@ shaderio::ReSTIRPTPushConstant ReSTIRPTRenderer::BuildPushConstant(const RenderI
       .accumulatedFrames = IsAccumulationResolveMode(m_Settings.common.resolveMode) ? m_AccumulatedFrames : 0u,
       .maxBounces        = m_Settings.initialSampling.maxBounces,
       .flags             = flags,
+      .reblurHitDistanceParams = {m_Settings.common.denoiserSettings.hitDistanceA,
+                                  m_Settings.common.denoiserSettings.hitDistanceB,
+                                  m_Settings.common.denoiserSettings.hitDistanceC},
   };
 }
 

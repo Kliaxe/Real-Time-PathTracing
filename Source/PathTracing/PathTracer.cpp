@@ -280,6 +280,8 @@ shaderio::PathTracePushConstant PathTracer::BuildPushConstant(const RenderInput&
       .accumulatedFrames = frameState.finalAccumulationEnabled ? m_AccumulatedFrames : 0,
       .maxBounces        = pipelineSafeMaxBounces,
       .flags             = pathTraceFlags,
+      .reblurHitDistanceParams = {m_Settings.denoiserSettings.hitDistanceA, m_Settings.denoiserSettings.hitDistanceB,
+                                  m_Settings.denoiserSettings.hitDistanceC},
   };
 }
 

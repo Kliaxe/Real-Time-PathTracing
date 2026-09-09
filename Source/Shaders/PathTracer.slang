@@ -33,7 +33,6 @@
 
 static const float kInvalidDenoiserViewZ     = 1.0e32;
 static const float kDenoiserMissHitDistance  = 65504.0;
-static const float4 kReblurHitDistanceParameters = float4(3.0, 0.1, 20.0, -25.0);
 static const float3 kMinDiffuseDemodulationFactor = float3(0.05, 0.05, 0.05);
 static const float3 kMinSpecularDemodulationFactor = float3(0.02, 0.02, 0.02);
 
@@ -45,7 +44,7 @@ float4 PackNrdNormalRoughness(float3 shadingNormal, float roughness)
 float4 PackReblurRadianceHitDistance(float3 radiance, float hitDistance, float viewZ, float roughness, bool isDiffuse)
 {
   const float normalizedHitDistance =
-      REBLUR_FrontEnd_GetNormHitDist(hitDistance, viewZ, kReblurHitDistanceParameters, isDiffuse ? 1.0 : roughness);
+      REBLUR_FrontEnd_GetNormHitDist(hitDistance, viewZ, pushConst.reblurHitDistanceParams, isDiffuse ? 1.0 : roughness);
   return REBLUR_FrontEnd_PackRadianceAndNormHitDist(radiance, normalizedHitDistance, true);
 }
 

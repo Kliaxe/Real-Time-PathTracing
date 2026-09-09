@@ -68,7 +68,7 @@ find_package(NvproCore2 REQUIRED)
 #   from our side, not from copying the sample project.
 #
 
-set(REAL_TIME_PATH_TRACING_NRD_GIT_TAG "v4.16.1" CACHE STRING "Pinned NVIDIA NRD tag or commit for reproducible builds")
+set(REAL_TIME_PATH_TRACING_NRD_GIT_TAG "v4.17.3" CACHE STRING "Pinned NVIDIA NRD tag or commit for reproducible builds")
 
 include(FetchContent)
 

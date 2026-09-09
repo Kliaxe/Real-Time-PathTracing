@@ -122,6 +122,17 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
                                               : max(noisySpecularResolved.rgb, float3(0.0));
   const float3 combinedRadiance     = remodulatedDiffuse + remodulatedSpecular;
 
+  // A pixel with no primary hit carries the sky marker in viewZ. NRD skips those
+  // entirely, so its output images keep whatever they last held rather than being
+  // cleared - which shows up in the signal debug views as coloured fringing over
+  // the background. There is no surface there and therefore no diffuse or specular
+  // signal, so the four signal views report black instead of stale denoiser memory.
+  const bool   hasSurface = viewZ < kInvalidDenoiserViewZThreshold;
+  const float3 surfaceOnlyDiffuse       = hasSurface ? remodulatedDiffuse : float3(0.0);
+  const float3 surfaceOnlySpecular      = hasSurface ? remodulatedSpecular : float3(0.0);
+  const float3 surfaceOnlyNoisyDiffuse  = hasSurface ? noisyRemodulatedDiffuse : float3(0.0);
+  const float3 surfaceOnlyNoisySpecular = hasSurface ? noisyRemodulatedSpecular : float3(0.0);
+
   float3 outputRadiance = combinedRadiance;
 
   switch(pushConstants.debugView)
@@ -139,16 +150,16 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
       outputRadiance = rawBeauty.rgb;
       break;
     case 3u:
-      outputRadiance = noisyRemodulatedDiffuse;
+      outputRadiance = surfaceOnlyNoisyDiffuse;
       break;
     case 4u:
-      outputRadiance = noisyRemodulatedSpecular;
+      outputRadiance = surfaceOnlyNoisySpecular;
       break;
     case 5u:
-      outputRadiance = remodulatedDiffuse;
+      outputRadiance = surfaceOnlyDiffuse;
       break;
     case 6u:
-      outputRadiance = remodulatedSpecular;
+      outputRadiance = surfaceOnlySpecular;
       break;
     case 7u:
       outputRadiance = VisualizeNormalRoughness(normalRoughness);

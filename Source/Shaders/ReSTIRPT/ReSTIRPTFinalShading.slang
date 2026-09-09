@@ -23,7 +23,6 @@
 // Same values ReSTIR DI writes, so both renderers hand NRD signals on the same
 // scale and a comparison between the two images is a comparison of the renderers.
 static const float  kInvalidDenoiserViewZ          = 1.0e32;
-static const float4 kReblurHitDistanceParameters   = float4(3.0, 0.1, 20.0, -25.0);
 static const float3 kMinDiffuseDemodulationFactor  = float3(0.05, 0.05, 0.05);
 static const float3 kMinSpecularDemodulationFactor = float3(0.02, 0.02, 0.02);
 
@@ -131,18 +130,22 @@ void WriteDenoiserSignals(int2 pixel, ReSTIRPTSurface surface, float3 radiance, 
   const float3 diffuseRadiance  = clampedRadiance * (1.0 - specularShare) / diffuseFactor;
   const float3 specularRadiance = clampedRadiance * specularShare / specularFactor;
 
-  // Passed through as initial sampling recorded them, zeros included. NRD defines a
-  // zero hit distance as "this lobe was not sampled here" and reconstructs it from
-  // neighbouring pixels; substituting a plausible-looking distance would destroy the
-  // only signal it has that the value is missing.
-  const float diffuseHitDistance  = denoiserGuide.x;
-  const float specularHitDistance = denoiserGuide.y;
+  // Zeros are passed through as zeros. NRD reserves a zero normalized hit distance
+  // for "this lobe was not sampled here" and reconstructs it from neighbours, but
+  // REBLUR_FrontEnd_GetNormHitDist clamps its result away from zero - it assumes the
+  // lobe WAS sampled - so the skipped case has to bypass it rather than be fed
+  // through it.
+  const float diffuseNormHitDistance =
+      denoiserGuide.x > 0.0 ?
+          REBLUR_FrontEnd_GetNormHitDist(denoiserGuide.x, viewZ, pushConst.reblurHitDistanceParams, 1.0) : 0.0;
+  const float specularNormHitDistance =
+      denoiserGuide.y > 0.0 ?
+          REBLUR_FrontEnd_GetNormHitDist(denoiserGuide.y, viewZ, pushConst.reblurHitDistanceParams, surface.roughness) : 0.0;
 
-  diffuseRadianceHitDistanceImage[pixel] = REBLUR_FrontEnd_PackRadianceAndNormHitDist(
-      diffuseRadiance, REBLUR_FrontEnd_GetNormHitDist(diffuseHitDistance, viewZ, kReblurHitDistanceParameters, 1.0), true);
-  specularRadianceHitDistanceImage[pixel] = REBLUR_FrontEnd_PackRadianceAndNormHitDist(
-      specularRadiance,
-      REBLUR_FrontEnd_GetNormHitDist(specularHitDistance, viewZ, kReblurHitDistanceParameters, surface.roughness), true);
+  diffuseRadianceHitDistanceImage[pixel] =
+      REBLUR_FrontEnd_PackRadianceAndNormHitDist(diffuseRadiance, diffuseNormHitDistance, true);
+  specularRadianceHitDistanceImage[pixel] =
+      REBLUR_FrontEnd_PackRadianceAndNormHitDist(specularRadiance, specularNormHitDistance, true);
 }
 
 [shader("compute")]

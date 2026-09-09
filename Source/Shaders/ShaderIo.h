@@ -64,6 +64,9 @@ struct PathTracePushConstant
   uint           accumulatedFrames;
   uint           maxBounces;
   uint           flags;
+  // REBLUR hit distance normalization (A, B, C). Supplied by the renderer from
+  // DenoiserSettings so the shader and nrd::ReblurSettings cannot disagree.
+  float3         reblurHitDistanceParams;
 };
 
 struct ReSTIRPTParameters
@@ -169,6 +172,9 @@ struct ReSTIRPTPushConstant
   uint           accumulatedFrames;
   uint           maxBounces;
   uint           flags;
+  // REBLUR hit distance normalization (A, B, C). Supplied by the renderer from
+  // DenoiserSettings so the shader and nrd::ReblurSettings cannot disagree.
+  float3         reblurHitDistanceParams;
 };
 
 // Why a shift produced (or failed to produce) a sample. Ordered so that anything
