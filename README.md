@@ -8,25 +8,26 @@ It started as a master's project focused on real-time path tracing with ReSTIR d
 
 ## Tested Setup
 
-The project has been tested on Windows with:
+The owned Vulkan runtime has been tested on Windows with:
 
 - CPU: Intel Core Ultra 9 275HX
 - GPU: NVIDIA GeForce RTX 5080 Laptop GPU
 - VRAM: 16,303 MiB
 - NVIDIA driver: 592.01
 
-Other Vulkan ray tracing capable NVIDIA GPUs may work. The captures and timings currently in this repository were produced on the setup above.
+Linux configure/build presets are included; Linux GPU runtime validation remains pending on a compatible machine. The captures and timings currently in this repository were produced on the setup above.
 
 ## Requirements
 
 The expected development setup is:
 
-- Windows
+- Windows 11 or Linux
 - Visual Studio Code with the CMake Tools and C/C++ extensions
 - CMake 3.23 or newer
 - LLVM MinGW (UCRT runtime), which provides Clang, LLDB, and the C++ runtime
 - Ninja
-- Vulkan SDK
+- A current Vulkan driver with ray tracing, compute shader derivatives, and indirect ray tracing support
+- Vulkan SDK 1.4.341 or newer when running the validation-layer test matrix
 - Git LFS
 - Internet access during first CMake configure
 
@@ -40,7 +41,7 @@ winget install --id Ninja-build.Ninja --exact --scope user
 
 The bootstrap script creates a stable LLVM MinGW path used by the CMake presets, so CMake Tools does not depend on the VS Code process inheriting WinGet's versioned `PATH`. Rerun it after updating LLVM MinGW.
 
-The first configure downloads external dependencies such as `nvpro_core2` and NVIDIA NRD. The content assets are managed through Git LFS, so run this after cloning if the assets are missing:
+The first configure downloads pinned Vulkan-Headers, Volk, VMA, GLFW, GLM, Dear ImGui, fmt, tinygltf, stb, DXC, and NVIDIA NRD revisions. Compilation does not use headers from the machine Vulkan SDK. The content assets are managed through Git LFS, so run this after cloning if the assets are missing:
 
 ```powershell
 git lfs pull
@@ -62,6 +63,10 @@ cmake --preset x64-Debug
 cmake --build --preset x64-Debug --target RealTimePathTracing
 ```
 
+Linux uses the equivalent `linux-Debug` and `linux-Release` presets. Install the platform development packages required by GLFW for the selected Wayland/X11 backend before configuring.
+
+All project shaders are HLSL compiled by the pinned DXC release to embedded SPIR-V during the build. Shader changes require a rebuild and application restart.
+
 The executable is written to:
 
 ```text
@@ -69,6 +74,15 @@ Binaries\Release\RealTimePathTracing.exe
 ```
 
 Use `Binaries\Debug\RealTimePathTracing.exe` for a debug build.
+
+Build and run the focused CPU, Vulkan, ray-tracing, and presentation checks with:
+
+```powershell
+cmake --build --preset x64-Debug --target RtptImageDataTests RtptCameraTests RtptVulkanBootstrapTests RtptPresentationTests
+ctest --preset x64-Debug
+```
+
+On Windows, set the `RTPT_VULKAN_VALIDATION_BIN` CMake cache variable to the Vulkan SDK `Bin` directory when the validation layer is not registered globally or the registered layer is older than 1.4.341. Windowed validation fails fast on an older layer because it cannot validate the required KHR surface/swapchain-maintenance path.
 
 ## Visual Studio Code
 
@@ -91,10 +105,11 @@ The application UI exposes the scene selection, render mode, ReSTIR PT settings,
 
 ## Repository Layout
 
-- `Source/`: application code, Vulkan renderer, path tracer, ReSTIR PT Enhanced implementation, denoising integration, and shaders.
+- `Source/Framework/`: project-owned platform, Vulkan execution/resource, swapchain, and ImGui integration.
+- `Source/`: application orchestration, scene code, renderers, denoising integration, and HLSL shaders.
 - `Content/`: models, textures, and HDRIs used by the renderer.
 - `docs/`: project and agent documentation.
-- `Scripts/`: standalone LLVM MinGW bootstrap helper.
+- `Scripts/`: toolchain bootstrap and capture/comparison helpers.
 
 ## Scope Notes
 
@@ -112,7 +127,7 @@ If the program opens with missing scenes or textures, check that Git LFS downloa
 git lfs pull
 ```
 
-If CMake configure fails, check that LLVM MinGW, Ninja, and the Vulkan SDK are installed and visible from a newly opened terminal. The first configure can take longer because dependencies are downloaded and built.
+If CMake configure fails, check that Clang, Ninja, Git, and the platform packages required by GLFW are visible from a newly opened terminal. The first configure can take longer because pinned dependencies and DXC are downloaded and built.
 
 For performance captures, prefer a Release build. Debug builds are useful for development and can produce misleading timings.
 

@@ -1,6 +1,6 @@
 #include "ReSTIRFrameContext.h"
 
-namespace nvsamples
+namespace rtpt
 {
 
 void ReSTIRFrameContext::InvalidateHistory()
@@ -18,6 +18,7 @@ void ReSTIRFrameContext::EnsureViewport(VkExtent2D viewportSize)
 
   // Changing resolution invalidates both the surface history and the reservoir history using it.
   m_ViewportSize = viewportSize;
+
   InvalidateHistory();
 }
 
@@ -43,4 +44,4 @@ uint32_t ReSTIRFrameContext::GetPreviousHistoryIndex() const
   return 1u - GetCurrentHistoryIndex();
 }
 
-}  // namespace nvsamples
+}  // namespace rtpt

@@ -1,56 +1,70 @@
 #pragma once
 
-// Role:
-// Vulkan-facing upload/compiler step from scene definition to GPU resources.
-
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include <vulkan/vulkan_core.h>
 
-#include "Common/GltfUtils.hpp"
+#include "Framework/Vulkan/GpuResources.h"
+#include "Framework/Vulkan/UploadContext.h"
+#include "GltfImport.h"
 #include "SceneTypes.h"
-#include "nvvk/resources.hpp"
-#include "nvvk/sampler_pool.hpp"
-#include "nvvk/staging.hpp"
 
-namespace nvapp
-{
-class Application;
-}
-
-namespace nvsamples
+namespace rtpt
 {
 
-// SceneUploader is the Vulkan-facing compilation step that takes a resolved
-// scene definition and produces GPU-ready buffers/images in caller-owned state.
+// SceneUploader
+// The Vulkan-facing compilation step that takes a resolved scene definition and produces GPU-ready buffers and images in caller-owned state.
+// It performs glTF parsing, texture and material packing, and light sampling table construction, but owns none of the results, so SceneRuntime controls their lifetime.
+
 class SceneUploader
 {
 public:
+
+  // UploadInput
+  // What to build: the chosen scene, an optional environment map, and where to look for their files.
+
   struct UploadInput
   {
-    const SceneDefinition&                  sceneDefinition;
-    std::optional<std::filesystem::path>    selectedHdriRelativePath;
+    // Scene whose models are loaded.
+    const SceneDefinition& sceneDefinition;
+
+    // Content-relative HDRI path; empty loads no environment map.
+    std::optional<std::filesystem::path> selectedHdriRelativePath;
+
+    // Directories searched in order for relative asset paths.
+    std::span<const std::filesystem::path> contentRoots;
   };
+
+  // UploadState
+  // Caller-owned containers the upload appends to. They are expected to be empty on entry.
 
   struct UploadState
   {
-    GltfSceneResource&                sceneResource;
-    std::vector<nvvk::Image>&         textures;
-    std::vector<MaterialAttributes>&  materialAttributes;
+    // Receives meshes, instances, materials, glTF buffers, and light sampling tables.
+    GltfSceneResource& sceneResource;
+
+    // Receives every uploaded texture; material texture indices refer to positions here.
+    std::vector<SceneTexture>& textures;
+
+    // Receives the CPU material attributes, parallel to sceneResource.materials.
+    std::vector<MaterialAttributes>& materialAttributes;
   };
 
-  SceneUploader(nvapp::Application* app, nvvk::ResourceAllocator* allocator, nvvk::StagingUploader* stagingUploader,
-                nvvk::SamplerPool* samplerPool);
+  SceneUploader(rtpt::ResourceAllocator& resources, rtpt::UploadContext& uploads);
 
-  int Upload(VkCommandBuffer cmd, const UploadInput& input, UploadState& state) const;
+  // Returns the texture index of the environment map, or -1 when none was loaded.
+  int Upload(const UploadInput& input, UploadState& state) const;
 
 private:
-  nvapp::Application*      m_App             = nullptr;
-  nvvk::ResourceAllocator* m_Allocator       = nullptr;
-  nvvk::StagingUploader*   m_StagingUploader = nullptr;
-  nvvk::SamplerPool*       m_SamplerPool     = nullptr;
+
+  // Creates the buffers, images, and samplers the scene is made of.
+  rtpt::ResourceAllocator* m_Resources = nullptr;
+
+  // Copies CPU data into those resources.
+  rtpt::UploadContext* m_Uploads = nullptr;
 };
 
-}  // namespace nvsamples
+}  // namespace rtpt

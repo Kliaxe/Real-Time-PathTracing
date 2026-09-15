@@ -1,0 +1,11 @@
+{
+  "linear_hdr": {
+    "relative_l1_error": 0.00001,
+    "mean_bias": 0.00001
+  },
+  "final_png": {
+    "mean_absolute_error": 0.00001,
+    "maximum_absolute_error": 0.007843138,
+    "mean_bias": 0.00001
+  }
+}

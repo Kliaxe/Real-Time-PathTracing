@@ -1,864 +1,852 @@
-/*
- * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
- * SPDX-License-Identifier: Apache-2.0
- */
-
-// RealTimePathTracing app element
-// - Scene UI, raster preview, path tracing reference, and ReSTIR PT Enhanced renderer
-// - Offscreen HDR render target plus tonemapping
-// - Slang hot reload (F5) with precompiled fallback
-
-// Enable the use of Nsight Aftermath for crash tracking and shader debugging
-// #define USE_NSIGHT_AFTERMATH
-
-#define TINYGLTF_IMPLEMENTATION         // TinyGLTF implementation (exactly once)
-#define STB_IMAGE_IMPLEMENTATION        // stb_image implementation (exactly once)
-#define STB_IMAGE_WRITE_IMPLEMENTATION  // stb_image_write implementation (exactly once)
-#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1  // VMA: use dynamic Vulkan functions
-#define VMA_IMPLEMENTATION              // VMA implementation (exactly once)
-
-#define VMA_LEAK_LOG_FORMAT(format, ...)                                                                               \
-  {                                                                                                                    \
-    printf((format), __VA_ARGS__);                                                                                     \
-    printf("\n");                                                                                                      \
-  }
-
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/type_ptr.hpp>
-#include <imgui/backends/imgui_impl_vulkan.h>
-#include <imgui/imgui.h>
-#include <algorithm>
-#include <fstream>
-#include <memory>
-#include <span>
-#include <string>
-
 #include "Application.h"
 
-#include "Shaders/ShaderIo.h"
+#include <algorithm>
+#include <array>
+#include <stdexcept>
+#include <utility>
 
-// Pre-compiled shaders (generated at build time).
-#include "_autogen/sky_simple.slang.h"   // From nvpro_core2
-#include "_autogen/tonemapper.slang.h"   // From nvpro_core2
-#include "_autogen/Rasterizer.slang.h"   // From Source/Shaders/Rasterizer.slang
+#include <GLFW/glfw3.h>
+#include <fmt/format.h>
+#include <glm/gtc/type_ptr.hpp>
+#include <imgui.h>
+#include <imgui_internal.h>
 
-#include <nvaftermath/aftermath.hpp>
-#include <nvapp/application.hpp>
-#include <nvapp/elem_camera.hpp>
-#include <nvapp/elem_default_menu.hpp>
-#include <nvapp/elem_default_title.hpp>
-#include <nvgui/camera.hpp>
-#include <nvgui/sky.hpp>
-#include <nvgui/tonemapper.hpp>
-#include <nvshaders_host/sky.hpp>
-#include <nvshaders_host/tonemapper.hpp>
-#include <nvslang/slang.hpp>
-#include <nvutils/camera_manipulator.hpp>
-#include <nvutils/logger.hpp>
-#include <nvutils/parameter_parser.hpp>
-#include <nvutils/timers.hpp>
-#include <nvvk/context.hpp>
-#include <nvvk/default_structs.hpp>
-#include <nvvk/descriptors.hpp>
-#include <nvvk/formats.hpp>
-#include <nvvk/gbuffers.hpp>
-#include <nvvk/graphics_pipeline.hpp>
-#include <nvvk/helpers.hpp>
-#include <nvvk/sampler_pool.hpp>
-#include <nvvk/validation_settings.hpp>
+#include "Camera/CameraUi.h"
+#include "Framework/Platform/Paths.h"
+#include "Framework/Platform/Log.h"
+#include "Framework/Vulkan/Barriers.h"
+#include "Framework/Vulkan/Diagnostics.h"
+#include "PathTracing/PathTracerUi.h"
+#include "PostProcessing/TonemapperUi.h"
+#include "Rendering/FrameCapture.h"
+#include "Scene/SceneUi.h"
 
-#include "Common/GltfUtils.hpp"
-#include "Common/PathUtils.hpp"
-#include "Common/Utils.hpp"
-// Renderer control surfaces live with their renderers; Application only calls them.
-#include "PathTracing/Common/RendererUi.h"
-#include "PathTracing/ReSTIR/PT/ReSTIRPTUi.h"
-#include "Scene/SceneAssetCatalog.h"
-#include "Scene/SceneResolver.h"
-#include "Scene/SceneRenderer.h"
-#include "Scene/SceneRuntime.h"
+#include "Generated/Shaders/Tonemap.hlsl.main.h"
 
-// ---------------------------------------------------------------------------------------------------------------------
-// Local UI helpers
-//
-
-namespace nvsamples
+namespace rtpt
 {
 namespace
 {
-void DrawTransmissionBounceHint(uint32_t bounceCount)
-{
-  if(bounceCount < 2)
-  {
-    ImGui::TextWrapped(
-        "Solid transmissive objects need at least 2 bounces to show through-lighting: one refraction to enter the shape and one more to exit it.");
-  }
-}
+
+// The whole single-mip, single-layer color image; every image the application transitions has that shape.
+constexpr VkImageSubresourceRange kColorRange {
+    .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+    .baseMipLevel   = 0,
+    .levelCount     = 1,
+    .baseArrayLayer = 0,
+    .layerCount     = 1,
+};
+
+// Frame time headless runs report to NRD: one 60 Hz frame, in milliseconds.
+// Headless frames run as fast as the GPU and capture readback allow, so NRD's own wall-clock timer would make denoised captures depend on how fast a run happened to go.
+// Interactive runs report zero instead, so NRD keeps measuring real frame time.
+constexpr float kHeadlessFrameTimeMilliseconds = 1000.0f / 60.0f;
 
 }  // namespace
 
-// ---------------------------------------------------------------------------------------------------------------------
-// nvapp lifecycle
-//
-
-Application::Application(const std::shared_ptr<nvutils::CameraManipulator>& cameraManip)
+// Blue noise only receives pointers to systems that are initialized later; its own resources are created in InitializeRendererSystems.
+Application::Application(ApplicationOptions options) : m_Options(std::move(options)), m_BlueNoise({ .resources = &m_Resources, .uploads = &m_Uploads, .diagnostics = &m_Instance.Debug() })
 {
-  if(cameraManip)
-  {
-    m_CameraManip = cameraManip;
-  }
 }
-Application::~Application() = default;
 
-void Application::onAttach(nvapp::Application* app)
+Application::~Application()
 {
-    m_App = app;
+  Shutdown();
+}
 
-    // VMA allocator init.
-    VmaAllocatorCreateInfo allocatorInfo = {
-        .flags            = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
-        .physicalDevice   = app->getPhysicalDevice(),
-        .device           = app->getDevice(),
-        .instance         = app->getInstance(),
-        .vulkanApiVersion = VK_API_VERSION_1_4,
+int Application::Run()
+{
+  Initialize();
+
+  // Headless runs render a fixed number of frames and optionally capture; interactive runs loop until the window closes.
+  if(m_Options.headless)
+  {
+    for(uint32_t frame = 0; frame < m_Options.frameCount; ++frame)
+    {
+      if(!RenderFrame())
+      {
+        throw std::runtime_error("headless frame was not rendered");
+      }
+    }
+
+    // Every submitted frame must finish before the targets are read back.
+    m_Execution.Drain();
+
+    if(m_Options.capturePrefix)
+    {
+      rtpt::CheckVk(vkQueueWaitIdle(m_Device.RenderQueue()), "vkQueueWaitIdle(before capture)");
+
+      // The rasterizer has no resolve step, so its captures report Off.
+      const RenderResolveMode resolveMode = m_RenderMode == RenderMode::ePathTracing ? m_PathTracer->GetSettings().resolveMode : m_RenderMode == RenderMode::eReSTIRPTEnhanced ? m_ReSTIRPT->GetSettings().common.resolveMode : RenderResolveMode::eOff;
+
+      WriteFrameCapture(m_Resources, m_Execution, m_Device.PhysicalDevice(), m_Targets, *m_Options.capturePrefix, m_Options, { .renderMode = m_RenderMode, .resolveMode = resolveMode, .sceneIndex = m_SelectedSceneIndex, .sceneLabel = m_SceneDefinitions[m_SelectedSceneIndex].label, .camera = m_Camera.State(), .tonemapper = m_TonemapperSettings });
+    }
+  }
+  else
+  {
+    while(!m_Window.ShouldClose())
+    {
+      m_Window.PollEvents();
+
+      // A minimized window has nothing to present, so block on events instead of spinning.
+      if(m_Window.Minimized())
+      {
+        m_Window.WaitEvents();
+        continue;
+      }
+
+      RenderFrame();
+    }
+  }
+
+  return 0;
+}
+
+void Application::Initialize()
+{
+  if(m_Initialized)
+  {
+    throw std::logic_error("Application is already initialized");
+  }
+
+  // A failure part-way through runs Shutdown, which releases the systems created so far, before rethrowing.
+  try
+  {
+    // Window
+    // Headless runs never create a window; the requested size then only sets the offscreen viewport.
+
+    const VkExtent2D requestedExtent {
+        m_Options.width.value_or(1920),
+        m_Options.height.value_or(1080),
     };
-    m_Allocator.init(allocatorInfo);
 
-    // Staging uploader uses the same allocator.
-    m_StagingUploader.init(&m_Allocator, true);
+    if(!m_Options.headless)
+    {
+      m_Window.Initialize({ .title = "Real-Time Path Tracing", .width = requestedExtent.width, .height = requestedExtent.height });
+    }
 
-    // Slang compiler init (hot reload).
-    m_SlangCompiler.addSearchPaths(nvsamples::GetShaderDirs());
-    m_SlangCompiler.defaultTarget();
-    m_SlangCompiler.defaultOptions();
-    m_SlangCompiler.addOption({slang::CompilerOptionName::DebugInformation,
-                               {slang::CompilerOptionValueKind::Int, SLANG_DEBUG_INFO_LEVEL_MAXIMAL}});
+    // Vulkan context
+    // Validation follows the build type, and synchronization validation is opted into from the command line.
+    // The window's instance extensions are needed before the instance exists, and the surface is created before the device so the device receives it.
 
-#if defined(AFTERMATH_AVAILABLE)
-    // Aftermath: register SPIR-V binaries for crash dumps.
-    m_SlangCompiler.setCompileCallback(
-        [&](const std::filesystem::path& sourceFile, const uint32_t* spirvCode, size_t spirvSize) {
-          std::span<const uint32_t> data(spirvCode, spirvSize / sizeof(uint32_t));
-          AftermathCrashTracker::getInstance().addShaderBinary(data);
-        });
+#if defined(NDEBUG)
+    constexpr bool validation = false;
+#else
+    constexpr bool validation = true;
 #endif
 
-    // GBuffer sampler.
-    m_SamplerPool.init(app->getDevice());
-    VkSampler linearSampler{};
-    NVVK_CHECK(m_SamplerPool.acquireSampler(linearSampler));
-    NVVK_DBG_NAME(linearSampler);
+    m_Instance.Initialize({
+        .applicationName           = "RealTimePathTracing",
+        .requiredExtensions        = m_Options.headless ? std::span<const char* const> {} : m_Window.RequiredVulkanInstanceExtensions(),
+        .validation                = validation,
+        .synchronizationValidation = m_Options.synchronizationValidation,
+    });
 
-    // GBuffer init (HDR render target + tonemapped output).
-    nvvk::GBufferInitInfo gBufferInit = {
-        .allocator      = &m_Allocator,
-        .colorFormats   = {VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM},
-        .depthFormat    = nvvk::findDepthFormat(m_App->getPhysicalDevice()),
-        .imageSampler   = linearSampler,
-        .descriptorPool = m_App->getTextureDescriptorPool(),
+    if(!m_Options.headless)
+    {
+      VkSurfaceKHR surface = VK_NULL_HANDLE;
+
+      rtpt::CheckVk(m_Window.CreateVulkanSurface(m_Instance.Handle(), surface), "glfwCreateWindowSurface");
+
+      m_Surface.Initialize(m_Instance.Handle(), surface);
+    }
+
+    m_Device.Initialize(m_Instance.Handle(), m_Surface.Handle());
+    m_Execution.Initialize(m_Device.Handle(), m_Device.RenderQueue(), m_Device.Queues().renderFamily, kFrameSlotCount);
+    m_Resources.Initialize(m_Instance.Handle(), m_Device.PhysicalDevice(), m_Device.Handle(), m_Instance.ApiVersion(), m_Execution);
+    m_Uploads.Initialize(m_Resources, m_Execution);
+    m_Targets.Initialize(m_Resources, m_Device.PhysicalDevice());
+
+    // Image samplers
+    // The tonemapper keeps its linear sampler. The Display panel uses nearest filtering because its non-integer scale would otherwise modulate noise variance into a grid.
+
+    const VkSamplerCreateInfo samplerInfo {
+        .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter    = VK_FILTER_LINEAR,
+        .minFilter    = VK_FILTER_LINEAR,
+        .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .maxLod       = VK_LOD_CLAMP_NONE,
     };
-    m_GBuffers.init(gBufferInit);
 
-    // Application creates the major systems, then each system owns its own Vulkan resources.
-    m_SceneAssetCatalog = std::make_unique<nvsamples::SceneAssetCatalog>();
-    m_SceneResolver     = std::make_unique<nvsamples::SceneResolver>();
-    m_SceneRenderer     = std::make_unique<nvsamples::SceneRenderer>();
-    m_PathTracer        = std::make_unique<nvsamples::PathTracer>(nvsamples::PathTracer::CreateInfo{
-        .app                   = m_App,
-        .allocator             = &m_Allocator,
-        .maxTextureDescriptors = kMaxTextureDescriptors,
-    });
-    m_ReSTIRPT         = std::make_unique<nvsamples::ReSTIRPTRenderer>(nvsamples::ReSTIRPTRenderer::CreateInfo{
-        .app                   = m_App,
-        .allocator             = &m_Allocator,
-        .maxTextureDescriptors = kMaxTextureDescriptors,
-    });
-    m_SceneRuntime      = std::make_unique<nvsamples::SceneRuntime>(nvsamples::SceneRuntime::CreateInfo{
-        .app             = m_App,
-        .allocator       = &m_Allocator,
-        .stagingUploader = &m_StagingUploader,
-        .samplerPool     = &m_SamplerPool,
-    });
-    m_PathTracer->Initialize();
-    m_ReSTIRPT->Initialize();
+    rtpt::CheckVk(m_Resources.CreateSampler(m_LinearSampler, samplerInfo), "ResourceAllocator::CreateSampler(viewport)");
+
+    VkSamplerCreateInfo viewportSamplerInfo = samplerInfo;
+
+    viewportSamplerInfo.magFilter  = VK_FILTER_NEAREST;
+    viewportSamplerInfo.minFilter  = VK_FILTER_NEAREST;
+    viewportSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+
+    rtpt::CheckVk(m_Resources.CreateSampler(m_ViewportSampler, viewportSamplerInfo), "ResourceAllocator::CreateSampler(display)");
+
+    // Presentation
+    // Interactive runs size the viewport to the swapchain rather than the requested size, so the targets match the framebuffer.
+    // Swapchain::Recreate returns a status, which is mapped to a VkResult so CheckVk can throw with context when the swapchain is not ready.
+
+    VkExtent2D viewportExtent = requestedExtent;
+
+    if(!m_Options.headless)
+    {
+      m_Swapchain.Initialize(m_Device.PhysicalDevice(), m_Device.Handle(), m_Surface.Handle(), m_Device.Queues(), m_Execution);
+
+      rtpt::CheckVk(m_Swapchain.Recreate({ m_Window.FramebufferWidth(), m_Window.FramebufferHeight() }) == rtpt::SwapchainStatus::Ready ? VK_SUCCESS : VK_ERROR_OUT_OF_DATE_KHR, "Swapchain::Recreate");
+
+      viewportExtent = m_Swapchain.Extent();
+
+      m_Ui.Initialize({
+          .window         = &m_Window,
+          .instance       = m_Instance.Handle(),
+          .physicalDevice = m_Device.PhysicalDevice(),
+          .device         = m_Device.Handle(),
+          .queue          = m_Device.RenderQueue(),
+          .queueFamily    = m_Device.Queues().renderFamily,
+          .apiVersion     = m_Instance.ApiVersion(),
+          .imageCount     = m_Swapchain.ImageCount(),
+          .colorFormat    = m_Swapchain.Format(),
+      });
+    }
+
+    // Viewport targets
+    // The UI shows the LDR target through a registered texture, which ResizeViewport registers again whenever the targets are reallocated.
+
+    m_Targets.Resize(viewportExtent);
+    m_Camera.SetViewport({ viewportExtent.width, viewportExtent.height });
+
+    if(!m_Options.headless)
+    {
+      m_ViewportTexture = m_Ui.RegisterTexture(m_ViewportSampler.sampler, m_Targets.Ldr().view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+
+    // Renderers and scene
+    // Renderers exist before the scene so CreateScene can write scene textures into their descriptor sets.
+    // Startup options are applied between discovery and scene build: discovery populates the catalog and picks a default scene index, which a startup override then replaces.
+
+    InitializeRendererSystems();
     DiscoverAssets();
-    // Applied between discovery and scene build: discovery populates the catalog
-    // and picks a default scene index, which a startup override then replaces.
+    ApplyStartupOptions();
     CreateScene(true);
-    CreateRasterDescriptorSetLayout();
-    CreateRasterPipelineLayout();
-    CompileAndCreateRasterShaders();
-    UpdateTextures();
 
-    // Init sky + tonemapper from precompiled shaders.
-    m_SkySimple.init(&m_Allocator, std::span(sky_simple_slang));
-    m_Tonemapper.init(&m_Allocator, std::span(tonemapper_slang));
-}
-
-void Application::onDetach()
-{
-    NVVK_CHECK(vkQueueWaitIdle(m_App->getQueue(0).queue));
-
-    VkDevice device = m_App->getDevice();
-
-    m_RasterDescPack.deinit();
-    vkDestroyPipelineLayout(device, m_RasterPipelineLayout, nullptr);
-    vkDestroyShaderEXT(device, m_VertexShader, nullptr);
-    vkDestroyShaderEXT(device, m_FragmentShader, nullptr);
-
-    m_PathTracer->Destroy();
-    m_ReSTIRPT->Destroy();
-    m_SceneRuntime->Destroy();
-
-    m_GBuffers.deinit();
-    m_StagingUploader.deinit();
-    m_SkySimple.deinit();
-    m_Tonemapper.deinit();
-    m_SamplerPool.deinit();
-    m_Allocator.deinit();
-}
-
-void Application::onUIRender()
-{
-    namespace PE = nvgui::PropertyEditor;
-
-    // Viewport.
-    if(ImGui::Begin("Viewport"))
-    {
-      ImGui::Image(ImTextureID(m_GBuffers.getDescriptorSet(eImgTonemapped)), ImGui::GetContentRegionAvail());
-    }
-    ImGui::End();
-
-    // Settings.
-    if(ImGui::Begin("Settings"))
-    {
-      shaderio::GltfSceneInfo& sceneInfo = m_SceneRuntime->GetSceneInfo();
-      bool                     invalidateRenderHistory = false;
-
-      if(ImGui::CollapsingHeader("Renderer", ImGuiTreeNodeFlags_DefaultOpen))
-      {
-        int renderMode = static_cast<int>(m_RenderMode);
-        const char* renderModes[] = {"Rasterizer", "Path Tracing", "ReSTIR PT Enhanced"};
-        if(ImGui::Combo("Mode", &renderMode, renderModes, IM_ARRAYSIZE(renderModes)))
-        {
-          m_RenderMode = static_cast<RenderMode>(renderMode);
-          invalidateRenderHistory = true;
-        }
-
-        if(m_RenderMode == RenderMode::eRasterizer)
-        {
-          ImGui::TextWrapped("Rasterizer mode uses the existing graphics pipeline path.");
-        }
-        else if(m_RenderMode == RenderMode::ePathTracing)
-        {
-          if(m_PathTracer == nullptr || !m_PathTracer->IsReady())
-          {
-            ImGui::TextWrapped("Path tracing mode is present in the UI, but the renderer is not ready yet.");
-          }
-          else
-          {
-            nvsamples::PathTracer::Settings& pathTracingSettings = m_PathTracer->GetSettings();
-            const uint32_t                   bounceLimit         = m_PathTracer->GetPipelineBounceLimit();
-
-            if(DrawResolveModeControl(pathTracingSettings.resolveMode))
-            {
-              invalidateRenderHistory = true;
-            }
-
-            if(DrawBounceLimitControl("Max Bounces", pathTracingSettings.maxBounces, bounceLimit))
-            {
-              invalidateRenderHistory   = true;
-            }
-
-            DrawTransmissionBounceHint(pathTracingSettings.maxBounces);
-
-            ImGui::SameLine();
-            if(ImGui::Button("Reset Resolve History"))
-            {
-              invalidateRenderHistory = true;
-            }
-
-            DrawResolveStatus(pathTracingSettings.resolveMode, m_PathTracer->GetAccumulatedFrameCount());
-            if(IsDenoiseResolveMode(pathTracingSettings.resolveMode))
-            {
-              if(DrawDenoiserDebugViewControl(pathTracingSettings.denoiserDebugView))
-              {
-                invalidateRenderHistory = true;
-              }
-              invalidateRenderHistory |= DrawDenoiserSettingsSection("Denoiser Settings", pathTracingSettings.denoiserSettings);
-              ImGui::TextDisabled(
-                  "NRD runs on packed guide buffers plus diffuse/specular REBLUR inputs. The path tracer keeps this path available as a reference denoising setup.");
-            }
-          }
-        }
-        else if(m_RenderMode == RenderMode::eReSTIRPTEnhanced)
-        {
-          if(m_ReSTIRPT == nullptr)
-          {
-            ImGui::TextWrapped("ReSTIR PT Enhanced mode is present in the UI, but the renderer was not created.");
-          }
-          else
-          {
-            nvsamples::ReSTIRPTSettings& restirPtSettings = m_ReSTIRPT->GetSettings();
-
-            if(!m_ReSTIRPT->IsReady())
-            {
-              // Settings are drawn regardless of readiness: the parameter set is the
-              // deliverable of this checkpoint, and the viewport falls back to the
-              // rasterizer meanwhile.
-              ImGui::TextWrapped(
-                  "Renderer passes are not implemented yet, so the viewport falls back to the rasterizer. The parameter set below is live and editable.");
-              ImGui::Separator();
-            }
-
-            invalidateRenderHistory |= DrawReSTIRPTCommonControls(restirPtSettings.common);
-
-            // Fall back to a fixed slider range until the ray tracing pipeline
-            // reports the device's actual recursion limit. Either way the limit is
-            // capped by the reconnection-length field's capacity, since a longer
-            // path could not record where it reconnected.
-            const uint32_t deviceBounceLimit = m_ReSTIRPT->IsReady() ? m_ReSTIRPT->GetPipelineBounceLimit() : 16u;
-            const uint32_t bounceLimit       = std::min(deviceBounceLimit, RESTIR_PT_MAX_BOUNCES);
-            invalidateRenderHistory |= DrawReSTIRPTInitialSamplingSection(restirPtSettings.initialSampling, restirPtSettings.nee, bounceLimit);
-            invalidateRenderHistory |= DrawReSTIRPTShiftSection(restirPtSettings.shift);
-            invalidateRenderHistory |= DrawReSTIRPTResamplingSection(restirPtSettings.temporalResampling,
-                                                                    restirPtSettings.spatialResampling, 128.0f);
-            invalidateRenderHistory |= DrawReSTIRPTDecorrelationSection(restirPtSettings.decorrelation);
-            invalidateRenderHistory |= DrawReSTIRPTShadingSection(restirPtSettings.shading);
-            invalidateRenderHistory |= DrawReSTIRPTNeeSection(restirPtSettings.nee);
-
-            if(ImGui::TreeNodeEx("Debug"))
-            {
-              if(ImGui::Checkbox("Reference Path Tracer", &restirPtSettings.common.referencePathTracer))
-              {
-                invalidateRenderHistory = true;
-              }
-              ImGui::TextDisabled("Substitutes the plain path-traced answer for the resampled estimate through an otherwise identical pipeline. With reuse disabled the two must converge to the same image.");
-              ImGui::TreePop();
-            }
-
-            if(IsDenoiseResolveMode(restirPtSettings.common.resolveMode))
-            {
-              if(DrawDenoiserDebugViewControl(restirPtSettings.common.denoiserDebugView))
-              {
-                invalidateRenderHistory = true;
-              }
-
-              invalidateRenderHistory |=
-                  DrawDenoiserSettingsSection("Denoiser Settings##ReSTIRPT", restirPtSettings.common.denoiserSettings);
-            }
-
-            DrawReSTIRMethodFooter(
-                "ReSTIR PT Enhanced resamples whole paths via shift mappings, and unifies direct and global illumination into a single reservoir.",
-                restirPtSettings.common.resolveMode, m_ReSTIRPT->GetAccumulatedFrameCount());
-          }
-        }
-        else
-        {
-          ImGui::TextWrapped("Unknown renderer mode.");
-        }
-      }
-      if(ImGui::CollapsingHeader("Camera"))
-      {
-        nvgui::CameraWidget(m_CameraManip);
-      }
-
-      if(ImGui::CollapsingHeader("Assets"))
-      {
-        if(!m_SceneDefinitions.empty())
-        {
-          const char* activeSceneLabel =
-              m_SceneDefinitions[m_SelectedSceneIndex].label.empty() ? "<unnamed scene>" : m_SceneDefinitions[m_SelectedSceneIndex].label.c_str();
-          if(ImGui::BeginCombo("Scene", activeSceneLabel))
-          {
-            for(size_t i = 0; i < m_SceneDefinitions.size(); ++i)
-            {
-              ImGui::PushID(static_cast<int>(i));
-              const bool selected = (m_SelectedSceneIndex == i);
-              const char* sceneLabel = m_SceneDefinitions[i].label.empty() ? "<unnamed scene>" : m_SceneDefinitions[i].label.c_str();
-              if(ImGui::Selectable(sceneLabel, selected))
-              {
-                m_SelectedSceneIndex   = i;
-                m_SceneReloadRequested = true;
-              }
-              if(selected)
-              {
-                ImGui::SetItemDefaultFocus();
-              }
-              ImGui::PopID();
-            }
-            ImGui::EndCombo();
-          }
-        }
-        else
-        {
-          ImGui::TextUnformatted("No scenes available");
-        }
-
-        if(!m_HdriAssets.empty())
-        {
-          const char* activeHdriLabel =
-              m_HdriAssets[m_SelectedHdriIndex].label.empty() ? "<unnamed HDRI>" : m_HdriAssets[m_SelectedHdriIndex].label.c_str();
-          if(ImGui::BeginCombo("HDRI", activeHdriLabel))
-          {
-            for(size_t i = 0; i < m_HdriAssets.size(); ++i)
-            {
-              ImGui::PushID(static_cast<int>(i));
-              const bool selected = (m_SelectedHdriIndex == i);
-              const char* hdriLabel = m_HdriAssets[i].label.empty() ? "<unnamed HDRI>" : m_HdriAssets[i].label.c_str();
-              if(ImGui::Selectable(hdriLabel, selected))
-              {
-                m_SelectedHdriIndex    = i;
-                m_HdriReloadRequested  = true;
-              }
-              if(selected)
-              {
-                ImGui::SetItemDefaultFocus();
-              }
-              ImGui::PopID();
-            }
-            ImGui::EndCombo();
-          }
-        }
-      }
-
-      if(ImGui::CollapsingHeader("Environment"))
-      {
-        bool useHdri = (sceneInfo.useHdrEnv != 0);
-        if(ImGui::Checkbox("Use HDRI", &useHdri))
-        {
-          sceneInfo.useHdrEnv          = useHdri ? 1 : 0;
-          invalidateRenderHistory = true;
-        }
-
-        bool useSky = (sceneInfo.useSky != 0);
-        if(ImGui::Checkbox("Use Sky", &useSky))
-        {
-          sceneInfo.useSky             = useSky ? 1 : 0;
-          invalidateRenderHistory = true;
-        }
-
-        if(sceneInfo.useHdrEnv != 0)
-        {
-          if(m_HdriAssets.empty())
-          {
-            ImGui::TextUnformatted("No HDRIs found in Content/HDRI");
-          }
-          else
-          {
-            const char* activeHdriLabel =
-                m_HdriAssets[m_SelectedHdriIndex].label.empty() ? "<unnamed HDRI>" : m_HdriAssets[m_SelectedHdriIndex].label.c_str();
-            ImGui::Text("Active HDRI: %s", activeHdriLabel);
-          }
-        }
-        else if(sceneInfo.useSky != 0)
-        {
-          invalidateRenderHistory |= nvgui::skySimpleParametersUI(sceneInfo.skySimpleParam);
-        }
-        else
-        {
-          PE::begin();
-          invalidateRenderHistory |= PE::ColorEdit3("Background", (float*)&sceneInfo.backgroundColor);
-          PE::end();
-
-          // Light.
-          PE::begin();
-          if(sceneInfo.punctualLights[0].type == shaderio::GltfLightType::ePoint
-             || sceneInfo.punctualLights[0].type == shaderio::GltfLightType::eSpot)
-          {
-            PE::DragFloat3("Light Position", glm::value_ptr(sceneInfo.punctualLights[0].position), 1.0f, -20.0f,
-                           20.0f, "%.2f", ImGuiSliderFlags_None, "Position of the light");
-          }
-          if(sceneInfo.punctualLights[0].type == shaderio::GltfLightType::eDirectional
-             || sceneInfo.punctualLights[0].type == shaderio::GltfLightType::eSpot)
-          {
-            PE::SliderFloat3("Light Direction", glm::value_ptr(sceneInfo.punctualLights[0].direction), -1.0f, 1.0f,
-                             "%.2f", ImGuiSliderFlags_None, "Direction of the light");
-          }
-
-          PE::SliderFloat("Light Intensity", &sceneInfo.punctualLights[0].intensity, 0.0f, 1000.0f, "%.2f",
-                          ImGuiSliderFlags_Logarithmic, "Intensity of the light");
-          PE::ColorEdit3("Light Color", glm::value_ptr(sceneInfo.punctualLights[0].color), ImGuiColorEditFlags_NoInputs,
-                         "Color of the light");
-          PE::Combo("Light Type", (int*)&sceneInfo.punctualLights[0].type, "Point\0Spot\0Directional\0", 3,
-                    "Type of the light (Point, Spot, Directional)");
-          if(sceneInfo.punctualLights[0].type == shaderio::GltfLightType::eSpot)
-          {
-            PE::SliderAngle("Cone Angle", &sceneInfo.punctualLights[0].coneAngle, 0.f, 90.f, "%.2f",
-                            ImGuiSliderFlags_AlwaysClamp, "Cone angle of the spot light");
-          }
-          PE::end();
-        }
-      }
-
-      if(ImGui::CollapsingHeader("Tonemapper"))
-      {
-        nvgui::tonemapperWidget(m_TonemapperData);
-      }
-
-      ImGui::Separator();
-      PE::begin();
-      PE::SliderFloat2("Metallic/Roughness", glm::value_ptr(m_MetallicRoughnessOverride), -0.01f, 1.0f, "%.2f",
-                       ImGuiSliderFlags_AlwaysClamp, "Override all material metallic and roughness");
-      PE::end();
-
-      if(invalidateRenderHistory)
-      {
-        InvalidateRenderHistory();
-      }
-    }
-    ImGui::End();
-}
-void Application::onResize(VkCommandBuffer cmd, const VkExtent2D& size)
-{
-  NVVK_CHECK(m_GBuffers.update(cmd, size));
-  InvalidateRenderHistory();
-}
-
-void Application::onRender(VkCommandBuffer cmd)
-{
-    NVVK_DBG_SCOPE(cmd);
-
-    if(m_SceneReloadRequested || m_HdriReloadRequested)
-    {
-      RebuildSceneFromSelection();
-      m_SceneReloadRequested = false;
-      m_HdriReloadRequested  = false;
-    }
-    if(!m_SceneRuntime->IsReady())
-    {
-      return;
-    }
-
-
-    // The active renderer writes eImgRendered; post processing always consumes that same image.
-    UpdateSceneBuffer(cmd);
-    if(IsPathTracerRenderMode() && m_PathTracer != nullptr && m_PathTracer->IsReady())
-    {
-      PathTraceScene(cmd);
-    }
-    else if(IsReSTIRPTRenderMode() && m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
-    {
-      ReSTIRPTScene(cmd);
-    }
-    else
-    {
-      // Rasterizer mode, and the window between attach and a renderer reporting
-      // ready. A ray tracing mode only lands here while its pipelines are still
-      // being built.
-      RasterScene(cmd);
-    }
-    PostProcess(cmd);
-}
-
-void Application::onUIMenu()
-{
-    bool reload = false;
-    if(ImGui::BeginMenu("Tools"))
-    {
-      reload |= ImGui::MenuItem("Reload Shaders", "F5");
-      ImGui::EndMenu();
-    }
-
-    reload |= ImGui::IsKeyPressed(ImGuiKey_F5);
-    if(reload)
-    {
-      vkQueueWaitIdle(m_App->getQueue(0).queue);
-      CompileAndCreateRasterShaders();
-    }
-}
-
-void Application::onLastHeadlessFrame()
-{
-    m_App->saveImageToFile(m_GBuffers.getColorImage(eImgTonemapped), m_GBuffers.getSize(),
-                           nvutils::getExecutablePath().replace_extension(".jpg").string());
-}
-
-std::shared_ptr<nvutils::CameraManipulator> Application::GetCameraManipulator() const
-{
-  return m_CameraManip;
-}
-void Application::DiscoverAssets()
-{
-  const nvsamples::SceneAssetCatalogData catalogData = m_SceneAssetCatalog->Discover();
-  m_ModelAssets                                      = catalogData.modelAssets;
-  m_HdriAssets                                       = catalogData.hdriAssets;
-  m_SceneDefinitions                                 = catalogData.sceneDefinitions;
-  m_SelectedSceneIndex                               = catalogData.selectedSceneIndex;
-  m_SelectedHdriIndex                                = catalogData.selectedHdriIndex;
-
-  // Emit one clear startup warning per missing asset reference.
-  for(const std::string& warning : catalogData.warnings)
+    m_Initialized = true;
+  }
+  catch(...)
   {
-    LOGW("%s\n", warning.c_str());
+    Shutdown();
+    throw;
+  }
+}
+
+void Application::Shutdown() noexcept
+{
+  // Teardown must reach every system even if one throws, so each release runs inside a catch-all.
+  const auto release = []<typename Function>(Function&& function) noexcept
+  {
+    try { function(); }
+    catch(...) {}
+  };
+
+  // GPU work
+  // An abandoned frame is cancelled and submitted work drained first, so deferred resource retirements run while the device still exists.
+
+  if(m_Execution.HasActiveFrame()) release([&] { m_Execution.CancelFrame(); });
+  if(m_Device.Handle() != VK_NULL_HANDLE) release([&] { m_Execution.Drain(); });
+
+  // Systems
+  // Released in reverse creation order: the display texture before the UI backend that owns it, and renderers and targets before the allocator and device they were built on.
+  // Shutdown also runs after a failed Initialize, so it has to cope with systems that were never created.
+
+  if(m_ViewportTexture != VK_NULL_HANDLE)
+  {
+    release([&] { m_Ui.UnregisterTexture(m_ViewportTexture); });
+    m_ViewportTexture = VK_NULL_HANDLE;
   }
 
+  release([&] { m_Ui.Destroy(); });
+  DestroyRendererSystems();
+  release([&] { m_Targets.Destroy(); });
+  release([&] { m_ViewportSampler.Reset(); });
+  release([&] { m_LinearSampler.Reset(); });
+  release([&] { m_Swapchain.Destroy(); });
+  release([&] { m_Resources.Destroy(); });
+  release([&] { m_Execution.Destroy(); });
+  release([&] { m_Device.Destroy(); });
+  release([&] { m_Surface.Destroy(); });
+  release([&] { m_Instance.Destroy(); });
+  release([&] { m_Window.Destroy(); });
+
+  m_Initialized = false;
 }
 
-void Application::RebuildSceneFromSelection()
+void Application::InitializeRendererSystems()
 {
-  CreateScene(false);
-  UpdateTextures();
-  InvalidateRenderHistory();
+  // The reference path tracer receives the blue noise, so it is initialized first.
+  m_BlueNoise.Initialize();
+
+  // Scene and renderers
+  // Every renderer receives the same texture descriptor capacity, and the path tracers also the frame slot count for their per-slot state.
+  // The raster preview is built against the viewport target formats, which are fixed for the life of the targets.
+
+  m_SceneRuntime      = std::make_unique<SceneRuntime>(SceneRuntime::CreateInfo { .device = &m_Device, .resources = &m_Resources, .uploads = &m_Uploads, .execution = &m_Execution });
+  m_Raster            = std::make_unique<RasterRenderer>(RasterRenderer::CreateInfo { .device = &m_Device, .maxTextureDescriptors = kMaxTextureDescriptors, .colorFormat = m_Targets.HdrFormat(), .depthFormat = m_Targets.DepthFormat() });
+  m_PathTracer        = std::make_unique<PathTracer>(PathTracer::CreateInfo { .device = &m_Device, .resources = &m_Resources, .diagnostics = &m_Instance.Debug(), .blueNoise = &m_BlueNoise, .frameSlotCount = kFrameSlotCount, .maxTextureDescriptors = kMaxTextureDescriptors });
+  m_ReSTIRPT          = std::make_unique<ReSTIRPTRenderer>(ReSTIRPTRenderer::CreateInfo { .device = &m_Device, .resources = &m_Resources, .diagnostics = &m_Instance.Debug(), .blueNoise = &m_BlueNoise, .frameSlotCount = kFrameSlotCount, .maxTextureDescriptors = kMaxTextureDescriptors });
+
+  m_PathTracer->Initialize();
+  m_ReSTIRPT->Initialize();
+  m_Raster->Initialize();
+
+  // The tonemap shader comes from the SPIR-V embedded in its generated shader header.
+  rtpt::CheckVk(m_Tonemapper.Initialize(m_Device.Handle(), std::span(Tonemap_hlsl)), "Tonemapper::Initialize");
 }
 
-void Application::PostProcess(VkCommandBuffer cmd)
+void Application::DestroyRendererSystems() noexcept
 {
-  NVVK_DBG_SCOPE(cmd);
+  const auto release = []<typename Function>(Function&& function) noexcept
+  {
+    try { function(); }
+    catch(...) {}
+  };
 
-  m_Tonemapper.runCompute(cmd, m_GBuffers.getSize(), m_TonemapperData, m_GBuffers.getDescriptorImageInfo(eImgRendered),
-                          m_GBuffers.getDescriptorImageInfo(eImgTonemapped));
+  // Release
+  // Reverse of InitializeRendererSystems. Each system is destroyed explicitly inside the catch-all, and only then are the pointers reset.
 
-  // Barrier: make sure the tonemapped image is ready for display.
-  nvvk::cmdMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT);
+  release([&] { m_Tonemapper.Destroy(); });
+  if(m_Raster) release([&] { m_Raster->Destroy(); });
+  if(m_ReSTIRPT) release([&] { m_ReSTIRPT->Destroy(); });
+  if(m_PathTracer) release([&] { m_PathTracer->Destroy(); });
+  if(m_SceneRuntime) release([&] { m_SceneRuntime->Destroy(); });
+  release([&] { m_BlueNoise.Destroy(); });
+
+  m_ReSTIRPT.reset();
+  m_PathTracer.reset();
+  m_Raster.reset();
+  m_SceneRuntime.reset();
+}
+
+void Application::DiscoverAssets()
+{
+  const SceneAssetCatalogData catalog = DiscoverSceneAssets();
+
+  m_ModelAssets        = catalog.modelAssets;
+  m_HdriAssets         = catalog.hdriAssets;
+  m_SceneDefinitions   = catalog.sceneDefinitions;
+  m_SelectedSceneIndex = catalog.selectedSceneIndex;
+  m_SelectedHdriIndex  = catalog.selectedHdriIndex;
+
+  // Catalog warnings are logged rather than thrown, so the rest of the catalog stays usable.
+  for(const std::string& warning : catalog.warnings)
+  {
+    rtpt::Log(rtpt::LogLevel::Warning, warning);
+  }
+}
+
+void Application::ApplyStartupOptions()
+{
+  m_RenderMode = m_Options.renderMode;
+
+  // Both path tracers take the requested resolve mode, so switching renderers later keeps it. Without the option each keeps its own default.
+  if(m_Options.resolveMode)
+  {
+    m_PathTracer->GetSettings().resolveMode      = *m_Options.resolveMode;
+    m_ReSTIRPT->GetSettings().common.resolveMode = *m_Options.resolveMode;
+  }
+
+  // The comparison mode exposes the same single-sample path estimator through
+  // both renderers; resampling and tiled NEE would otherwise change the samples.
+  if(m_Options.restirReference)
+  {
+    m_ReSTIRPT->GetSettings().common.referencePathTracer = true;
+    m_ReSTIRPT->GetSettings().common.resamplingMode = ReSTIRPTResamplingMode::eNone;
+    m_ReSTIRPT->GetSettings().nee.enableLightTiles = 0u;
+  }
+
+
+  // The scene index can only be range-checked now; the catalog did not exist when the command line was parsed.
+  if(m_Options.sceneIndex)
+  {
+    if(*m_Options.sceneIndex >= m_SceneDefinitions.size())
+    {
+      throw std::out_of_range(fmt::format("scene index {} is outside the catalog of {} scenes", *m_Options.sceneIndex, m_SceneDefinitions.size()));
+    }
+
+    m_SelectedSceneIndex = *m_Options.sceneIndex;
+  }
 }
 
 void Application::CreateScene(bool resetCamera)
 {
-  SCOPED_TIMER(__FUNCTION__);
+  // Resolve
+  // ResolveSceneSelection reports the indices it actually used, which are written back so the UI selection matches the loaded scene.
 
-  const nvsamples::SceneResolver::Input resolveInput{
+  const SceneSelectionOutput resolved = ResolveSceneSelection({
       .sceneDefinitions   = m_SceneDefinitions,
       .selectedSceneIndex = m_SelectedSceneIndex,
       .hdriAssets         = m_HdriAssets,
       .selectedHdriIndex  = m_SelectedHdriIndex,
-  };
-  const nvsamples::SceneResolver::Output resolved = m_SceneResolver->Resolve(resolveInput);
+  });
+
   if(resolved.sceneDefinition == nullptr)
   {
-    LOGE("No scenes available\n");
-    return;
+    throw std::runtime_error("no scenes are available");
   }
+
   m_SelectedSceneIndex = resolved.resolvedSceneIndex;
   m_SelectedHdriIndex  = resolved.resolvedHdriIndex;
 
-  // SceneRuntime owns the uploaded GPU scene after this call, including BLAS/TLAS data.
-  m_SceneRuntime->RebuildScene(
-      m_App->getQueue(0).queue,
-      nvsamples::SceneUploader::UploadInput{.sceneDefinition = *resolved.sceneDefinition, .selectedHdriRelativePath = resolved.hdriRelativePath},
-      resetCamera, m_CameraManip.get());
+  // Rebuild
+  // RebuildScene drains the GPU and replaces all scene data, so every descriptor set holding scene textures is rewritten and all render history discarded.
 
+  const std::vector<std::filesystem::path> contentRoots = rtpt::ContentDirectories();
+
+  m_SceneRuntime->RebuildScene(SceneUploader::UploadInput { .sceneDefinition = *resolved.sceneDefinition, .selectedHdriRelativePath = resolved.hdriRelativePath, .contentRoots = contentRoots }, m_Targets.Extent(), resetCamera, &m_Camera);
+
+  UpdateTextures();
   InvalidateRenderHistory();
-}
-
-void Application::CreateRasterDescriptorSetLayout()
-{
-    nvvk::DescriptorBindings bindings;
-    // Raster preview uses the same texture array as the ray tracing paths, but through its own descriptor set.
-    bindings.addBinding({.binding         = shaderio::BindingPoints::eTextures,
-                         .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                         .descriptorCount = kMaxTextureDescriptors,
-                         .stageFlags      = VK_SHADER_STAGE_ALL},
-                        VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
-                            | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
-
-    m_RasterDescPack.init(bindings, m_App->getDevice(), 1, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
-                          VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT);
-
-    NVVK_DBG_NAME(m_RasterDescPack.getLayout());
-    NVVK_DBG_NAME(m_RasterDescPack.getPool());
-    NVVK_DBG_NAME(m_RasterDescPack.getSet(0));
-}
-
-void Application::CreateRasterPipelineLayout()
-{
-    const VkPushConstantRange pushConstantRange = {
-        .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
-        .offset     = 0,
-        .size       = sizeof(shaderio::RasterPushConstant),
-    };
-
-    const VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
-        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount         = 1,
-        .pSetLayouts            = m_RasterDescPack.getLayoutPtr(),
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges    = &pushConstantRange,
-    };
-
-    NVVK_CHECK(vkCreatePipelineLayout(m_App->getDevice(), &pipelineLayoutInfo, nullptr, &m_RasterPipelineLayout));
-    NVVK_DBG_NAME(m_RasterPipelineLayout);
 }
 
 void Application::UpdateTextures()
 {
-    // Every renderer has its own descriptor pack, so texture updates are fanned out explicitly.
-    m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_RasterDescPack, kMaxTextureDescriptors);
-    if(m_PathTracer != nullptr && m_PathTracer->IsReady())
+  m_SceneRuntime->UpdateTextureDescriptors(m_Raster->GetDescriptorPack(), kMaxTextureDescriptors);
+  m_SceneRuntime->UpdateTextureDescriptors(m_PathTracer->GetDescriptorPack(), kMaxTextureDescriptors);
+  m_SceneRuntime->UpdateTextureDescriptors(m_ReSTIRPT->GetDescriptorPack(), kMaxTextureDescriptors);
+}
+
+void Application::ResizeViewport(VkExtent2D extent)
+{
+  // An empty extent cannot be allocated, and an unchanged one needs no work.
+  if(extent.width == 0 || extent.height == 0 || (extent.width == m_Targets.Extent().width && extent.height == m_Targets.Extent().height))
+  {
+    return;
+  }
+
+  // Reallocate
+  // In-flight frames and the UI's registered texture still reference the old targets, so work is drained and the texture unregistered before they are replaced.
+
+  m_Execution.Drain();
+
+  if(m_ViewportTexture != VK_NULL_HANDLE)
+  {
+    m_Ui.UnregisterTexture(m_ViewportTexture);
+    m_ViewportTexture = VK_NULL_HANDLE;
+  }
+
+  m_Targets.Resize(extent);
+
+  // The new LDR image has no defined layout yet, which PostProcess must transition from.
+  m_LdrInitialized = false;
+
+  m_Camera.SetViewport({ extent.width, extent.height });
+
+  if(!m_Options.headless)
+  {
+    m_ViewportTexture = m_Ui.RegisterTexture(m_ViewportSampler.sampler, m_Targets.Ldr().view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  }
+
+  // All render history was built at the old resolution.
+  InvalidateRenderHistory();
+}
+
+void Application::UpdateCameraInput()
+{
+  if(m_Options.headless)
+  {
+    return;
+  }
+
+  // Input snapshot
+  // GLFW state is translated into the windowing-free CameraInput the controller takes.
+
+  const rtpt::InputState& input = m_Window.Input();
+
+  const rtpt::CameraInput cameraInput {
+      .leftMouse   = input.MouseButtonDown(GLFW_MOUSE_BUTTON_LEFT),
+      .middleMouse = input.MouseButtonDown(GLFW_MOUSE_BUTTON_MIDDLE),
+      .rightMouse  = input.MouseButtonDown(GLFW_MOUSE_BUTTON_RIGHT),
+      .shift       = (input.modifiers & GLFW_MOD_SHIFT) != 0,
+      .control     = (input.modifiers & GLFW_MOD_CONTROL) != 0,
+      .alt         = (input.modifiers & GLFW_MOD_ALT) != 0,
+  };
+
+  const glm::vec2 pointer { static_cast<float>(input.cursorX), static_cast<float>(input.cursorY) };
+
+  // Drag capture
+  // A drag starts only when a button the current mode drags with is down over the Display window, and captures the cursor so it keeps working outside the window.
+  // Releasing every such button ends it. Starting a drag also re-anchors the controller's pointer origin at the current position.
+
+  const bool orbitDrag      = m_Camera.Mode() == rtpt::CameraMode::Orbit && (cameraInput.leftMouse || cameraInput.middleMouse || cameraInput.rightMouse);
+  const bool flyDrag        = m_Camera.Mode() == rtpt::CameraMode::Fly && (cameraInput.middleMouse || cameraInput.rightMouse);
+  const bool dragButtonDown = orbitDrag || flyDrag;
+
+  if(!m_CameraDragActive && m_DisplayHovered && dragButtonDown)
+  {
+    m_CameraDragActive = true;
+    m_Window.SetCursorCaptured(true);
+    m_Camera.SetPointerPosition(pointer);
+  }
+  else if(m_CameraDragActive && !dragButtonDown)
+  {
+    m_CameraDragActive = false;
+    m_Window.SetCursorCaptured(false);
+  }
+
+  // Pointer and wheel
+  // Away from the Display window and outside a drag, only the pointer origin is tracked, so interacting with other windows never moves the camera.
+
+  if(m_DisplayHovered || m_CameraDragActive)
+  {
+    m_Camera.PointerMove(pointer, cameraInput);
+
+    // The wheel only applies while the pointer is over the Display window.
+    if(m_DisplayHovered && input.scrollY != 0.0)
     {
-      m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_PathTracer->GetDescriptorPack(), kMaxTextureDescriptors);
+      m_Camera.Wheel(static_cast<float>(input.scrollY), cameraInput);
     }
-    if(m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
+  }
+  else
+  {
+    m_Camera.SetPointerPosition(pointer);
+  }
+
+  // Fly keys
+  // Keys only move the camera while the Display window has focus and ImGui is not taking text input.
+  // The frame time is clamped to 0.1 seconds so a long frame cannot produce a large jump, and Shift moves four times faster.
+
+  if(m_Camera.Mode() == rtpt::CameraMode::Fly && m_DisplayFocused && !ImGui::GetIO().WantTextInput)
+  {
+    const float right     = static_cast<float>(input.KeyDown(GLFW_KEY_D)) - static_cast<float>(input.KeyDown(GLFW_KEY_A));
+    const float up        = static_cast<float>(input.KeyDown(GLFW_KEY_E)) - static_cast<float>(input.KeyDown(GLFW_KEY_Q));
+    const float forward   = static_cast<float>(input.KeyDown(GLFW_KEY_W)) - static_cast<float>(input.KeyDown(GLFW_KEY_S));
+    const bool boost      = input.KeyDown(GLFW_KEY_LEFT_SHIFT) || input.KeyDown(GLFW_KEY_RIGHT_SHIFT);
+    const float deltaTime = std::min(ImGui::GetIO().DeltaTime, 0.1F) * (boost ? 4.0F : 1.0F);
+
+    m_Camera.MoveFly({ right, up, forward }, deltaTime);
+  }
+
+  // Animation and history
+  // Renderer history signatures decide what camera motion invalidates. ReSTIR and NRD keep temporal history during interactive rendering,
+  // while an active accumulation resolve restarts because its camera signature changed.
+
+  m_Camera.UpdateAnimation();
+}
+
+void Application::DrawUi()
+{
+  // Dockspace host
+  // A borderless, unpadded window covers the main viewport's work area and hosts the dockspace the Settings and Display windows dock into.
+
+  const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
+
+  ImGui::SetNextWindowPos(mainViewport->WorkPos);
+  ImGui::SetNextWindowSize(mainViewport->WorkSize);
+  ImGui::SetNextWindowViewport(mainViewport->ID);
+
+  constexpr ImGuiWindowFlags dockspaceWindowFlags = ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus;
+
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0F);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0F);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0F, 0.0F));
+  ImGui::Begin("RTPT Dockspace", nullptr, dockspaceWindowFlags);
+  ImGui::PopStyleVar(3);
+
+  // Default layout
+  // The split is only built when the dockspace node does not exist yet, so an existing layout is left alone.
+  // Settings gets about 360 pixels on the left, clamped to between 20% and 35% of the work area width.
+
+  const ImGuiID dockspaceId = ImGui::GetID("RTPT Main Dockspace");
+
+  if(ImGui::DockBuilderGetNode(dockspaceId) == nullptr)
+  {
+    ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockspaceId, mainViewport->WorkSize);
+
+    ImGuiID displayDock = dockspaceId;
+    ImGuiID settingsDock = 0;
+
+    const float settingsRatio = std::clamp(360.0F / mainViewport->WorkSize.x, 0.20F, 0.35F);
+
+    ImGui::DockBuilderSplitNode(displayDock, ImGuiDir_Left, settingsRatio, &settingsDock, &displayDock);
+    ImGui::DockBuilderDockWindow("Settings", settingsDock);
+    ImGui::DockBuilderDockWindow("Display", displayDock);
+    ImGui::DockBuilderFinish(dockspaceId);
+  }
+
+  ImGui::DockSpace(dockspaceId);
+  ImGui::End();
+
+  // Display
+  // The viewport targets match the framebuffer, not the Display window, so the UVs crop the image symmetrically to fill the window without distorting its aspect ratio.
+  // Hover and focus are recorded for UpdateCameraInput, which runs after the UI; a collapsed or hidden Display window clears both.
+  // The panel's pixel size is recorded for the window title, which reports what the Display window shows rather than the whole application framebuffer.
+
+  if(ImGui::Begin("Display"))
+  {
+    m_DisplayHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+    m_DisplayFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+
+    const ImVec2 available = ImGui::GetContentRegionAvail();
+
+    // ImGui sizes are in window coordinates, so the framebuffer scale converts them to pixels on high-DPI displays.
+    const ImVec2 framebufferScale = ImGui::GetIO().DisplayFramebufferScale;
+
+    m_DisplaySize = { static_cast<uint32_t>(std::max(available.x * framebufferScale.x, 0.0F) + 0.5F), static_cast<uint32_t>(std::max(available.y * framebufferScale.y, 0.0F) + 0.5F) };
+
+    ImVec2 uvMinimum { 0.0F, 0.0F };
+    ImVec2 uvMaximum { 1.0F, 1.0F };
+
+    const VkExtent2D sourceExtent = m_Targets.Extent();
+
+    // Both sizes must be non-empty for the aspect ratios to be defined.
+    if(available.x > 0.0F && available.y > 0.0F && sourceExtent.width > 0 && sourceExtent.height > 0)
     {
-      m_SceneRuntime->UpdateTextureDescriptors(m_App->getDevice(), m_ReSTIRPT->GetDescriptorPack(), kMaxTextureDescriptors);
+      const float sourceAspect  = static_cast<float>(sourceExtent.width) / static_cast<float>(sourceExtent.height);
+      const float displayAspect = available.x / available.y;
+
+      // A window wider than the image crops its top and bottom; a narrower one crops its sides.
+      if(displayAspect > sourceAspect)
+      {
+        const float visibleHeight = sourceAspect / displayAspect;
+
+        uvMinimum.y = (1.0F - visibleHeight) * 0.5F;
+        uvMaximum.y = 1.0F - uvMinimum.y;
+      }
+      else
+      {
+        const float visibleWidth = displayAspect / sourceAspect;
+
+        uvMinimum.x = (1.0F - visibleWidth) * 0.5F;
+        uvMaximum.x = 1.0F - uvMinimum.x;
+      }
     }
+
+    ImGui::Image(reinterpret_cast<ImTextureID>(m_ViewportTexture), available, uvMinimum, uvMaximum);
+  }
+  else
+  {
+    m_DisplayHovered = false;
+    m_DisplayFocused = false;
+    m_DisplaySize    = {};
+  }
+
+  ImGui::End();
+
+  // Settings
+  // Controls report whether they invalidate render history, and the history is reset once after the whole window is drawn.
+  // Camera and tonemapper edits do not report invalidation: renderers detect camera changes themselves, and tonemapping runs after them.
+
+  bool invalidateHistory = false;
+
+  if(ImGui::Begin("Settings"))
+  {
+    invalidateHistory |= DrawRendererSection(m_RenderMode, *m_PathTracer, *m_ReSTIRPT);
+
+    DrawSceneAssetsSection(m_SceneDefinitions, m_SelectedSceneIndex, m_SceneReloadRequested, m_HdriAssets, m_SelectedHdriIndex, m_HdriReloadRequested);
+
+    invalidateHistory |= DrawSceneEnvironmentSection(m_SceneRuntime->GetSceneInfo());
+
+    DrawCameraSection(m_Camera);
+    DrawTonemapperSection(m_TonemapperSettings);
+
+    // Only the rasterizer preview reads this override, so it does not touch path tracing history.
+    ImGui::DragFloat2("Metallic/Roughness", glm::value_ptr(m_MetallicRoughnessOverride), 0.01F, -0.01F, 1.0F);
+  }
+
+  ImGui::End();
+
+  if(invalidateHistory) InvalidateRenderHistory();
 }
 
-VkShaderModuleCreateInfo Application::CompileSlangShader(const std::filesystem::path& filename, const std::span<const uint32_t>& spirvFallback)
+bool Application::RenderFrame()
 {
-    SCOPED_TIMER(__FUNCTION__);
+  // Interactive frame setup
+  // A window resize, or a swapchain that an earlier acquisition, presentation, or failed recreation marked for recreation, drains in-flight work, recreates the swapchain, and updates the UI image count and the viewport to match. Presentation only marks the swapchain, so the frame loop recreates it nowhere else.
+  // If the swapchain is still not ready, the frame is skipped; the swapchain stays marked, so the recreation is retried next frame even without another resize.
+  // The UI is drawn and camera input applied before recording, so this frame renders the latest camera.
 
-    VkShaderModuleCreateInfo shaderCode = nvsamples::GetShaderModuleCreateInfo(spirvFallback);
-
-    const std::filesystem::path shaderSource = nvutils::findFile(filename, nvsamples::GetShaderDirs());
-    if(m_SlangCompiler.compileFile(shaderSource))
+  if(!m_Options.headless)
+  {
+    if(m_Window.Resized() || m_Swapchain.RecreateRequired())
     {
-      shaderCode.codeSize = m_SlangCompiler.getSpirvSize();
-      shaderCode.pCode    = m_SlangCompiler.getSpirv();
+      m_Execution.Drain();
+
+      if(m_Swapchain.Recreate({ m_Window.FramebufferWidth(), m_Window.FramebufferHeight() }) != rtpt::SwapchainStatus::Ready)
+      {
+        return false;
+      }
+
+      m_Ui.SetImageCount(m_Swapchain.ImageCount());
+
+      ResizeViewport(m_Swapchain.Extent());
     }
-    else
+
+    m_Ui.BeginFrame();
+
+    DrawUi();
+
+    // After DrawUi, which measured the Display panel this frame; the frame rate was already measured by ImGui in BeginFrame.
+    m_WindowTitle.Update(m_Window, m_DisplaySize);
+
+    UpdateCameraInput();
+  }
+
+  // Deferred scene reload
+  // Requested by the UI; performed before BeginFrame because rebuilding drains the GPU and destroys the old scene resources. The camera is kept.
+
+  if(m_SceneReloadRequested || m_HdriReloadRequested)
+  {
+    CreateScene(false);
+
+    m_SceneReloadRequested = false;
+    m_HdriReloadRequested  = false;
+  }
+
+  // Frame recording
+  // BeginFrame waits for this frame slot's previous submission. Interactive frames then acquire a swapchain image, and the frame is cancelled when none is available.
+
+  const rtpt::FrameContext frame = m_Execution.BeginFrame();
+
+  rtpt::AcquiredSwapchainImage acquired;
+
+  if(!m_Options.headless)
+  {
+    acquired = m_Swapchain.Acquire(frame.slot);
+
+    if(!acquired)
     {
-      LOGE("Error compiling shaders: %s\n%s\n", shaderSource.string().c_str(), m_SlangCompiler.getLastDiagnosticMessage().c_str());
+      m_Execution.CancelFrame();
+      return false;
+    }
+  }
+
+  // If anything throws while the frame is active, the frame and the acquired image are released before rethrowing.
+  try
+  {
+    RenderScene(frame);
+    PostProcess(frame.commands);
+
+    if(!m_Options.headless) RecordPresentation(frame.commands, acquired);
+
+    // Submission
+    // Interactive submissions wait on the image-available semaphore and signal render-finished, which Present waits on. Headless submissions need no synchronization.
+
+    std::array<rtpt::SemaphoreWait, 1> waits {};
+    std::array<rtpt::SemaphoreSignal, 1> signals {};
+    rtpt::SubmissionSync sync {};
+
+    if(!m_Options.headless)
+    {
+      waits[0]   = { .semaphore = acquired.imageAvailable, .stages = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT };
+      signals[0] = { .semaphore = acquired.renderFinished, .stages = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT };
+      sync       = { .waits = waits, .signals = signals };
     }
 
-    return shaderCode;
+    const rtpt::CompletionPoint completion = m_Execution.SubmitFrame(sync);
+
+    // Presentation
+    // An out-of-date or suboptimal swapchain is only marked for recreation here. Recreating it on the spot would skip the UI image count and viewport updates, so the frame setup at the top of the next frame recreates it together with them.
+    // Present marks the swapchain itself when it reports out of date or suboptimal; an acquisition that was suboptimal but presented cleanly is marked explicitly.
+
+    if(!m_Options.headless)
+    {
+      m_Swapchain.CommitSubmission(acquired, completion);
+
+      if(m_Swapchain.Present(m_Device.PresentQueue(), acquired) == rtpt::SwapchainStatus::Recreate || acquired.suboptimal)
+      {
+        m_Swapchain.RequestRecreate();
+      }
+    }
+
+    return true;
+  }
+  catch(...)
+  {
+    if(m_Execution.HasActiveFrame()) m_Execution.CancelFrame();
+    if(acquired) m_Swapchain.Cancel(acquired);
+    throw;
+  }
 }
 
-void Application::CompileAndCreateRasterShaders()
+void Application::RenderScene(const rtpt::FrameContext& frame)
 {
-    SCOPED_TIMER(__FUNCTION__);
+  // Camera
+  // The scene buffer carries this frame's camera to every renderer, so it is updated before any of them records.
 
-    VkShaderModuleCreateInfo shaderCode = CompileSlangShader("Rasterizer.slang", Rasterizer_slang);
+  const glm::mat4 view       = m_Camera.View();
+  const glm::mat4 projection = m_Camera.Projection();
 
-    vkDestroyShaderEXT(m_App->getDevice(), m_VertexShader, nullptr);
-    vkDestroyShaderEXT(m_App->getDevice(), m_FragmentShader, nullptr);
+  m_SceneRuntime->UpdateSceneBuffer(frame.commands, view, projection, m_Camera.State().eye, m_Targets.Extent());
 
-    const VkPushConstantRange pushConstantRange = {
-        .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
-        .offset     = 0,
-        .size       = sizeof(shaderio::RasterPushConstant),
-    };
+  // Renderer
+  // Whichever renderer is active writes the HDR target. The path tracers also receive the frame slot index and the frame time NRD adapts its history to.
+  // Headless runs report a fixed frame time so captures are reproducible; interactive runs report zero so NRD times frames itself.
 
-    VkShaderCreateInfoEXT shaderInfo = {
-        .sType                  = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
-        .codeType               = VK_SHADER_CODE_TYPE_SPIRV_EXT,
-        .pName                  = "main",
-        .setLayoutCount         = 1,
-        .pSetLayouts            = m_RasterDescPack.getLayoutPtr(),
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges    = &pushConstantRange,
-    };
+  const float frameTimeMilliseconds = m_Options.headless ? kHeadlessFrameTimeMilliseconds : 0.0f;
 
-    // Vertex shader.
-    shaderInfo.stage     = VK_SHADER_STAGE_VERTEX_BIT;
-    shaderInfo.nextStage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    shaderInfo.pName     = "vertexMain";
-    shaderInfo.codeSize  = shaderCode.codeSize;
-    shaderInfo.pCode     = shaderCode.pCode;
-    vkCreateShadersEXT(m_App->getDevice(), 1U, &shaderInfo, nullptr, &m_VertexShader);
-    NVVK_DBG_NAME(m_VertexShader);
-
-    // Fragment shader.
-    shaderInfo.stage     = VK_SHADER_STAGE_FRAGMENT_BIT;
-    shaderInfo.nextStage = 0;
-    shaderInfo.pName     = "fragmentMain";
-    shaderInfo.codeSize  = shaderCode.codeSize;
-    shaderInfo.pCode     = shaderCode.pCode;
-    vkCreateShadersEXT(m_App->getDevice(), 1U, &shaderInfo, nullptr, &m_FragmentShader);
-    NVVK_DBG_NAME(m_FragmentShader);
+  if(m_RenderMode == RenderMode::ePathTracing)
+  {
+    m_PathTracer->Render({ .cmd = frame.commands, .sceneResource = &m_SceneRuntime->GetSceneResource(), .sceneInfo = &m_SceneRuntime->GetSceneInfo(), .topLevelAS = &m_SceneRuntime->GetTopLevelAccelerationStructure(), .output = m_Targets.Hdr(), .frameSlot = frame.slot.index, .frameTimeMilliseconds = frameTimeMilliseconds });
+  }
+  else if(m_RenderMode == RenderMode::eReSTIRPTEnhanced)
+  {
+    m_ReSTIRPT->Render({ .cmd = frame.commands, .sceneResource = &m_SceneRuntime->GetSceneResource(), .sceneInfo = &m_SceneRuntime->GetSceneInfo(), .topLevelAS = &m_SceneRuntime->GetTopLevelAccelerationStructure(), .output = m_Targets.Hdr(), .frameSlot = frame.slot.index, .frameTimeMilliseconds = frameTimeMilliseconds });
+  }
+  else
+  {
+    m_Raster->Render({ .cmd = frame.commands, .sceneResource = &m_SceneRuntime->GetSceneResource(), .sceneInfo = &m_SceneRuntime->GetSceneInfo(), .viewMatrix = view, .projectionMatrix = projection, .metallicRoughnessOverride = m_MetallicRoughnessOverride, .colorTarget = m_Targets.Hdr(), .depthTarget = m_Targets.Depth() });
+  }
 }
 
-void Application::UpdateSceneBuffer(VkCommandBuffer cmd)
+void Application::PostProcess(VkCommandBuffer commandBuffer)
 {
-  const glm::mat4& viewMatrix = m_CameraManip->getViewMatrix();
-  const glm::mat4& projMatrix = m_CameraManip->getPerspectiveMatrix();
-  m_SceneRuntime->UpdateSceneBuffer(cmd, viewMatrix, projMatrix, m_CameraManip->getEye(), m_App->getViewportSize());
+  // LDR layout
+  // The LDR target's previous state depends on how the last frame ended: headless frames leave it as the tonemapper's storage output,
+  // interactive frames leave it shader-readable for the UI. A newly allocated image has no contents to keep, so it starts from the default scope.
+
+  rtpt::ImageAccessScope before {};
+
+  if(m_LdrInitialized)
+  {
+    before = m_Options.headless ? rtpt::ImageAccessScope { { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT }, VK_IMAGE_LAYOUT_GENERAL } : rtpt::ImageAccessScope { { VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT }, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+  }
+
+  rtpt::CmdImageBarrier(commandBuffer, m_Targets.Ldr().image, kColorRange, before, { { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT }, VK_IMAGE_LAYOUT_GENERAL });
+
+  // Tonemap
+  // HDR is sampled in the GENERAL layout through the linear sampler, and LDR is written as a storage image.
+
+  m_Tonemapper.Run(commandBuffer, m_Targets.Extent(), m_TonemapperSettings, m_Targets.Hdr().Descriptor(VK_IMAGE_LAYOUT_GENERAL, m_LinearSampler.sampler), m_Targets.Ldr().Descriptor(VK_IMAGE_LAYOUT_GENERAL));
+
+  m_LdrInitialized = true;
 }
 
-void Application::RasterScene(VkCommandBuffer cmd)
+void Application::RecordPresentation(VkCommandBuffer commandBuffer, const rtpt::AcquiredSwapchainImage& acquired)
 {
-    // Raster preview is kept as a separate handoff so ray tracing paths do not share raster state accidentally.
-    m_SceneRenderer->Render(nvsamples::SceneRenderer::RenderInput{
-        .cmd                       = cmd,
-        .sceneResource             = &m_SceneRuntime->GetSceneResource(),
-        .sceneInfo                 = &m_SceneRuntime->GetSceneInfo(),
-        .metallicRoughnessOverride = &m_MetallicRoughnessOverride,
-        .viewportSize              = &m_App->getViewportSize(),
-        .cameraManip               = m_CameraManip,
-        .skySimple                 = &m_SkySimple,
-        .gBuffers                  = &m_GBuffers,
-        .dynamicPipeline           = &m_RasterDynamicPipeline,
-        .descPack                  = &m_RasterDescPack,
-        .graphicsPipelineLayout    = m_RasterPipelineLayout,
-        .vertexShader              = m_VertexShader,
-        .fragmentShader            = m_FragmentShader,
-        .renderedImageIndex        = eImgRendered,
-    });
-}
+  // Display texture
+  // The UI samples the LDR target inside the Display window, so it moves from the tonemapper's storage write to shader-read.
 
-void Application::PathTraceScene(VkCommandBuffer cmd)
-{
-    // Ground-truth/baseline renderer borrows the scene buffers and TLAS owned by SceneRuntime.
-    m_PathTracer->Render(nvsamples::PathTracer::RenderInput{
-        .cmd                = cmd,
-        .sceneResource      = &m_SceneRuntime->GetSceneResource(),
-        .sceneInfo          = &m_SceneRuntime->GetSceneInfo(),
-        .topLevelAS         = &m_SceneRuntime->GetTopLevelAccelerationStructure(),
-        .gBuffers           = &m_GBuffers,
-        .renderedImageIndex = eImgRendered,
-    });
-}
+  rtpt::CmdImageBarrier(commandBuffer, m_Targets.Ldr().image, kColorRange, { { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT }, VK_IMAGE_LAYOUT_GENERAL }, { { VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT }, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL });
 
-void Application::ReSTIRPTScene(VkCommandBuffer cmd)
-{
-    // ReSTIR PT receives the same scene interface as the path tracer, but owns its
-    // reservoir and pairing resources internally.
-    m_ReSTIRPT->Render(nvsamples::ReSTIRPTRenderer::RenderInput{
-        .cmd                = cmd,
-        .sceneResource      = &m_SceneRuntime->GetSceneResource(),
-        .sceneInfo          = &m_SceneRuntime->GetSceneInfo(),
-        .topLevelAS         = &m_SceneRuntime->GetTopLevelAccelerationStructure(),
-        .gBuffers           = &m_GBuffers,
-        .renderedImageIndex = eImgRendered,
-    });
+  // UI pass
+  // The UI pass clears the whole swapchain image, so it transitions from the default scope without preserving contents.
+  // The dark clear color shows wherever no window covers the framebuffer.
+
+  rtpt::CmdImageBarrier(commandBuffer, acquired.image, kColorRange, {}, { { VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT }, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
+
+  m_Ui.Record(commandBuffer, acquired.view, acquired.extent, VK_ATTACHMENT_LOAD_OP_CLEAR, VkClearColorValue { { 0.02F, 0.02F, 0.025F, 1.0F } });
+
+  // Present
+  // The finished image moves to the layout vkQueuePresentKHR requires.
+
+  rtpt::CmdImageBarrier(commandBuffer, acquired.image, kColorRange, { { VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT }, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL }, { { VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE }, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR });
 }
 
 void Application::InvalidateRenderHistory()
 {
-    // Any scene, camera, lighting, or renderer setting change makes temporal histories untrustworthy.
-    m_SceneRuntime->InvalidateFrameHistory();
-    if(m_PathTracer != nullptr && m_PathTracer->IsReady())
-    {
-      m_PathTracer->InvalidateHistory();
-    }
-    if(m_ReSTIRPT != nullptr && m_ReSTIRPT->IsReady())
-    {
-      m_ReSTIRPT->InvalidateHistory();
-    }
+  // The systems only exist between InitializeRendererSystems and DestroyRendererSystems, so every call is guarded.
+
+  if(m_SceneRuntime) m_SceneRuntime->InvalidateFrameHistory();
+  if(m_PathTracer) m_PathTracer->InvalidateHistory();
+  if(m_ReSTIRPT) m_ReSTIRPT->InvalidateHistory();
 }
 
-bool Application::IsPathTracerRenderMode() const
-{
-  return m_RenderMode == RenderMode::ePathTracing;
-}
-
-bool Application::IsReSTIRPTRenderMode() const
-{
-  return m_RenderMode == RenderMode::eReSTIRPTEnhanced;
-}
-
-// ---------------------------------------------------------------------------------------------------------------------
-// Application module API
-//
-
-std::shared_ptr<nvapp::IAppElement> CreateApplicationElement(const std::shared_ptr<nvutils::CameraManipulator>& cameraManip)
-{
-  return std::make_shared<Application>(cameraManip);
-}
-
-}  // namespace nvsamples
+}  // namespace rtpt

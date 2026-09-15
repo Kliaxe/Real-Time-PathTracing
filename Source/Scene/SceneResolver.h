@@ -1,8 +1,5 @@
 #pragma once
 
-// Role:
-// CPU-only selection step that resolves valid scene/HDRI choices from UI indices.
-
 #include <cstddef>
 #include <filesystem>
 #include <optional>
@@ -10,31 +7,47 @@
 
 #include "SceneAssetCatalog.h"
 
-namespace nvsamples
+namespace rtpt
 {
 
-// SceneResolver is a CPU-only step that chooses a stable scene/HDRI selection
-// from UI indices and discovered catalogs. It intentionally has no Vulkan code.
-class SceneResolver
+// SceneSelectionInput
+// The catalogs and the indices the UI or command line currently holds, which may be out of range.
+
+struct SceneSelectionInput
 {
-public:
-  struct Input
-  {
-    const std::vector<SceneDefinition>& sceneDefinitions;
-    size_t                              selectedSceneIndex = 0;
-    const std::vector<AssetEntry>&      hdriAssets;
-    size_t                              selectedHdriIndex = 0;
-  };
+  // Scene presets to choose from.
+  const std::vector<SceneDefinition>& sceneDefinitions;
 
-  struct Output
-  {
-    size_t                           resolvedSceneIndex = 0;
-    size_t                           resolvedHdriIndex  = 0;
-    const SceneDefinition*           sceneDefinition    = nullptr;
-    std::optional<std::filesystem::path> hdriRelativePath;
-  };
+  // Requested scene index; clamped to 0 when out of range.
+  size_t selectedSceneIndex = 0;
 
-  Output Resolve(const Input& input) const;
+  // Discovered environment maps to choose from.
+  const std::vector<AssetEntry>& hdriAssets;
+
+  // Requested HDRI index; clamped to 0 when out of range.
+  size_t selectedHdriIndex = 0;
 };
 
-}  // namespace nvsamples
+// SceneSelectionOutput
+// The validated selection, written back by the caller so the UI shows what is actually loaded.
+
+struct SceneSelectionOutput
+{
+  // Scene index after clamping.
+  size_t resolvedSceneIndex = 0;
+
+  // HDRI index after clamping.
+  size_t resolvedHdriIndex = 0;
+
+  // Chosen scene, or null when the catalog is empty.
+  const SceneDefinition* sceneDefinition = nullptr;
+
+  // Content-relative HDRI path, or empty when no HDRI assets were discovered.
+  std::optional<std::filesystem::path> hdriRelativePath;
+};
+
+// Chooses a stable scene and HDRI selection from UI indices and the discovered catalogs.
+// This is a CPU-only step with no Vulkan code, so selection logic stays separate from GPU upload.
+SceneSelectionOutput ResolveSceneSelection(const SceneSelectionInput& input);
+
+}  // namespace rtpt

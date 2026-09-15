@@ -9,131 +9,117 @@
 #include <cmath>
 #include <vector>
 
-#include <nvapp/application.hpp>
-#include <nvutils/logger.hpp>
-#include <nvvk/barriers.hpp>
-#include <nvvk/check_error.hpp>
-#include <nvvk/debug_util.hpp>
+#include "Framework/Vulkan/Barriers.h"
+#include "Framework/Vulkan/Diagnostics.h"
 
-#include "Common/Utils.hpp"
-#include "Denoising/DenoiserResources.h"
-#include "Denoising/NrdDenoiser.h"
+#include "Generated/Shaders/ReSTIRPTDuplicationMap.hlsl.main.h"
+#include "Generated/Shaders/ReSTIRPTFinalShading.hlsl.main.h"
+#include "Generated/Shaders/ReSTIRPTInitialSampling.hlsl.library.h"
+#include "Generated/Shaders/ReSTIRPTLightTiles.hlsl.main.h"
+#include "Generated/Shaders/ReSTIRPTPrepassClassify.hlsl.main.h"
+#include "Generated/Shaders/ReSTIRPTPrepassOffsets.hlsl.main.h"
+#include "Generated/Shaders/ReSTIRPTSpatialPrepass.hlsl.library.h"
+#include "Generated/Shaders/ReSTIRPTSpatialResampling.hlsl.library.h"
+#include "Generated/Shaders/ReSTIRPTTemporalResampling.hlsl.library.h"
 
-#include "_autogen/ReSTIRPTDuplicationMap.slang.h"
-#include "_autogen/ReSTIRPTLightTiles.slang.h"
-#include "_autogen/ReSTIRPTPrepassClassify.slang.h"
-#include "_autogen/ReSTIRPTPrepassOffsets.slang.h"
-#include "_autogen/ReSTIRPTFinalShading.slang.h"
-#include "_autogen/ReSTIRPTInitialSampling.slang.h"
-#include "_autogen/ReSTIRPTSpatialPrepass.slang.h"
-#include "_autogen/ReSTIRPTSpatialResampling.slang.h"
-#include "_autogen/ReSTIRPTTemporalResampling.slang.h"
-
-namespace nvsamples
+namespace rtpt
 {
 
 namespace
 {
 
-constexpr uint32_t kComputeGroupSize    = 8;
-// Must match [numthreads] in ReSTIRPTDuplicationMap.slang: that shader sizes its
-// shared-memory staging window from the tile size, so a mismatch would stage the
-// wrong region rather than merely dispatch inefficiently.
-// Must match [numthreads] in ReSTIRPTLightTiles.slang.
+// Workgroup sizes
+// Each constant must match [numthreads] in the shader it dispatches, because the group count is derived from it.
+
+// ReSTIRPTFinalShading.hlsl.
+constexpr uint32_t kComputeGroupSize = 8;
+
+// ReSTIRPTLightTiles.hlsl.
 constexpr uint32_t kLightTileGroupSize = 8;
+
+// ReSTIRPTDuplicationMap.hlsl. That shader sizes its shared-memory staging window from the tile size, so a mismatch would stage the wrong region rather than merely dispatch inefficiently.
 constexpr uint32_t kDuplicationMapGroupSize = 8;
-// Must match [numthreads] in the two Section 6.2.2 full-screen sorting passes.
+
+// The Section 6.2.2 full-screen classify pass, ReSTIRPTPrepassClassify.hlsl.
 constexpr uint32_t kPrepassSortGroupSize = 8;
+
+// Bounce ceiling before the device's recursion depth and RESTIR_PT_MAX_BOUNCES clamp it further.
 constexpr uint32_t kRequestedMaxBounces = 8;
 
-// One push constant range is shared by the ray tracing and compute passes so both
-// can be recorded against the same pipeline layout.
-constexpr VkShaderStageFlags kReSTIRPTPushConstantStages = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR
-                                                           | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
-                                                           | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT;
+// Push constant stages
+// One push constant range is shared by the ray tracing and compute passes so both can be recorded against the same pipeline layout.
+
+constexpr VkShaderStageFlags kReSTIRPTPushConstantStages = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT;
+
 static_assert(sizeof(shaderio::ReSTIRPTPushConstant) <= 256, "ReSTIR PT push constants must fit Vulkan's minimum 256-byte limit.");
 
-// Memory barrier with the acceleration-structure access bit left off.
-//
-// nvvk::cmdMemoryBarrier infers its access masks from the stage masks, and any
-// destination stage set containing RAY_TRACING_SHADER unconditionally picks up
-// ACCELERATION_STRUCTURE_READ. Vulkan forbids that bit when the destination also
-// names another shader stage, unless the rayQuery feature is enabled - and this
-// renderer never issues an inline query, since the hybrid shift needs the payload
-// that only a pipeline trace carries, so the feature is not requested.
-//
-// Dropping the bit is not merely a workaround for the validation message: none of
-// these barriers guard the acceleration structure. They order reservoir, surface,
-// pairing and work-list memory between passes. The TLAS is built and synchronized
-// by the scene runtime before any of this is recorded.
-//
-// Everything else is nvpro's own inference, so the ordering these barriers
-// establish is unchanged.
-constexpr VkAccessFlags2 InferAccessWithoutAccelerationStructure(VkPipelineStageFlags2 stages, bool read)
-{
-  return nvvk::inferAccessMaskFromStage(stages, read) & ~VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-}
+// CmdReSTIRPTMemoryBarrier
+// Orders memory writes made in srcStages before reads and writes in dstStages. A memory barrier names no resource, so one call covers every buffer the passes share.
 
 void CmdReSTIRPTMemoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStages, VkPipelineStageFlags2 dstStages)
 {
-  nvvk::cmdMemoryBarrier(cmd, srcStages, dstStages, InferAccessWithoutAccelerationStructure(srcStages, false),
-                         InferAccessWithoutAccelerationStructure(dstStages, true));
+  rtpt::CmdMemoryBarrier(cmd, { .stages = srcStages, .access = VK_ACCESS_2_MEMORY_WRITE_BIT }, { .stages = dstStages, .access = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT });
 }
 
-VkShaderModuleCreateInfo GetInitialSamplingShaderCode()
+// Shader code
+// SPIR-V compiled by DXC at build time and embedded through the generated headers included above.
+
+std::span<const uint32_t> GetInitialSamplingShaderCode()
 {
-  return nvsamples::GetShaderModuleCreateInfo(std::span(ReSTIRPTInitialSampling_slang));
+  return std::span(ReSTIRPTInitialSampling_hlsl);
 }
 
-VkShaderModuleCreateInfo GetTemporalShaderCode()
+std::span<const uint32_t> GetTemporalShaderCode()
 {
-  return nvsamples::GetShaderModuleCreateInfo(std::span(ReSTIRPTTemporalResampling_slang));
+  return std::span(ReSTIRPTTemporalResampling_hlsl);
 }
 
-VkShaderModuleCreateInfo GetSpatialShaderCode()
+std::span<const uint32_t> GetSpatialShaderCode()
 {
-  return nvsamples::GetShaderModuleCreateInfo(std::span(ReSTIRPTSpatialResampling_slang));
+  return std::span(ReSTIRPTSpatialResampling_hlsl);
 }
 
-VkShaderModuleCreateInfo GetSpatialPrepassShaderCode()
+std::span<const uint32_t> GetSpatialPrepassShaderCode()
 {
-  return nvsamples::GetShaderModuleCreateInfo(std::span(ReSTIRPTSpatialPrepass_slang));
+  return std::span(ReSTIRPTSpatialPrepass_hlsl);
 }
 
-VkShaderModuleCreateInfo GetFinalShadingShaderCode()
+std::span<const uint32_t> GetFinalShadingShaderCode()
 {
-  return nvsamples::GetShaderModuleCreateInfo(std::span(ReSTIRPTFinalShading_slang));
+  return std::span(ReSTIRPTFinalShading_hlsl);
 }
 
-VkShaderModuleCreateInfo GetDuplicationMapShaderCode()
+std::span<const uint32_t> GetDuplicationMapShaderCode()
 {
-  return nvsamples::GetShaderModuleCreateInfo(std::span(ReSTIRPTDuplicationMap_slang));
+  return std::span(ReSTIRPTDuplicationMap_hlsl);
 }
 
-VkShaderModuleCreateInfo GetLightTilesShaderCode()
+std::span<const uint32_t> GetLightTilesShaderCode()
 {
-  return nvsamples::GetShaderModuleCreateInfo(std::span(ReSTIRPTLightTiles_slang));
+  return std::span(ReSTIRPTLightTiles_hlsl);
 }
 
-VkShaderModuleCreateInfo GetPrepassClassifyShaderCode()
+std::span<const uint32_t> GetPrepassClassifyShaderCode()
 {
-  return nvsamples::GetShaderModuleCreateInfo(std::span(ReSTIRPTPrepassClassify_slang));
+  return std::span(ReSTIRPTPrepassClassify_hlsl);
 }
 
-VkShaderModuleCreateInfo GetPrepassOffsetsShaderCode()
+std::span<const uint32_t> GetPrepassOffsetsShaderCode()
 {
-  return nvsamples::GetShaderModuleCreateInfo(std::span(ReSTIRPTPrepassOffsets_slang));
+  return std::span(ReSTIRPTPrepassOffsets_hlsl);
 }
 
 }  // namespace
 
 ReSTIRPTRenderer::ReSTIRPTRenderer(const CreateInfo& createInfo)
-    : m_App(createInfo.app)
-    , m_Allocator(createInfo.allocator)
+    : m_Device(createInfo.device)
+    , m_GpuResources(createInfo.resources)
+    , m_Diagnostics(createInfo.diagnostics)
+    , m_BlueNoise(createInfo.blueNoise)
+    , m_FrameSlotCount(createInfo.frameSlotCount)
     , m_MaxTextureDescriptors(createInfo.maxTextureDescriptors)
-    , m_Resources(ReSTIRPTResources::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
-    , m_DenoiserResources(DenoiserResources::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
-    , m_NrdDenoiser(NrdDenoiser::CreateInfo{.app = createInfo.app, .allocator = createInfo.allocator})
+    , m_Resources(ReSTIRPTResources::CreateInfo { .resources = createInfo.resources, .diagnostics = createInfo.diagnostics })
+    , m_History(ResolveHistory::CreateInfo { .device = createInfo.device, .resources = createInfo.resources, .diagnostics = createInfo.diagnostics, .frameSlotCount = createInfo.frameSlotCount })
 {
 }
 
@@ -141,12 +127,15 @@ ReSTIRPTRenderer::~ReSTIRPTRenderer() = default;
 
 void ReSTIRPTRenderer::Initialize()
 {
-  if(m_App == nullptr || m_Allocator == nullptr || m_MaxTextureDescriptors == 0)
+  if(m_Device == nullptr || m_GpuResources == nullptr || m_BlueNoise == nullptr || m_FrameSlotCount == 0 || m_MaxTextureDescriptors == 0)
   {
     return;
   }
 
+  // Device objects
   // Vulkan objects are created once; viewport-sized buffers wait until a frame arrives.
+  // The ray tracing properties come first because the bounce limit they produce sizes the initial sampling pipeline's recursion depth, and the layouts come before every pipeline built against them.
+
   QueryRayTracingProperties();
   CreateDescriptorSetLayout();
   CreateParameterBuffers();
@@ -155,26 +144,28 @@ void ReSTIRPTRenderer::Initialize()
   CreateTemporalPipeline();
   CreateSpatialPipeline();
   CreateFinalShadingPipeline();
-  m_NrdDenoiser.Initialize();
+  m_History.Initialize();
   InvalidateHistory();
 }
 
 void ReSTIRPTRenderer::Destroy()
 {
-  if(m_Allocator == nullptr)
+  // Without an allocator and a device nothing below was ever created, and every destroy call below needs the device handle.
+  if(m_GpuResources == nullptr || m_Device == nullptr)
   {
     return;
   }
 
-  VkDevice device = m_Allocator->getDevice();
+  VkDevice device = m_Device->Handle();
 
+  // Dependents
   // Destroy dependents before the descriptor/pipeline layout state they were built against.
-  m_NrdDenoiser.Destroy();
-  m_DenoiserResources.Destroy();
+
+  m_History.Destroy();
   m_Resources.Destroy();
-  DestroyReSTIRRayTracingPass(m_Allocator, m_InitialSamplingPass);
-  DestroyReSTIRRayTracingPass(m_Allocator, m_TemporalPass);
-  DestroyReSTIRRayTracingPass(m_Allocator, m_SpatialPass);
+  DestroyReSTIRRayTracingPass(device, m_InitialSamplingPass);
+  DestroyReSTIRRayTracingPass(device, m_TemporalPass);
+  DestroyReSTIRRayTracingPass(device, m_SpatialPass);
 
   vkDestroyPipeline(device, m_FinalShadingPipeline, nullptr);
   m_FinalShadingPipeline = VK_NULL_HANDLE;
@@ -186,33 +177,34 @@ void ReSTIRPTRenderer::Destroy()
   m_PrepassClassifyPipeline = VK_NULL_HANDLE;
   vkDestroyPipeline(device, m_PrepassOffsetsPipeline, nullptr);
   m_PrepassOffsetsPipeline = VK_NULL_HANDLE;
-  DestroyReSTIRRayTracingPass(m_Allocator, m_SpatialPrepass);
+  DestroyReSTIRRayTracingPass(device, m_SpatialPrepass);
 
-  for(nvvk::Buffer& parameterBuffer : m_ParameterBuffers)
+  for(rtpt::Buffer& parameterBuffer : m_ParameterBuffers)
   {
-    m_Allocator->destroyBuffer(parameterBuffer);
-    parameterBuffer = {};
+    parameterBuffer.Reset();
   }
+
   m_ParameterBuffers.clear();
+
+  // Layouts
+  // Released only after every pipeline and descriptor consumer above is gone.
 
   vkDestroyPipelineLayout(device, m_PipelineLayout, nullptr);
   m_PipelineLayout = VK_NULL_HANDLE;
 
-  m_DescPack.deinit();
+  m_DescPack.Destroy();
   m_ParameterContext.reset();
-  m_AccumulatedFrames        = 0;
-  m_HistoryInvalidated       = true;
-  m_HasAccumulationSignature = false;
-  m_HasDenoiserSignature     = false;
-  m_NeedsHistoryClear        = true;
+
+  // CPU state
+  // Reset to the same state a fresh renderer starts in, so a later Initialize begins from cleared history.
+
+  m_RngFrameNumber    = 0;
+  m_NeedsHistoryClear = true;
 }
 
 bool ReSTIRPTRenderer::IsReady() const
 {
-  return m_PipelineLayout != VK_NULL_HANDLE && IsReSTIRRayTracingPassReady(m_InitialSamplingPass)
-         && IsReSTIRRayTracingPassReady(m_TemporalPass) && IsReSTIRRayTracingPassReady(m_SpatialPass)
-         && m_FinalShadingPipeline != VK_NULL_HANDLE && m_DuplicationMapPipeline != VK_NULL_HANDLE
-         && m_LightTilePipeline != VK_NULL_HANDLE;
+  return m_PipelineLayout != VK_NULL_HANDLE && IsReSTIRRayTracingPassReady(m_InitialSamplingPass) && IsReSTIRRayTracingPassReady(m_TemporalPass) && IsReSTIRRayTracingPassReady(m_SpatialPass) && IsReSTIRRayTracingPassReady(m_SpatialPrepass) && m_FinalShadingPipeline != VK_NULL_HANDLE && m_DuplicationMapPipeline != VK_NULL_HANDLE && m_LightTilePipeline != VK_NULL_HANDLE && m_PrepassClassifyPipeline != VK_NULL_HANDLE && m_PrepassOffsetsPipeline != VK_NULL_HANDLE;
 }
 
 ReSTIRPTSettings& ReSTIRPTRenderer::GetSettings()
@@ -227,7 +219,8 @@ const ReSTIRPTSettings& ReSTIRPTRenderer::GetSettings() const
 
 uint32_t ReSTIRPTRenderer::GetAccumulatedFrameCount() const
 {
-  return IsAccumulationResolveMode(m_Settings.common.resolveMode) ? m_AccumulatedFrames : 0;
+  // The counter is only meaningful while an accumulation resolve mode is active.
+  return IsAccumulationResolveMode(m_Settings.common.resolveMode) ? m_History.GetAccumulatedFrameCount() : 0;
 }
 
 uint32_t ReSTIRPTRenderer::GetPipelineBounceLimit() const
@@ -243,24 +236,22 @@ VkDeviceSize ReSTIRPTRenderer::GetReservoirMemoryUsage() const
 void ReSTIRPTRenderer::InvalidateHistory()
 {
   // CPU-side flags reset immediately; GPU buffers are cleared on the next command buffer.
-  m_AccumulatedFrames        = 0;
-  m_HistoryInvalidated       = true;
-  m_HasAccumulationSignature = false;
-  m_HasDenoiserSignature     = false;
-  m_NeedsHistoryClear        = true;
+
+  m_History.InvalidateHistory();
   m_FrameContext.InvalidateHistory();
-  m_NrdDenoiser.InvalidateHistory();
-  // Dropping the parameter context resets the reservoir rotation to a known
-  // first-frame state, so no pass can read an array the new sequence never wrote.
+
+  m_NeedsHistoryClear = true;
+
+  // Dropping the parameter context resets the reservoir rotation to a known first-frame state, so no pass can read an array the new sequence never wrote.
   m_ParameterContext.reset();
 }
 
-nvvk::DescriptorPack& ReSTIRPTRenderer::GetDescriptorPack()
+rtpt::DescriptorPack& ReSTIRPTRenderer::GetDescriptorPack()
 {
   return m_DescPack;
 }
 
-const nvvk::DescriptorPack& ReSTIRPTRenderer::GetDescriptorPack() const
+const rtpt::DescriptorPack& ReSTIRPTRenderer::GetDescriptorPack() const
 {
   return m_DescPack;
 }
@@ -272,48 +263,63 @@ void ReSTIRPTRenderer::Render(const RenderInput& input)
     return;
   }
 
-  const VkExtent2D viewportSize = input.gBuffers->getSize();
+  const VkExtent2D viewportSize = input.output.extent;
+
   if(viewportSize.width == 0 || viewportSize.height == 0)
   {
     return;
   }
 
-  EnsureViewportResources(viewportSize);
-  const FrameState frameState = BeginFrame(input, viewportSize);
+  // Frame setup
+  // Resources are sized and history decisions are made before anything is written, because the parameter block and descriptors describe those resources. NRD's frame setup is part of those decisions.
 
-  // The descriptor set index follows nvpro's frame cycle to avoid overwriting in-flight data.
-  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(m_App->getFrameCycleIndex(), m_ParameterBuffers.size());
+  EnsureViewportResources(viewportSize);
+
+  const ResolveHistory::FrameState frameState = BeginFrame(input, viewportSize);
+
+  // Uploads and transitions
+  // Everything the passes read - parameters, descriptors, image layouts, cleared history - is settled before the first pass is recorded.
+
+  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_ParameterBuffers.size());
+
   UpdateParameterBuffer(frameSetIndex, BuildShaderParameters());
   UpdateFrameDescriptors(input);
-  PrepareDenoiser(input, frameState);
-  PrepareStorageImages(input, frameState.denoiserSignalsNeeded);
+  PrepareStorageImages(input, frameState.denoiseEnabled);
   ClearHistoryIfNeeded(input.cmd);
 
-  RecordPasses(input, BuildPushConstant(input, frameState.denoiserSignalsNeeded));
-  RunDenoiserIfNeeded(input, frameState);
+  // Passes
+  // The frame index only advances in FinishFrame, after the passes that used it are recorded.
+  // NRD reads the accumulation image as its noisy beauty input and composes into the output target.
+
+  RecordPasses(input, BuildPushConstant(input, frameState));
+
+  m_History.Denoise(input.cmd, frameState, m_Resources.GetAccumulationImage().descriptor.imageView, input.output.view, m_Settings.common.denoiserDebugView);
+
   FinishFrame(frameState);
 }
 
 bool ReSTIRPTRenderer::CanRender(const RenderInput& input) const
 {
-  return IsReady() && input.cmd != VK_NULL_HANDLE && input.sceneResource != nullptr && input.sceneInfo != nullptr
-         && input.topLevelAS != nullptr && input.topLevelAS->accel != VK_NULL_HANDLE && input.gBuffers != nullptr;
+  return IsReady() && input.cmd != VK_NULL_HANDLE && input.sceneResource != nullptr && input.sceneInfo != nullptr && input.topLevelAS != nullptr && input.topLevelAS->accel != VK_NULL_HANDLE && input.output;
 }
 
 void ReSTIRPTRenderer::EnsureViewportResources(VkExtent2D viewportSize)
 {
   // Viewport-sized resources must exist before descriptors point at them.
+
   m_FrameContext.EnsureViewport(viewportSize);
   m_Resources.EnsureForViewport(viewportSize);
-  m_DenoiserResources.EnsureForViewport(viewportSize);
+  m_History.EnsureViewportResources(viewportSize);
   EnsureParameterContext(viewportSize);
 }
 
 void ReSTIRPTRenderer::EnsureParameterContext(VkExtent2D viewportSize)
 {
+  // An existing context is kept while the resolution matches, since rebuilding it restarts the reservoir rotation.
   if(m_ParameterContext != nullptr)
   {
     const ReSTIRPTStaticParameters& staticParameters = m_ParameterContext->GetStaticParameters();
+
     if(staticParameters.renderWidth == viewportSize.width && staticParameters.renderHeight == viewportSize.height)
     {
       return;
@@ -321,41 +327,22 @@ void ReSTIRPTRenderer::EnsureParameterContext(VkExtent2D viewportSize)
   }
 
   // Reservoir addressing math depends on resolution, so the context is rebuilt with it.
-  m_ParameterContext = std::make_unique<ReSTIRPTParameterContext>(ReSTIRPTStaticParameters{
-      .renderWidth  = viewportSize.width,
-      .renderHeight = viewportSize.height,
-  });
+  m_ParameterContext = std::make_unique<ReSTIRPTParameterContext>(ReSTIRPTStaticParameters { .renderWidth = viewportSize.width, .renderHeight = viewportSize.height, });
+
   m_NeedsHistoryClear = true;
 }
 
-ReSTIRPTRenderer::FrameState ReSTIRPTRenderer::BeginFrame(const RenderInput& input, VkExtent2D viewportSize)
+ResolveHistory::FrameState ReSTIRPTRenderer::BeginFrame(const RenderInput& input, VkExtent2D viewportSize)
 {
-  FrameState frameState{};
-  frameState.viewportSize          = viewportSize;
-  frameState.referenceRadianceActive = m_Settings.common.referencePathTracer;
-  frameState.accumulationSignature = MakeReSTIRPTAccumulationSignature(*input.sceneInfo, input.topLevelAS->address, viewportSize);
-  frameState.denoiseEnabled        = IsDenoiseResolveMode(m_Settings.common.resolveMode);
-  // The reference view replaces the beauty image with an unresampled one, so the
-  // guide buffers would describe a different render than the signals do.
-  frameState.denoiserSignalsNeeded = frameState.denoiseEnabled && !frameState.referenceRadianceActive;
-  frameState.denoiserSignature = MakeReSTIRPTDenoiserHistorySignature(*input.sceneInfo, input.topLevelAS->address, viewportSize);
+  // Frame decisions
+  // Every choice that must stay consistent while one frame is recorded is taken once here. The signatures in ResolveHistory tell us when accumulated pixels, or NRD's history, no longer describe the same image.
+  // The reference view replaces the beauty image with an unresampled one, so the guide buffers would describe a different render than the signals do. Its signals are reported unavailable: final shading writes none, NRD stands down, and NRD's history is dropped because the reference image comes from a different estimator and NRD would otherwise reproject frames from both.
 
-  // The signature tells us when accumulated pixels no longer describe the same image.
-  const bool accumulationSignatureChanged =
-      !m_HasAccumulationSignature
-      || std::memcmp(&frameState.accumulationSignature, &m_LastAccumulationSignature, sizeof(AccumulationSignature)) != 0;
-  const bool historyInvalidated =
-      m_HistoryInvalidated || (IsAccumulationResolveMode(m_Settings.common.resolveMode) && accumulationSignatureChanged);
+  const ResolveHistory::FrameState frameState = m_History.BeginFrame(ResolveHistory::FrameInput { .sceneInfo = input.sceneInfo, .topLevelAsAddress = input.topLevelAS->address, .viewportSize = viewportSize, .resolveMode = m_Settings.common.resolveMode, .denoiserSignalsAvailable = !m_Settings.common.referencePathTracer, .denoiserSettings = &m_Settings.common.denoiserSettings, .frameSlot = input.frameSlot, .frameTimeMilliseconds = input.frameTimeMilliseconds });
 
-  const bool denoiserSignatureChanged =
-      !m_HasDenoiserSignature
-      || std::memcmp(&frameState.denoiserSignature, &m_LastDenoiserSignature, sizeof(DenoiserSignature)) != 0;
-  frameState.denoiserHistoryInvalidated =
-      m_HistoryInvalidated || (frameState.denoiseEnabled && denoiserSignatureChanged);
-
-  if(historyInvalidated)
+  // Restarting history also restarts the reservoir rotation, so the parameter context is rebuilt rather than kept. Only an accumulation restart or explicit invalidation does this: a camera move with accumulation off must keep the reservoirs temporal reuse depends on.
+  if(frameState.accumulationRestarted)
   {
-    m_AccumulatedFrames = 0;
     m_FrameContext.InvalidateHistory();
     m_ParameterContext.reset();
     EnsureParameterContext(viewportSize);
@@ -370,16 +357,15 @@ shaderio::ReSTIRPTParameters ReSTIRPTRenderer::BuildShaderParameters()
   // The UI value cannot exceed the recursion depth this device's pipeline supports.
   m_Settings.initialSampling.maxBounces = std::min(m_Settings.initialSampling.maxBounces, m_PipelineBounceLimit);
 
-  // SetFrameIndex advances the reservoir rotation and must run exactly once per
-  // recorded frame, before the other setters. See ReSTIRPTParameterContext.
+  // Reservoir rotation
+  // SetFrameIndex advances the reservoir rotation and must run exactly once per recorded frame, before the other setters. See ReSTIRPTParameterContext.
+
   m_ParameterContext->SetFrameIndex(m_FrameContext.GetFrameIndex());
 
-  // The rotation must describe the passes that ACTUALLY run, not the ones the user
-  // selected. Claiming a pass that does not exist points shadingInputBufferIndex at
-  // an array nothing wrote this frame, which silently shades the previous frame's
-  // samples - and a static accumulated image hides that completely, because a
-  // one-frame lag averages away. Both reuse passes now exist, so the requested
-  // mode is also the effective one.
+  // Parameter blocks
+  // The rotation must describe the passes that ACTUALLY run, not the ones the user selected. Claiming a pass that does not exist points shadingInputBufferIndex at an array nothing wrote this frame, which silently shades the previous frame's samples - and a static accumulated image hides that completely, because a one-frame lag averages away.
+  // Both reuse passes now exist, so the requested mode is also the effective one.
+
   m_ParameterContext->SetResamplingMode(m_Settings.common.resamplingMode);
   m_ParameterContext->SetInitialSamplingParameters(m_Settings.initialSampling);
   m_ParameterContext->SetShiftParameters(m_Settings.shift);
@@ -392,27 +378,28 @@ shaderio::ReSTIRPTParameters ReSTIRPTRenderer::BuildShaderParameters()
   // Mirror the derived sigma back so the UI reports the value the shaders receive.
   m_Settings.spatialResampling.pairingSigma = m_ParameterContext->GetSpatialResamplingParameters().pairingSigma;
 
-  // Section 3. Textures are rebuilt only when sigma moves, which happens when the
-  // user changes the spatial radius. If generation fails, paired reuse is forced
-  // off for this frame rather than run against textures that are not involutions.
-  std::array<ReSTIRPTPairingTextureParameters, RESTIR_PT_MAX_PAIRING_TEXTURES> pairingTextures{};
+  // Pairing textures
+  // Section 3. Textures are rebuilt only when sigma moves, which happens when the user changes the spatial radius.
+  // If generation fails, paired reuse is forced off for this frame rather than run against textures that are not involutions.
+
+  std::array<ReSTIRPTPairingTextureParameters, RESTIR_PT_MAX_PAIRING_TEXTURES> pairingTextures {};
   ReSTIRPTSpatialResamplingParameters spatialParameters = m_ParameterContext->GetSpatialResamplingParameters();
+
   if(spatialParameters.enablePairedSpatialReuse != 0u)
   {
     if(m_Resources.EnsurePairingTextures(spatialParameters.pairingSigma))
     {
       pairingTextures = m_Resources.GetPairingTextureParameters();
 
-      // Re-randomize the pairing every frame. A pairing texture is self-inverting,
-      // so left alone it would pair the same two pixels for the lifetime of the
-      // render and correlate them permanently - the very failure Section 5 exists
-      // to suppress. Conjugating by a symmetry keeps the involution intact while
-      // changing which pixels meet.
+      // Per-frame symmetry
+      // Re-randomize the pairing every frame. A pairing texture is self-inverting, so left alone it would pair the same two pixels for the lifetime of the render and correlate them permanently - the very failure Section 5 exists to suppress.
+      // Conjugating by a symmetry keeps the involution intact while changing which pixels meet.
+
       uint32_t randomState = m_ParameterContext->GetRuntimeParameters().uniformRandomNumber;
+
       for(ReSTIRPTPairingTextureParameters& texture : pairingTextures)
       {
-        // xorshift32: the per-frame value only has to decorrelate the three slots
-        // from each other, not to be a good sampler.
+        // xorshift32: the per-frame value only has to decorrelate the three slots from each other, not to be a good sampler.
         randomState ^= randomState << 13;
         randomState ^= randomState >> 17;
         randomState ^= randomState << 5;
@@ -429,7 +416,10 @@ shaderio::ReSTIRPTParameters ReSTIRPTRenderer::BuildShaderParameters()
     }
   }
 
-  return shaderio::ReSTIRPTParameters{
+  // Assembly
+  // The spatial block comes from the local copy, so a failed pairing generation reaches the shaders as paired reuse turned off.
+
+  return shaderio::ReSTIRPTParameters {
       .runtimeParams         = m_ParameterContext->GetRuntimeParameters(),
       .reservoirBufferParams = m_ParameterContext->GetReservoirBufferParameters(),
       .bufferIndices         = m_ParameterContext->GetBufferIndices(),
@@ -437,119 +427,73 @@ shaderio::ReSTIRPTParameters ReSTIRPTRenderer::BuildShaderParameters()
       .shift                 = m_ParameterContext->GetShiftParameters(),
       .temporalResampling    = m_ParameterContext->GetTemporalResamplingParameters(),
       .spatialResampling     = spatialParameters,
-      .pairingTextures       = {pairingTextures[0], pairingTextures[1], pairingTextures[2]},
+      .pairingTextures       = { pairingTextures[0], pairingTextures[1], pairingTextures[2] },
       .decorrelation         = m_ParameterContext->GetDecorrelationParameters(),
       .shading               = m_ParameterContext->GetShadingParameters(),
       .nee                   = m_ParameterContext->GetNeeParameters(),
   };
 }
 
-shaderio::ReSTIRPTPushConstant ReSTIRPTRenderer::BuildPushConstant(const RenderInput& input, bool denoiserSignalsNeeded) const
+shaderio::ReSTIRPTPushConstant ReSTIRPTRenderer::BuildPushConstant(const RenderInput& input, const ResolveHistory::FrameState& frameState) const
 {
+  // Flags
+  // Per-frame switches travel in the push constant rather than the parameter block.
+
   uint32_t flags = 0u;
-  if(denoiserSignalsNeeded)
+
+  if(frameState.denoiseEnabled)
   {
     flags |= shaderio::eReSTIRPTFlagWriteDenoiserSignals;
   }
-  if(IsAccumulationResolveMode(m_Settings.common.resolveMode))
+
+  if(frameState.accumulateEnabled)
   {
     flags |= shaderio::eReSTIRPTFlagAccumulate;
   }
+
   if(m_Settings.common.referencePathTracer)
   {
     flags |= shaderio::eReSTIRPTFlagReferenceRadiance;
   }
+
   if(UseSortedPrepass())
   {
     flags |= shaderio::eReSTIRPTFlagSortedPrepass;
   }
 
-  return shaderio::ReSTIRPTPushConstant{
-      .sceneInfoAddress  = (shaderio::GltfSceneInfo*)input.sceneResource->bSceneInfo.address,
-      // Advancing every frame keeps the sampler decorrelated even while
-      // accumulation is paused or reset.
-      .rngFrameNumber    = m_FrameContext.GetFrameIndex(),
-      .accumulatedFrames = IsAccumulationResolveMode(m_Settings.common.resolveMode) ? m_AccumulatedFrames : 0u,
-      .maxBounces        = m_Settings.initialSampling.maxBounces,
-      .flags             = flags,
-      .reblurHitDistanceParams = {m_Settings.common.denoiserSettings.hitDistanceA,
-                                  m_Settings.common.denoiserSettings.hitDistanceB,
-                                  m_Settings.common.denoiserSettings.hitDistanceC},
+  // Push constant
+
+  return shaderio::ReSTIRPTPushConstant {
+      .sceneInfoAddress        = (shaderio::GltfSceneInfo*)input.sceneResource->bSceneInfo.address,
+      // Advancing every frame keeps the sampler decorrelated even while accumulation is paused or reset.
+      .rngFrameNumber          = m_RngFrameNumber,
+      .accumulatedFrames       = frameState.accumulateEnabled ? m_History.GetAccumulatedFrameCount() : 0u,
+      .maxBounces              = m_Settings.initialSampling.maxBounces,
+      .flags                   = flags,
+      .reblurHitDistanceParams = { m_Settings.common.denoiserSettings.hitDistanceA, m_Settings.common.denoiserSettings.hitDistanceB, m_Settings.common.denoiserSettings.hitDistanceC },
   };
-}
-
-void ReSTIRPTRenderer::PrepareDenoiser(const RenderInput& input, const FrameState& frameState)
-{
-  if(!frameState.denoiseEnabled)
-  {
-    return;
-  }
-
-  // NRD needs its camera history and guide-buffer descriptors settled before the
-  // passes that write into them are recorded.
-  m_NrdDenoiser.PrepareFrame(NrdDenoiser::FrameInput{
-                                 .sceneInfo          = input.sceneInfo,
-                                 .viewportSize       = frameState.viewportSize,
-                                 .historyInvalidated = frameState.denoiserHistoryInvalidated,
-                                 // Final shading demodulates both signals, so the
-                                 // compose pass has to put the material back.
-                                 .enableMaterialDemodulation = true,
-                                 .settings                   = &m_Settings.common.denoiserSettings,
-                             },
-                             m_DenoiserResources);
-}
-
-void ReSTIRPTRenderer::RunDenoiserIfNeeded(const RenderInput& input, const FrameState& frameState)
-{
-  if(!frameState.denoiseEnabled)
-  {
-    return;
-  }
-
-  if(frameState.referenceRadianceActive)
-  {
-    // The reference image comes from a different estimator, so NRD history must not
-    // continue across the switch: it would reproject frames from both.
-    m_NrdDenoiser.InvalidateHistory();
-    return;
-  }
-
-  if(m_NrdDenoiser.IsReady())
-  {
-    m_NrdDenoiser.Denoise(input.cmd, m_DenoiserResources, m_Resources.GetAccumulationImage().descriptor.imageView,
-                          input.gBuffers->getColorImageView(input.renderedImageIndex), m_Settings.common.denoiserDebugView,
-                          frameState.viewportSize);
-  }
 }
 
 void ReSTIRPTRenderer::PrepareStorageImages(const RenderInput& input, bool denoiserSignalsNeeded)
 {
   // Initial sampling and final shading both write storage images.
-  TransitionReSTIRStorageImages(input.cmd, const_cast<nvvk::Image&>(m_Resources.GetAccumulationImage()),
-                                  input.gBuffers->getColorImage(input.renderedImageIndex),
-                                  VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  TransitionReSTIRStorageImages(input.cmd, const_cast<rtpt::Image&>(m_Resources.GetAccumulationImage()), input.output.image, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
   if(!denoiserSignalsNeeded)
   {
     return;
   }
 
-  // The guide buffers are written by final shading, which is a compute pass here
-  // rather than the ray tracing pass ReSTIR DI uses.
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetMotionVectorsImage(), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetNormalRoughnessImage(), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetBaseColorMetalnessImage(), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetViewZImage(), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetDiffuseRadianceHitDistanceImage(),
-                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetSpecularRadianceHitDistanceImage(),
-                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-  TransitionStorageImageForWrite(input.cmd, m_DenoiserResources.GetSpecularDemodulationFactorImage(),
-                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  // NRD guide images
+  // The guide buffers are written by final shading, which is a compute pass here, so only the compute stage needs them in a writable layout.
+  // Every frame records a barrier, so the write is ordered after the previous frame's writes to the same images.
+
+  m_History.TransitionGuideImagesForWrite(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, StorageImageWriteOrdering::eOrderAfterPreviousWrites);
 }
 
 void ReSTIRPTRenderer::ClearHistoryIfNeeded(VkCommandBuffer cmd)
 {
+  // The clear has to be recorded into a command buffer, so invalidation only sets a flag and the clear happens here.
   if(m_NeedsHistoryClear)
   {
     ClearHistoryBuffers(cmd);
@@ -559,54 +503,53 @@ void ReSTIRPTRenderer::ClearHistoryIfNeeded(VkCommandBuffer cmd)
 
 void ReSTIRPTRenderer::ClearHistoryBuffers(VkCommandBuffer cmd)
 {
-  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(cmd, "ReSTIR PT Clear History");
+  // Cleared buffers
+  // Zeroed reservoirs read back as M = 0, which every pass treats as "no sample" rather than as a confident black one.
+  // One constant sizes both the buffer list and the barrier list below. They used to be written independently, and when a buffer was dropped from the list the barrier array kept its old size: the extra element stayed default-constructed and was submitted with sType 0 and a null VkBuffer.
+  // Nothing crashed, because a barrier for no buffer orders nothing - it is only visible with validation layers on.
 
-  // Zeroed reservoirs read back as M = 0, which every pass treats as "no sample"
-  // rather than as a confident black one.
-  //
-  // One constant sizes both the buffer list and the barrier list below. They used to
-  // be written independently, and when a buffer was dropped from the list the barrier
-  // array kept its old size: the extra element stayed default-constructed and was
-  // submitted with sType 0 and a null VkBuffer. Nothing crashed, because a barrier
-  // for no buffer orders nothing - it is only visible with validation layers on.
   constexpr size_t kClearedBufferCount = 5;
-  const std::array<const nvvk::Buffer*, kClearedBufferCount> buffers{
+
+  const std::array<const rtpt::Buffer*, kClearedBufferCount> buffers {
       &m_Resources.GetPathReservoirBuffer(),
       &m_Resources.GetSurfaceBuffer(0),
       &m_Resources.GetSurfaceBuffer(1),
-      // A stale duplication score would throttle the cap on history that no longer
-      // exists, so it is cleared with everything else it describes.
+      // A stale duplication score would throttle the cap on history that no longer exists, so it is cleared with everything else it describes.
       &m_Resources.GetDuplicationBuffer(),
       // Likewise a motion vector describing a camera pose that no longer applies.
       &m_Resources.GetMotionVectorBuffer(),
   };
 
-  // A previous frame may still be executing the passes that write these buffers,
-  // and every fill below is a write. Without this the fill races that shader write
-  // as a write-after-write hazard: the barrier AFTER the fills orders the fills
-  // against later reads, but nothing can retroactively order them against earlier
-  // work. Both the source stages and TRANSFER_WRITE on the destination side are
-  // spelled out because the inferred masks would produce TRANSFER_READ, which does
-  // not cover a fill.
-  const VkMemoryBarrier2 clearWriteBarrier{
+  // Order against earlier frames
+  // A previous frame may still be executing the passes that write these buffers, and every fill below is a write. Without this the fill races that shader write as a write-after-write hazard: the barrier AFTER the fills orders the fills against later reads, but nothing can retroactively order them against earlier work.
+  // Both the source stages and TRANSFER_WRITE on the destination side are spelled out because the inferred masks would produce TRANSFER_READ, which does not cover a fill.
+
+  const VkMemoryBarrier2 clearWriteBarrier {
       .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
       .srcStageMask  = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
       .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT,
       .dstStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
       .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
   };
-  const VkDependencyInfo clearWriteDependency{
+
+  const VkDependencyInfo clearWriteDependency {
       .sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
       .memoryBarrierCount = 1,
       .pMemoryBarriers    = &clearWriteBarrier,
   };
+
   vkCmdPipelineBarrier2(cmd, &clearWriteDependency);
 
-  std::array<VkBufferMemoryBarrier2, kClearedBufferCount> barriers{};
+  // Fill
+  // Each buffer is zeroed and gets a barrier handing it back to the shader stages that read and write history.
+
+  std::array<VkBufferMemoryBarrier2, kClearedBufferCount> barriers {};
+
   for(size_t i = 0; i < buffers.size(); ++i)
   {
     vkCmdFillBuffer(cmd, buffers[i]->buffer, 0, buffers[i]->bufferSize, 0);
-    barriers[i] = VkBufferMemoryBarrier2{
+
+    barriers[i] = VkBufferMemoryBarrier2 {
         .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
         .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
         .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
@@ -618,18 +561,21 @@ void ReSTIRPTRenderer::ClearHistoryBuffers(VkCommandBuffer cmd)
     };
   }
 
+  // Order against later passes
   // Transfer writes must be visible before ray tracing/compute reads them.
-  const VkDependencyInfo dependencyInfo{
+
+  const VkDependencyInfo dependencyInfo {
       .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
       .bufferMemoryBarrierCount = uint32_t(barriers.size()),
       .pBufferMemoryBarriers    = barriers.data(),
   };
+
   vkCmdPipelineBarrier2(cmd, &dependencyInfo);
 }
 
-// Section 6.2.2's compacted pre-pass. Plain on/off: an accumulation-based heuristic
-// was tried and removed, because the divergence it guards against also occurs with a
-// moving camera and accumulation off (see ReSTIRPTSettings.h).
+// UseSortedPrepass
+// Section 6.2.2's compacted pre-pass. Plain on/off: an accumulation-based heuristic was tried and removed, because the divergence it guards against also occurs with a moving camera and accumulation off (see ReSTIRPTSettings.h).
+
 bool ReSTIRPTRenderer::UseSortedPrepass() const
 {
   return m_Settings.common.sortPrepass != 0u;
@@ -637,81 +583,60 @@ bool ReSTIRPTRenderer::UseSortedPrepass() const
 
 void ReSTIRPTRenderer::RecordPasses(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
+  // Cross-frame ordering
   // Order this frame's first writes against the previous frame's last reads.
-  //
-  // Every buffer this renderer owns is a single allocation shared by all frames in
-  // flight - reservoirs, surfaces, paired shifts, shading weights, motion vectors.
-  // Only the descriptor SETS rotate. Submission order does not imply an execution
-  // or memory dependency, command buffer boundaries add none, and nvapp's fence
-  // waits for the previous use of this frame's ring slot rather than for the
-  // immediately preceding frame - which, with two frames in flight, is not the
-  // frame whose reads must complete first.
-  //
-  // Unconditional on purpose. The only other barrier that could serve is the one
-  // after the duplication map, and that is conditional on decorrelation and
-  // temporal reuse both being enabled, so it cannot establish this for every mode.
-  // It matters most with two reservoir arrays, where initial sampling overwrites
-  // the array the previous frame's spatial pass read neighbours from, leaving no
-  // slack at all.
-  // TRANSFER and DRAW_INDIRECT are in scope as well as the shader stages, because
-  // two of this renderer's cross-frame accesses are neither: the prepass counter is
-  // cleared with vkCmdFillBuffer and then read as indirect trace arguments, and the
-  // diagnostic readback copies the debug buffer. Leaving those out let frame N+1's
-  // clear race frame N's indirect read - which silently shrinks a dispatch, and so
-  // looks like a speedup rather than a fault.
-  constexpr VkPipelineStageFlags2 kFrameStages = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR
-                                                 | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                                                 | VK_PIPELINE_STAGE_2_TRANSFER_BIT
-                                                 | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+  // Every buffer this renderer owns is a single allocation shared by all frames in flight - reservoirs, surfaces, paired shifts, shading weights, motion vectors. Only the descriptor SETS rotate.
+  // Submission order does not imply an execution or memory dependency, command buffer boundaries add none, and the frame-slot fence waits for the previous use of its ring slot rather than for the immediately preceding frame - which, with two frames in flight, is not the frame whose reads must complete first.
+  // Unconditional on purpose. The only other barrier that could serve is the one after the duplication map, and that is conditional on decorrelation and temporal reuse both being enabled, so it cannot establish this for every mode.
+  // It matters most with two reservoir arrays, where initial sampling overwrites the array the previous frame's spatial pass read neighbours from, leaving no slack at all.
+  // TRANSFER and DRAW_INDIRECT are in scope as well as the shader stages, because the prepass counter is accessed by neither shader stage alone: it is cleared with vkCmdFillBuffer and then read as indirect trace arguments. Leaving those out let frame N+1's clear race frame N's indirect read - which silently shrinks a dispatch, and so looks like a speedup rather than a fault.
+
+  constexpr VkPipelineStageFlags2 kFrameStages = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+
   CmdReSTIRPTMemoryBarrier(input.cmd, kFrameStages, kFrameStages);
 
-  // Section 6.1. Presampling has to complete before any pixel reads a tile, and it
-  // depends on nothing this frame produces, so it goes first.
+  // Light tiles
+  // Section 6.1. Presampling has to complete before any pixel reads a tile, and it depends on nothing this frame produces, so it goes first.
+
   if(m_Settings.nee.enableLightTiles != 0u)
   {
-    {
-      RunLightTilePass(input, pushConstant);
-    }
+    RunLightTilePass(input, pushConstant);
+
     CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
   }
 
-  {
-    RunInitialSamplingPass(input, pushConstant);
-  }
+  // Initial sampling
+
+  RunInitialSamplingPass(input, pushConstant);
+
+  // Temporal reuse
 
   if(IsReSTIRPTTemporalResamplingEnabled(m_Settings.common.resamplingMode))
   {
     // Initial sampling writes the candidate reservoirs that temporal reuse reads.
-    CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-                           VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+    CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+
     RunTemporalPass(input, pushConstant);
   }
 
+  // Spatial reuse
+
   if(IsReSTIRPTSpatialResamplingEnabled(m_Settings.common.resamplingMode))
   {
-    // Spatial reads a neighbourhood of the array the previous pass wrote, so the
-    // whole pass must be visible - not just this pixel's own element.
-    //
-    // COMPUTE is in the destination scope because the sorted pre-pass begins with a
-    // COMPUTE dispatch, not a ray-tracing one: its classify pass reads the surfaces
-    // and reservoirs the temporal pass writes. Ray tracing alone was correct until a
-    // compute pass was put in front of this barrier, and then silently was not.
-    //
-    // This is a real missing dependency, but be aware it is NOT the cause of the
-    // sorted pre-pass divergence documented in ReSTIRPTSettings.h - that survives
-    // full ALL_COMMANDS serialization of the whole pass, so it is not a
-    // synchronization fault at all. Adding this changed nothing observable.
-    CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-                           VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+    // Spatial input barrier
+    // Spatial reads a neighbourhood of the array the previous pass wrote, so the whole pass must be visible - not just this pixel's own element.
+    // COMPUTE is in the destination scope because the sorted pre-pass begins with a COMPUTE dispatch, not a ray-tracing one: its classify pass reads the surfaces and reservoirs the temporal pass writes. Ray tracing alone was correct until a compute pass was put in front of this barrier, and then silently was not.
+    // This is a real missing dependency, but be aware it is NOT the cause of the sorted pre-pass divergence documented in ReSTIRPTSettings.h - that survives full ALL_COMMANDS serialization of the whole pass, so it is not a synchronization fault at all. Adding this changed nothing observable.
 
-    // Section 3. Each pixel shifts its own path into its partner's domain and
-    // publishes the result; resampling then reads both its own record and its
-    // partner's instead of tracing either shift. The barrier between is exactly
-    // what makes the sharing possible - and is the overhead the paper cites for
-    // why the saving is not a full 2x.
+    CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+
+    // Paired pre-pass
+    // Section 3. Each pixel shifts its own path into its partner's domain and publishes the result; resampling then reads both its own record and its partner's instead of tracing either shift.
+    // The barrier between is exactly what makes the sharing possible - and is the overhead the paper cites for why the saving is not a full 2x.
+
     if(m_Settings.spatialResampling.enablePairedSpatialReuse != 0u)
     {
-      // Section 6.2.2. The sorted path times its own sub-passes internally.
+      // Section 6.2.2 compacts the pre-pass into a work list; otherwise every (pixel, slot) is launched.
       if(UseSortedPrepass())
       {
         RunSortedSpatialPrepass(input, pushConstant);
@@ -720,404 +645,403 @@ void ReSTIRPTRenderer::RecordPasses(const RenderInput& input, const shaderio::Re
       {
         RunSpatialPrepass(input, pushConstant);
       }
-      CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR,
-                             VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
+
+      CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
     }
 
-    {
-      RunSpatialPass(input, pushConstant);
-    }
+    // Spatial resampling
+
+    RunSpatialPass(input, pushConstant);
   }
 
-  // The reuse passes write the reservoirs that final shading reads.
+  // Final shading
+  // The reuse passes write the reservoirs that final shading reads, and the barrier after it leaves the image writes visible to post processing.
+
   CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-  {
-    RunFinalShadingPass(input, pushConstant);
-  }
-  // Leave the image writes visible to post processing.
+
+  RunFinalShadingPass(input, pushConstant);
+
   CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
-  // Section 5's map describes the reservoirs this frame ended with, so it runs
-  // last - after every pass that can still change them. It reads the same array
-  // final shading just read, and the barrier above already orders it. Only the
-  // next frame's temporal pass consumes the result, which is why nothing here
-  // waits on it; the frame boundary provides that ordering.
-  //
+  // Duplication map
+  // Section 5's map describes the reservoirs this frame ended with, so it runs last - after every pass that can still change them. It reads the same array final shading just read, and the barrier above already orders it.
+  // Only the next frame's temporal pass consumes the result, which is why nothing here waits on it; the frame boundary provides that ordering.
   // Skipped when temporal reuse is off, since nothing would ever read the map.
+
   if(m_Settings.decorrelation.enable != 0u && IsReSTIRPTTemporalResamplingEnabled(m_Settings.common.resamplingMode))
   {
-    {
-      RunDuplicationMapPass(input, pushConstant);
-    }
+    RunDuplicationMapPass(input, pushConstant);
+
     CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR);
   }
-
 }
+
 void ReSTIRPTRenderer::RunInitialSamplingPass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
-  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR PT Initial Sampling");
-  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
-  TraceReSTIRRayTracingPass(input.cmd, m_InitialSamplingPass, m_PipelineLayout, *m_DescPack.getSetPtr(frameSetIndex),
-                              kReSTIRPTPushConstantStages, pushConstant, input.gBuffers->getSize());
+  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
+
+  TraceReSTIRRayTracingPass(input.cmd, m_InitialSamplingPass, m_PipelineLayout, *m_DescPack.SetPtr(frameSetIndex), kReSTIRPTPushConstantStages, pushConstant, input.output.extent);
 }
 
 void ReSTIRPTRenderer::RunTemporalPass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
-  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR PT Temporal Resampling");
-  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
-  TraceReSTIRRayTracingPass(input.cmd, m_TemporalPass, m_PipelineLayout, *m_DescPack.getSetPtr(frameSetIndex),
-                              kReSTIRPTPushConstantStages, pushConstant, input.gBuffers->getSize());
+  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
+
+  TraceReSTIRRayTracingPass(input.cmd, m_TemporalPass, m_PipelineLayout, *m_DescPack.SetPtr(frameSetIndex), kReSTIRPTPushConstantStages, pushConstant, input.output.extent);
 }
 
 void ReSTIRPTRenderer::RunSpatialPass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
-  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR PT Spatial Resampling");
-  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
-  TraceReSTIRRayTracingPass(input.cmd, m_SpatialPass, m_PipelineLayout, *m_DescPack.getSetPtr(frameSetIndex),
-                              kReSTIRPTPushConstantStages, pushConstant, input.gBuffers->getSize());
+  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
+
+  TraceReSTIRRayTracingPass(input.cmd, m_SpatialPass, m_PipelineLayout, *m_DescPack.SetPtr(frameSetIndex), kReSTIRPTPushConstantStages, pushConstant, input.output.extent);
 }
 
 void ReSTIRPTRenderer::RunSortedSpatialPrepass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
-  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR PT Spatial Prepass (sorted)");
-  const uint32_t       frameSetIndex = GetReSTIRPTFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
-  VkDescriptorSet      descriptorSet = *m_DescPack.getSetPtr(frameSetIndex);
-  const nvvk::Buffer&  counters      = m_Resources.GetPrepassCounterBuffer();
-  const VkExtent2D     viewportSize  = input.gBuffers->getSize();
+  const uint32_t      frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
+  VkDescriptorSet     descriptorSet = *m_DescPack.SetPtr(frameSetIndex);
+  const rtpt::Buffer& counters      = m_Resources.GetPrepassCounterBuffer();
+  const VkExtent2D    viewportSize  = input.output.extent;
 
-  // Counts and cursors accumulate with atomics, so they must start at zero every
-  // frame. The offsets and indirect dimensions are fully rewritten below, so
-  // clearing the whole buffer costs nothing extra.
-  //
-  // The barrier before it is a write-after-read across the FRAME boundary, and it
-  // is not covered by the general one at the top of RecordPasses: that one spans
-  // ray tracing and compute, while this is a TRANSFER write. This buffer is a
-  // single allocation shared by every frame in flight, so without this the fill
-  // can land while the previous frame is still reading the counts - which
-  // corrupts the launch size, and makes the traced pass read work list entries
-  // that were never scattered.
-  CmdReSTIRPTMemoryBarrier(input.cmd,
-                         VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                             | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-                         VK_PIPELINE_STAGE_2_TRANSFER_BIT);
+  // Counter reset
+  // The work list count accumulates with InterlockedAdd in the classify pass, so it must start at zero every frame. The indirect dimensions are fully rewritten by the offsets pass, so clearing the whole buffer costs nothing extra.
+  // The barrier before the fill is a write-after-read across the FRAME boundary, and it is not covered by the general one at the top of RecordPasses: that one spans ray tracing and compute, while this is a TRANSFER write.
+  // This buffer is a single allocation shared by every frame in flight, so without this the fill can land while the previous frame is still reading the counts - which corrupts the launch size, and makes the traced pass read work list entries that were never scattered.
+
+  CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT);
   vkCmdFillBuffer(input.cmd, counters.buffer, 0, counters.bufferSize, 0);
   CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
-  // 1. Append the pairs that need a shift to the work list, and write the
-  //    paired-shift record for every REJECTED pair - the traced pass never visits
-  //    those, and a record left untouched would be read next pass as a live shift
-  //    from an earlier frame.
-  {
-    DispatchReSTIRComputePass(input.cmd, m_PrepassClassifyPipeline, m_PipelineLayout, descriptorSet,
-                              kReSTIRPTPushConstantStages, pushConstant, viewportSize, kPrepassSortGroupSize);
-  }
+  // Classify
+  // Append the pairs that need a shift to the work list, and write the paired-shift record for every REJECTED pair - the traced pass never visits those, and a record left untouched would be read next pass as a live shift from an earlier frame.
+
+  DispatchReSTIRComputePass(input.cmd, m_PrepassClassifyPipeline, m_PipelineLayout, descriptorSet, kReSTIRPTPushConstantStages, pushConstant, viewportSize, kPrepassSortGroupSize);
+
   CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
-  // 2. Publish the launch size the first pass counted.
-  {
-    vkCmdBindPipeline(input.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PrepassOffsetsPipeline);
-    vkCmdBindDescriptorSets(input.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-    vkCmdPushConstants(input.cmd, m_PipelineLayout, kReSTIRPTPushConstantStages, 0, sizeof(pushConstant), &pushConstant);
-    vkCmdDispatch(input.cmd, 1, 1, 1);
-  }
+  // Publish the launch size
+  // Copies the count the classify pass accumulated into the indirect trace dimensions. The shader runs one thread, so the dispatch is a single group.
+
+  vkCmdBindPipeline(input.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PrepassOffsetsPipeline);
+  vkCmdBindDescriptorSets(input.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+  vkCmdPushConstants(input.cmd, m_PipelineLayout, kReSTIRPTPushConstantStages, 0, sizeof(pushConstant), &pushConstant);
+  vkCmdDispatch(input.cmd, 1, 1, 1);
+
   CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
+  // The work list is read by the ray tracing stage and the counter buffer's tail by the indirect-draw stage as launch dimensions, so both dependencies are on this one barrier.
+  CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT);
 
-  // The work list is read by the ray tracing stage, and the same buffer's tail is
-  // read by the indirect-draw stage as the launch dimensions. Both dependencies
-  // are on this one barrier.
-  CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT);
+  // Trace
+  // Trace exactly the surviving pairs. The count lives only on the GPU, which is what makes this dispatch indirect.
 
-  // 4. Trace exactly the surviving pairs, in bucket order. The count lives only on
-  //    the GPU, which is what makes this dispatch indirect.
-  {
-    vkCmdBindPipeline(input.cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_SpatialPrepass.pipeline);
-    vkCmdBindDescriptorSets(input.cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_PipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-    vkCmdPushConstants(input.cmd, m_PipelineLayout, kReSTIRPTPushConstantStages, 0, sizeof(pushConstant), &pushConstant);
-    // Plain vkCmdTraceRaysIndirectKHR: only the dimensions come from the buffer,
-    // and the shader binding table is still supplied here. That is core to
-    // VK_KHR_ray_tracing_pipeline, so it needs no extra extension - unlike the
-    // Indirect2 variant, which also indirects the binding table.
-    vkCmdTraceRaysIndirectKHR(input.cmd, &m_SpatialPrepass.sbtRegions.raygen, &m_SpatialPrepass.sbtRegions.miss,
-                              &m_SpatialPrepass.sbtRegions.hit, &m_SpatialPrepass.sbtRegions.callable,
-                              counters.address + VkDeviceSize(RESTIR_PT_PREPASS_INDIRECT_OFFSET) * sizeof(uint32_t));
-  }
+  vkCmdBindPipeline(input.cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_SpatialPrepass.pipeline);
+  vkCmdBindDescriptorSets(input.cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_PipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+  vkCmdPushConstants(input.cmd, m_PipelineLayout, kReSTIRPTPushConstantStages, 0, sizeof(pushConstant), &pushConstant);
+
+  const rtpt::ShaderBindingTableRegions& regions = m_SpatialPrepass.sbt.Regions();
+
+  // Plain vkCmdTraceRaysIndirectKHR: only the dimensions come from the buffer and the binding table is still supplied here, which is core to VK_KHR_ray_tracing_pipeline - unlike the Indirect2 variant, which also indirects the binding table and needs an extra extension.
+  vkCmdTraceRaysIndirectKHR(input.cmd, &regions.raygen, &regions.miss, &regions.hit, &regions.callable, counters.address + VkDeviceSize(RESTIR_PT_PREPASS_INDIRECT_OFFSET) * sizeof(uint32_t));
 }
 
 void ReSTIRPTRenderer::RunSpatialPrepass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
-  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR PT Spatial Prepass");
-  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
-  TraceReSTIRRayTracingPass(input.cmd, m_SpatialPrepass, m_PipelineLayout, *m_DescPack.getSetPtr(frameSetIndex),
-                               kReSTIRPTPushConstantStages, pushConstant, input.gBuffers->getSize());
+  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
+
+  TraceReSTIRRayTracingPass(input.cmd, m_SpatialPrepass, m_PipelineLayout, *m_DescPack.SetPtr(frameSetIndex), kReSTIRPTPushConstantStages, pushConstant, input.output.extent);
 }
 
 void ReSTIRPTRenderer::RunFinalShadingPass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
-  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR PT Final Shading");
-  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
-  DispatchReSTIRComputePass(input.cmd, m_FinalShadingPipeline, m_PipelineLayout, *m_DescPack.getSetPtr(frameSetIndex),
-                              kReSTIRPTPushConstantStages, pushConstant, input.gBuffers->getSize(), kComputeGroupSize);
+  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
+
+  DispatchReSTIRComputePass(input.cmd, m_FinalShadingPipeline, m_PipelineLayout, *m_DescPack.SetPtr(frameSetIndex), kReSTIRPTPushConstantStages, pushConstant, input.output.extent, kComputeGroupSize);
 }
 
 void ReSTIRPTRenderer::RunLightTilePass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
-  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR PT Light Tiles");
-  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
-  // The dispatch is shaped by the tile table, not the viewport: one thread per
-  // presampled light, x along a tile and y across tiles.
-  const VkExtent2D tileExtent{.width = uint32_t(RESTIR_PT_LIGHT_TILE_SIZE), .height = uint32_t(RESTIR_PT_LIGHT_TILE_COUNT)};
-  DispatchReSTIRComputePass(input.cmd, m_LightTilePipeline, m_PipelineLayout, *m_DescPack.getSetPtr(frameSetIndex),
-                            kReSTIRPTPushConstantStages, pushConstant, tileExtent, kLightTileGroupSize);
+  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
+
+  // The dispatch is shaped by the tile table, not the viewport: one thread per presampled light, x along a tile and y across tiles.
+  const VkExtent2D tileExtent { .width = uint32_t(RESTIR_PT_LIGHT_TILE_SIZE), .height = uint32_t(RESTIR_PT_LIGHT_TILE_COUNT) };
+
+  DispatchReSTIRComputePass(input.cmd, m_LightTilePipeline, m_PipelineLayout, *m_DescPack.SetPtr(frameSetIndex), kReSTIRPTPushConstantStages, pushConstant, tileExtent, kLightTileGroupSize);
 }
 
 void ReSTIRPTRenderer::RunDuplicationMapPass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
-  nvvk::DebugUtil::ScopedCmdLabel scopedCmdLabel(input.cmd, "ReSTIR PT Duplication Map");
-  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
-  // The shader tiles its shared-memory window to an 8x8 group, so the dispatch
-  // must use that group size and not the shared compute default.
-  DispatchReSTIRComputePass(input.cmd, m_DuplicationMapPipeline, m_PipelineLayout, *m_DescPack.getSetPtr(frameSetIndex),
-                            kReSTIRPTPushConstantStages, pushConstant, input.gBuffers->getSize(), kDuplicationMapGroupSize);
+  const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
+
+  // The shader tiles its shared-memory window to an 8x8 group, so the dispatch must use that group size and not the shared compute default.
+  DispatchReSTIRComputePass(input.cmd, m_DuplicationMapPipeline, m_PipelineLayout, *m_DescPack.SetPtr(frameSetIndex), kReSTIRPTPushConstantStages, pushConstant, input.output.extent, kDuplicationMapGroupSize);
 }
 
-void ReSTIRPTRenderer::FinishFrame(const FrameState& frameState)
+void ReSTIRPTRenderer::FinishFrame(const ResolveHistory::FrameState& frameState)
 {
-  m_LastAccumulationSignature = frameState.accumulationSignature;
-  m_HasAccumulationSignature  = true;
-  m_LastDenoiserSignature     = frameState.denoiserSignature;
-  m_HasDenoiserSignature      = true;
-  m_HistoryInvalidated        = false;
+  // History bookkeeping
+  // The signatures ResolveHistory records here are what the next BeginFrame compares against, and the frame index only advances for a frame whose passes were recorded.
+
+  m_History.FinishFrame(frameState);
   m_FrameContext.AdvanceFrame();
-  m_AccumulatedFrames = IsAccumulationResolveMode(m_Settings.common.resolveMode) ? (m_AccumulatedFrames + 1u) : 0u;
+
+  ++m_RngFrameNumber;
 }
 
-namespace {
-}  // namespace
 void ReSTIRPTRenderer::QueryRayTracingProperties()
 {
-  VkPhysicalDeviceProperties2 props{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &m_RtProperties};
-  vkGetPhysicalDeviceProperties2(m_Allocator->getPhysicalDevice(), &props);
+  m_RtProperties = m_Device->Support().rayTracingProperties;
 
+  // Bounce limit
   // Vulkan recursion depth counts the primary ray, so path bounces get one less.
-  // The reconnection-length field caps it again: a path longer than that field can
-  // represent could not record where it reconnected.
+  // The reconnection-length field caps it again: a path longer than that field can represent could not record where it reconnected.
+
   const uint32_t maxBounceLimit = (m_RtProperties.maxRayRecursionDepth > 0) ? (m_RtProperties.maxRayRecursionDepth - 1u) : 0u;
+
   m_PipelineBounceLimit = std::min(std::min(kRequestedMaxBounces, maxBounceLimit), uint32_t(RESTIR_PT_MAX_BOUNCES));
+
+  // Settings chosen before the device was queried may exceed what it supports.
   m_Settings.initialSampling.maxBounces = std::min(m_Settings.initialSampling.maxBounces, m_PipelineBounceLimit);
 }
 
 void ReSTIRPTRenderer::CreateDescriptorSetLayout()
 {
-  // One descriptor layout is shared by all ReSTIR PT passes so the pass sequence
-  // can bind the same set for both the ray tracing and compute stages.
+  // Shared layout
+  // One descriptor layout is shared by all ReSTIR PT passes so the pass sequence can bind the same set for both the ray tracing and compute stages.
+
   const VkShaderStageFlags allStages = kReSTIRPTPushConstantStages;
 
-  nvvk::DescriptorBindings bindings;
-  // Textures use bindless-style indexing from material records.
-  bindings.addBinding({.binding         = shaderio::ReSTIRPTBindingPoints::eReSTIRPTTextures,
-                       .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                       .descriptorCount = m_MaxTextureDescriptors,
-                       .stageFlags      = allStages},
-                      VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
-                          | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTTlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTOutputImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTAccumulationImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTPathReservoirBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
-  // Surface buffers ping-pong for current/previous-frame temporal reuse.
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTCurrentSurfaceBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTPreviousSurfaceBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTParamsBuffer, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTDuplicationBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTPairingBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTPairedShiftBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTShadingWeightBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTMotionVectorBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTLightTileBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTPrepassWorkBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTPrepassCounterBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTDenoiserGuideBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
-  // NRD inputs. Bound unconditionally so one descriptor layout serves every resolve
-  // mode; final shading writes them only when the denoiser-signal flag is set.
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTMotionVectorsImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTNormalRoughnessImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTBaseColorMetalnessImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTViewZImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTDiffuseRadianceHitDistanceImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                      1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTSpecularRadianceHitDistanceImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                      1, allStages);
-  bindings.addBinding(shaderio::ReSTIRPTBindingPoints::eReSTIRPTSpecularDemodulationFactorImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-                      1, allStages);
+  rtpt::DescriptorBindings bindings;
 
-  m_DescPack.init(bindings, m_Allocator->getDevice(), m_App->getFrameCycleSize(),
-                  VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT,
-                  VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT);
+  // Textures
+  // Textures use bindless-style indexing from material records, so the arrays are partially bound and may be updated after binding.
+
+  constexpr VkDescriptorBindingFlags textureFlags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTTextures, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_MaxTextureDescriptors, allStages, textureFlags);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTHlslTextures, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, m_MaxTextureDescriptors, allStages, textureFlags);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTHlslTextureSamplers, VK_DESCRIPTOR_TYPE_SAMPLER, m_MaxTextureDescriptors, allStages, textureFlags);
+
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTBlueNoiseTexture, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, allStages);
+
+  // Scene, images, and ReSTIR buffers
+
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTTlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTOutputImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTAccumulationImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTPathReservoirBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+
+  // Surface buffers ping-pong for current/previous-frame temporal reuse.
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTCurrentSurfaceBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTPreviousSurfaceBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTParamsBuffer, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTDuplicationBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTPairingBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTPairedShiftBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTShadingWeightBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTMotionVectorBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTLightTileBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTPrepassWorkBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTPrepassCounterBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTDenoiserGuideBuffer, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, allStages);
+
+  // NRD inputs
+  // Bound unconditionally so one descriptor layout serves every resolve mode; final shading writes them only when the denoiser-signal flag is set.
+
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTMotionVectorsImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTNormalRoughnessImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTBaseColorMetalnessImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTViewZImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTDiffuseRadianceHitDistanceImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTSpecularRadianceHitDistanceImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+  bindings.Add(shaderio::ReSTIRPTBindingPoints::eReSTIRPTSpecularDemodulationFactorImage, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, allStages);
+
+  // Descriptor pack
+  // Update-after-bind bindings require the set layout and the pool to be created with their update-after-bind flags too. One set is allocated per frame slot.
+
+  rtpt::CheckVk(m_DescPack.Initialize(m_Device->Handle(), bindings, m_FrameSlotCount, VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT, VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT), "DescriptorPack::Initialize(ReSTIR PT)");
 }
 
 void ReSTIRPTRenderer::CreatePipelineLayout()
 {
-  // Pipeline layout is the ABI between C++ descriptor sets/push constants and Slang bindings.
-  const VkPushConstantRange pushConstantRange{
+  // Pipeline layout is the ABI between C++ descriptor sets/push constants and HLSL bindings.
+
+  const VkPushConstantRange pushConstantRange {
       .stageFlags = kReSTIRPTPushConstantStages,
       .offset     = 0,
       .size       = sizeof(shaderio::ReSTIRPTPushConstant),
   };
 
-  const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
+  const VkPipelineLayoutCreateInfo pipelineLayoutInfo {
       .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
       .setLayoutCount         = 1,
-      .pSetLayouts            = m_DescPack.getLayoutPtr(),
+      .pSetLayouts            = m_DescPack.LayoutPtr(),
       .pushConstantRangeCount = 1,
       .pPushConstantRanges    = &pushConstantRange,
   };
 
-  NVVK_CHECK(vkCreatePipelineLayout(m_Allocator->getDevice(), &pipelineLayoutInfo, nullptr, &m_PipelineLayout));
-  NVVK_DBG_NAME(m_PipelineLayout);
+  rtpt::CheckVk(vkCreatePipelineLayout(m_Device->Handle(), &pipelineLayoutInfo, nullptr, &m_PipelineLayout), "vkCreatePipelineLayout(ReSTIR PT)");
 }
 
 void ReSTIRPTRenderer::CreateParameterBuffers()
 {
-  const uint32_t frameSetCount = std::max(1u, m_App->getFrameCycleSize());
+  const uint32_t frameSetCount = m_FrameSlotCount;
+
   m_ParameterBuffers.resize(frameSetCount);
 
-  for(nvvk::Buffer& parameterBuffer : m_ParameterBuffers)
+  for(rtpt::Buffer& parameterBuffer : m_ParameterBuffers)
   {
     // Mapped uniform buffers are updated once per frame set before recording passes.
-    NVVK_CHECK(m_Allocator->createBuffer(parameterBuffer, sizeof(shaderio::ReSTIRPTParameters),
-                                         VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
-                                         VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT));
-    NVVK_DBG_NAME(parameterBuffer.buffer);
+    rtpt::CheckVk(m_GpuResources->CreateBuffer(parameterBuffer, sizeof(shaderio::ReSTIRPTParameters), VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_AUTO_PREFER_HOST, VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT), "ResourceAllocator::CreateBuffer(ReSTIR parameters)");
   }
 }
 
 void ReSTIRPTRenderer::CreateInitialSamplingPipeline()
 {
-  // Initial sampling recurses once per bounce, so the pipeline's recursion budget
-  // must cover the primary ray plus every bounce the UI can request.
-  CreateReSTIRRayTracingPass(m_Allocator, m_RtProperties, m_PipelineLayout, GetInitialSamplingShaderCode(),
-                               std::max(1u, m_PipelineBounceLimit + 1u), "ReSTIR PT Initial Sampling Pipeline", m_InitialSamplingPass);
+  // Initial sampling recurses once per bounce, so the pipeline's recursion budget must cover the primary ray plus every bounce the UI can request.
+  CreateReSTIRRayTracingPass(*m_GpuResources, m_Diagnostics, m_RtProperties, m_PipelineLayout, GetInitialSamplingShaderCode(), std::max(1u, m_PipelineBounceLimit + 1u), "ReSTIR PT Initial Sampling Pipeline", m_InitialSamplingPass);
 }
 
 void ReSTIRPTRenderer::CreateTemporalPipeline()
 {
-  // Replay traces one ray per regenerated bounce from the ray generation loop, so
-  // the pipeline only ever needs depth-1 recursion regardless of path length.
-  CreateReSTIRRayTracingPass(m_Allocator, m_RtProperties, m_PipelineLayout, GetTemporalShaderCode(), 2u,
-                               "ReSTIR PT Temporal Resampling Pipeline", m_TemporalPass);
+  // Replay traces one ray per regenerated bounce from the ray generation loop, so the recursion budget stays fixed regardless of path length.
+  CreateReSTIRRayTracingPass(*m_GpuResources, m_Diagnostics, m_RtProperties, m_PipelineLayout, GetTemporalShaderCode(), 2u, "ReSTIR PT Temporal Resampling Pipeline", m_TemporalPass);
 }
 
 void ReSTIRPTRenderer::CreateSpatialPipeline()
 {
-  CreateReSTIRRayTracingPass(m_Allocator, m_RtProperties, m_PipelineLayout, GetSpatialShaderCode(), 2u,
-                               "ReSTIR PT Spatial Resampling Pipeline", m_SpatialPass);
-  CreateReSTIRRayTracingPass(m_Allocator, m_RtProperties, m_PipelineLayout, GetSpatialPrepassShaderCode(), 2u,
-                               "ReSTIR PT Spatial Prepass Pipeline", m_SpatialPrepass);
+  // Recursion budget
+  // The spatial pass and its paired pre-pass use the same fixed recursion budget as temporal reuse.
+  // All three trace only from their ray generation loops, and their closest-hit shaders only record the hit, so they need a single level; the budget of 2 is one more than that.
+
+  CreateReSTIRRayTracingPass(*m_GpuResources, m_Diagnostics, m_RtProperties, m_PipelineLayout, GetSpatialShaderCode(), 2u, "ReSTIR PT Spatial Resampling Pipeline", m_SpatialPass);
+  CreateReSTIRRayTracingPass(*m_GpuResources, m_Diagnostics, m_RtProperties, m_PipelineLayout, GetSpatialPrepassShaderCode(), 2u, "ReSTIR PT Spatial Prepass Pipeline", m_SpatialPrepass);
 }
 
 void ReSTIRPTRenderer::CreateFinalShadingPipeline()
 {
-  m_FinalShadingPipeline =
-      CreateReSTIRComputePipeline(m_Allocator, m_PipelineLayout, GetFinalShadingShaderCode(), "ReSTIR PT Final Shading Pipeline");
-  m_DuplicationMapPipeline = CreateReSTIRComputePipeline(m_Allocator, m_PipelineLayout, GetDuplicationMapShaderCode(),
-                                                         "ReSTIR PT Duplication Map Pipeline");
-  m_LightTilePipeline      = CreateReSTIRComputePipeline(m_Allocator, m_PipelineLayout, GetLightTilesShaderCode(),
-                                                         "ReSTIR PT Light Tiles Pipeline");
-  m_PrepassClassifyPipeline = CreateReSTIRComputePipeline(m_Allocator, m_PipelineLayout, GetPrepassClassifyShaderCode(),
-                                                          "ReSTIR PT Prepass Classify Pipeline");
-  m_PrepassOffsetsPipeline  = CreateReSTIRComputePipeline(m_Allocator, m_PipelineLayout, GetPrepassOffsetsShaderCode(),
-                                                          "ReSTIR PT Prepass Offsets Pipeline");
+  // Compute pipelines
+  // Creates every compute pass, not only final shading: none of them trace rays, and all share the one pipeline layout.
+
+  m_FinalShadingPipeline    = CreateReSTIRComputePipeline(m_Device->Handle(), m_Diagnostics, m_PipelineLayout, GetFinalShadingShaderCode(), "ReSTIR PT Final Shading Pipeline");
+  m_DuplicationMapPipeline  = CreateReSTIRComputePipeline(m_Device->Handle(), m_Diagnostics, m_PipelineLayout, GetDuplicationMapShaderCode(), "ReSTIR PT Duplication Map Pipeline");
+  m_LightTilePipeline       = CreateReSTIRComputePipeline(m_Device->Handle(), m_Diagnostics, m_PipelineLayout, GetLightTilesShaderCode(), "ReSTIR PT Light Tiles Pipeline");
+  m_PrepassClassifyPipeline = CreateReSTIRComputePipeline(m_Device->Handle(), m_Diagnostics, m_PipelineLayout, GetPrepassClassifyShaderCode(), "ReSTIR PT Prepass Classify Pipeline");
+  m_PrepassOffsetsPipeline  = CreateReSTIRComputePipeline(m_Device->Handle(), m_Diagnostics, m_PipelineLayout, GetPrepassOffsetsShaderCode(), "ReSTIR PT Prepass Offsets Pipeline");
 }
 
 void ReSTIRPTRenderer::UpdateFrameDescriptors(const RenderInput& input)
 {
-  const uint32_t frameSetIndex        = GetReSTIRPTFrameSetIndex(m_App->getFrameCycleIndex(), m_DescPack.getSets().size());
+  // Frame set and history
+  // Each frame slot has its own set, and the surface buffers swap current/previous roles by frame parity.
+
+  const uint32_t frameSetIndex        = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
   const uint32_t currentHistoryIndex  = m_FrameContext.GetCurrentHistoryIndex();
   const uint32_t previousHistoryIndex = m_FrameContext.GetPreviousHistoryIndex();
 
-  VkDescriptorImageInfo outputImageInfo = input.gBuffers->getDescriptorImageInfo(input.renderedImageIndex);
+  // Image descriptors
+  // Storage images are bound in GENERAL, the layout PrepareStorageImages transitions them to before any pass runs.
+  // NRD guide images are always bound; final shading only writes them when the denoiser-signal flag is set.
+
+  VkDescriptorImageInfo outputImageInfo = input.output.Descriptor(VK_IMAGE_LAYOUT_GENERAL);
   outputImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
+
   VkDescriptorImageInfo accumulationImageInfo = m_Resources.GetAccumulationImage().descriptor;
   accumulationImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
 
-  // NRD guide images are always bound; final shading only writes them when the flag
-  // is set. GENERAL is the layout the transitions above leave them in.
-  VkDescriptorImageInfo motionVectorsImageInfo      = m_DenoiserResources.GetMotionVectorsImage().descriptor;
-  motionVectorsImageInfo.imageLayout                = VK_IMAGE_LAYOUT_GENERAL;
-  VkDescriptorImageInfo normalRoughnessImageInfo    = m_DenoiserResources.GetNormalRoughnessImage().descriptor;
-  normalRoughnessImageInfo.imageLayout              = VK_IMAGE_LAYOUT_GENERAL;
-  VkDescriptorImageInfo baseColorMetalnessImageInfo = m_DenoiserResources.GetBaseColorMetalnessImage().descriptor;
+  VkDescriptorImageInfo motionVectorsImageInfo = m_History.GetDenoiserResources().GetMotionVectorsImage().descriptor;
+  motionVectorsImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
+
+  VkDescriptorImageInfo normalRoughnessImageInfo = m_History.GetDenoiserResources().GetNormalRoughnessImage().descriptor;
+  normalRoughnessImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
+
+  VkDescriptorImageInfo baseColorMetalnessImageInfo = m_History.GetDenoiserResources().GetBaseColorMetalnessImage().descriptor;
   baseColorMetalnessImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
-  VkDescriptorImageInfo viewZImageInfo              = m_DenoiserResources.GetViewZImage().descriptor;
-  viewZImageInfo.imageLayout                        = VK_IMAGE_LAYOUT_GENERAL;
-  VkDescriptorImageInfo diffuseRadianceHitDistanceImageInfo = m_DenoiserResources.GetDiffuseRadianceHitDistanceImage().descriptor;
+
+  VkDescriptorImageInfo viewZImageInfo = m_History.GetDenoiserResources().GetViewZImage().descriptor;
+  viewZImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
+
+  VkDescriptorImageInfo diffuseRadianceHitDistanceImageInfo = m_History.GetDenoiserResources().GetDiffuseRadianceHitDistanceImage().descriptor;
   diffuseRadianceHitDistanceImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
-  VkDescriptorImageInfo specularRadianceHitDistanceImageInfo = m_DenoiserResources.GetSpecularRadianceHitDistanceImage().descriptor;
+
+  VkDescriptorImageInfo specularRadianceHitDistanceImageInfo = m_History.GetDenoiserResources().GetSpecularRadianceHitDistanceImage().descriptor;
   specularRadianceHitDistanceImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
-  VkDescriptorImageInfo specularDemodulationFactorImageInfo = m_DenoiserResources.GetSpecularDemodulationFactorImage().descriptor;
+
+  VkDescriptorImageInfo specularDemodulationFactorImageInfo = m_History.GetDenoiserResources().GetSpecularDemodulationFactorImage().descriptor;
   specularDemodulationFactorImageInfo.imageLayout           = VK_IMAGE_LAYOUT_GENERAL;
 
-  const std::array<VkDescriptorBufferInfo, 13> bufferInfos{
+  // Buffer descriptors
+  // The order here must match bufferBindings below; the two arrays are paired by index.
+
+  const std::array<VkDescriptorBufferInfo, 13> bufferInfos {
       // One buffer holds every rotating reservoir array.
-      VkDescriptorBufferInfo{m_Resources.GetPathReservoirBuffer().buffer, 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo { m_Resources.GetPathReservoirBuffer().buffer, 0, VK_WHOLE_SIZE },
       // Surface buffers are bound as current/previous according to frame parity.
-      VkDescriptorBufferInfo{m_Resources.GetSurfaceBuffer(currentHistoryIndex).buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_Resources.GetSurfaceBuffer(previousHistoryIndex).buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_ParameterBuffers[frameSetIndex].buffer, 0, sizeof(shaderio::ReSTIRPTParameters)},
-      VkDescriptorBufferInfo{m_Resources.GetDuplicationBuffer().buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_Resources.GetPairingBuffer().buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_Resources.GetPairedShiftBuffer().buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_Resources.GetShadingWeightBuffer().buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_Resources.GetMotionVectorBuffer().buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_Resources.GetLightTileBuffer().buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_Resources.GetPrepassWorkBuffer().buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_Resources.GetPrepassCounterBuffer().buffer, 0, VK_WHOLE_SIZE},
-      VkDescriptorBufferInfo{m_Resources.GetDenoiserGuideBuffer().buffer, 0, VK_WHOLE_SIZE},
+      VkDescriptorBufferInfo { m_Resources.GetSurfaceBuffer(currentHistoryIndex).buffer, 0, VK_WHOLE_SIZE },
+      VkDescriptorBufferInfo { m_Resources.GetSurfaceBuffer(previousHistoryIndex).buffer, 0, VK_WHOLE_SIZE },
+      VkDescriptorBufferInfo { m_ParameterBuffers[frameSetIndex].buffer, 0, sizeof(shaderio::ReSTIRPTParameters) },
+      VkDescriptorBufferInfo { m_Resources.GetDuplicationBuffer().buffer, 0, VK_WHOLE_SIZE },
+      VkDescriptorBufferInfo { m_Resources.GetPairingBuffer().buffer, 0, VK_WHOLE_SIZE },
+      VkDescriptorBufferInfo { m_Resources.GetPairedShiftBuffer().buffer, 0, VK_WHOLE_SIZE },
+      VkDescriptorBufferInfo { m_Resources.GetShadingWeightBuffer().buffer, 0, VK_WHOLE_SIZE },
+      VkDescriptorBufferInfo { m_Resources.GetMotionVectorBuffer().buffer, 0, VK_WHOLE_SIZE },
+      VkDescriptorBufferInfo { m_Resources.GetLightTileBuffer().buffer, 0, VK_WHOLE_SIZE },
+      VkDescriptorBufferInfo { m_Resources.GetPrepassWorkBuffer().buffer, 0, VK_WHOLE_SIZE },
+      VkDescriptorBufferInfo { m_Resources.GetPrepassCounterBuffer().buffer, 0, VK_WHOLE_SIZE },
+      VkDescriptorBufferInfo { m_Resources.GetDenoiserGuideBuffer().buffer, 0, VK_WHOLE_SIZE },
   };
 
-  VkAccelerationStructureKHR accel = input.topLevelAS->accel;
+  // Acceleration structure
   // TLAS descriptors attach through pNext rather than pBufferInfo/pImageInfo.
-  const VkWriteDescriptorSetAccelerationStructureKHR accelerationInfo{
+
+  VkAccelerationStructureKHR accel = input.topLevelAS->accel;
+
+  const VkWriteDescriptorSetAccelerationStructureKHR accelerationInfo {
       .sType                      = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
       .accelerationStructureCount = 1,
       .pAccelerationStructures    = &accel,
   };
 
-  std::array<VkWriteDescriptorSet, 24> writes{};
-  uint32_t                            writeCount = 0;
+  // Writes
+  // Every write is collected into one array and submitted in a single vkUpdateDescriptorSets call.
 
-  writes[writeCount]       = m_DescPack.makeWrite(shaderio::ReSTIRPTBindingPoints::eReSTIRPTTlas, frameSetIndex);
+  const VkDescriptorImageInfo blueNoiseInfo = m_BlueNoise->Descriptor();
+
+  std::array<VkWriteDescriptorSet, 25> writes {};
+  uint32_t                             writeCount = 0;
+
+  writes[writeCount]       = m_DescPack.MakeWrite(shaderio::ReSTIRPTBindingPoints::eReSTIRPTTlas, frameSetIndex);
   writes[writeCount].pNext = &accelerationInfo;
   ++writeCount;
 
-  writes[writeCount]            = m_DescPack.makeWrite(shaderio::ReSTIRPTBindingPoints::eReSTIRPTOutputImage, frameSetIndex);
+  writes[writeCount]            = m_DescPack.MakeWrite(shaderio::ReSTIRPTBindingPoints::eReSTIRPTOutputImage, frameSetIndex);
   writes[writeCount].pImageInfo = &outputImageInfo;
   ++writeCount;
 
-  writes[writeCount]            = m_DescPack.makeWrite(shaderio::ReSTIRPTBindingPoints::eReSTIRPTAccumulationImage, frameSetIndex);
+  writes[writeCount]            = m_DescPack.MakeWrite(shaderio::ReSTIRPTBindingPoints::eReSTIRPTAccumulationImage, frameSetIndex);
   writes[writeCount].pImageInfo = &accumulationImageInfo;
   ++writeCount;
 
-  const std::array<std::pair<uint32_t, const VkDescriptorImageInfo*>, 7> denoiserImageBindings{{
-      {shaderio::ReSTIRPTBindingPoints::eReSTIRPTMotionVectorsImage, &motionVectorsImageInfo},
-      {shaderio::ReSTIRPTBindingPoints::eReSTIRPTNormalRoughnessImage, &normalRoughnessImageInfo},
-      {shaderio::ReSTIRPTBindingPoints::eReSTIRPTBaseColorMetalnessImage, &baseColorMetalnessImageInfo},
-      {shaderio::ReSTIRPTBindingPoints::eReSTIRPTViewZImage, &viewZImageInfo},
-      {shaderio::ReSTIRPTBindingPoints::eReSTIRPTDiffuseRadianceHitDistanceImage, &diffuseRadianceHitDistanceImageInfo},
-      {shaderio::ReSTIRPTBindingPoints::eReSTIRPTSpecularRadianceHitDistanceImage, &specularRadianceHitDistanceImageInfo},
-      {shaderio::ReSTIRPTBindingPoints::eReSTIRPTSpecularDemodulationFactorImage, &specularDemodulationFactorImageInfo},
-  }};
+  const std::array<std::pair<uint32_t, const VkDescriptorImageInfo*>, 7> denoiserImageBindings { {
+      { shaderio::ReSTIRPTBindingPoints::eReSTIRPTMotionVectorsImage, &motionVectorsImageInfo },
+      { shaderio::ReSTIRPTBindingPoints::eReSTIRPTNormalRoughnessImage, &normalRoughnessImageInfo },
+      { shaderio::ReSTIRPTBindingPoints::eReSTIRPTBaseColorMetalnessImage, &baseColorMetalnessImageInfo },
+      { shaderio::ReSTIRPTBindingPoints::eReSTIRPTViewZImage, &viewZImageInfo },
+      { shaderio::ReSTIRPTBindingPoints::eReSTIRPTDiffuseRadianceHitDistanceImage, &diffuseRadianceHitDistanceImageInfo },
+      { shaderio::ReSTIRPTBindingPoints::eReSTIRPTSpecularRadianceHitDistanceImage, &specularRadianceHitDistanceImageInfo },
+      { shaderio::ReSTIRPTBindingPoints::eReSTIRPTSpecularDemodulationFactorImage, &specularDemodulationFactorImageInfo },
+  } };
 
   for(const auto& [binding, imageInfo] : denoiserImageBindings)
   {
-    writes[writeCount]            = m_DescPack.makeWrite(binding, frameSetIndex);
+    writes[writeCount]            = m_DescPack.MakeWrite(binding, frameSetIndex);
     writes[writeCount].pImageInfo = imageInfo;
     ++writeCount;
   }
 
-  const std::array<uint32_t, 13> bufferBindings{
+  const std::array<uint32_t, 13> bufferBindings {
       shaderio::ReSTIRPTBindingPoints::eReSTIRPTPathReservoirBuffer,
       shaderio::ReSTIRPTBindingPoints::eReSTIRPTCurrentSurfaceBuffer,
       shaderio::ReSTIRPTBindingPoints::eReSTIRPTPreviousSurfaceBuffer,
@@ -1135,12 +1059,16 @@ void ReSTIRPTRenderer::UpdateFrameDescriptors(const RenderInput& input)
 
   for(size_t i = 0; i < bufferBindings.size(); ++i)
   {
-    writes[writeCount]             = m_DescPack.makeWrite(bufferBindings[i], frameSetIndex);
+    writes[writeCount]             = m_DescPack.MakeWrite(bufferBindings[i], frameSetIndex);
     writes[writeCount].pBufferInfo = &bufferInfos[i];
     ++writeCount;
   }
 
-  vkUpdateDescriptorSets(m_Allocator->getDevice(), writeCount, writes.data(), 0, nullptr);
+  writes[writeCount]            = m_DescPack.MakeWrite(shaderio::ReSTIRPTBindingPoints::eReSTIRPTBlueNoiseTexture, frameSetIndex);
+  writes[writeCount].pImageInfo = &blueNoiseInfo;
+  ++writeCount;
+
+  vkUpdateDescriptorSets(m_Device->Handle(), writeCount, writes.data(), 0, nullptr);
 }
 
 void ReSTIRPTRenderer::UpdateParameterBuffer(uint32_t frameSetIndex, const shaderio::ReSTIRPTParameters& parameters)
@@ -1151,9 +1079,11 @@ void ReSTIRPTRenderer::UpdateParameterBuffer(uint32_t frameSetIndex, const shade
   }
 
   // Host writes to the mapped uniform buffer are flushed before recording uses it.
-  nvvk::Buffer& parameterBuffer = m_ParameterBuffers[frameSetIndex];
+
+  rtpt::Buffer& parameterBuffer = m_ParameterBuffers[frameSetIndex];
+
   std::memcpy(parameterBuffer.mapping, &parameters, sizeof(parameters));
-  NVVK_CHECK(m_Allocator->flushBuffer(parameterBuffer, 0, sizeof(parameters)));
+  rtpt::CheckVk(m_GpuResources->FlushBuffer(parameterBuffer, 0, sizeof(parameters)), "ResourceAllocator::FlushBuffer(ReSTIR parameters)");
 }
 
-}  // namespace nvsamples
+}  // namespace rtpt

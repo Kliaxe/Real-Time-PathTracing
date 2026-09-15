@@ -66,6 +66,41 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "MinSizeRel"
       }
+    },
+    {
+      "name": "base-linux",
+      "displayName": "Base Linux",
+      "description": "Common Clang + Ninja settings for Linux presets.",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/Build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/Install/${presetName}"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-Debug",
+      "displayName": "Linux Debug",
+      "inherits": "base-linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "linux-Release",
+      "displayName": "Linux Release",
+      "inherits": "base-linux",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
     }
   ],
 
@@ -89,6 +124,51 @@
       "name": "x64-MinSizeRel",
       "displayName": "Build x64 MinSizeRel",
       "configurePreset": "x64-MinSizeRel"
+    },
+    {
+      "name": "linux-Debug",
+      "displayName": "Build Linux Debug",
+      "configurePreset": "linux-Debug"
+    },
+    {
+      "name": "linux-Release",
+      "displayName": "Build Linux Release",
+      "configurePreset": "linux-Release"
+    }
+  ],
+
+  "testPresets": [
+    {
+      "name": "x64-Debug",
+      "displayName": "Test x64 Debug",
+      "configurePreset": "x64-Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "x64-Release",
+      "displayName": "Test x64 Release",
+      "configurePreset": "x64-Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-Debug",
+      "displayName": "Test Linux Debug",
+      "configurePreset": "linux-Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-Release",
+      "displayName": "Test Linux Release",
+      "configurePreset": "linux-Release",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

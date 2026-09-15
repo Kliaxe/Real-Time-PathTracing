@@ -12,6 +12,10 @@ Build/
 Install/
 Intermediate/
 Binaries/
+Artifacts/
+graphify-out/
+__pycache__/
+*.py[cod]
 
 # Optional IDE build roots (Visual Studio CMakeSettings.json uses ./out/)
 out/
@@ -19,7 +23,7 @@ out/
 # CMake install output (if you use CMAKE_INSTALL_PREFIX in-tree)
 _install/
 
-# nvpro_core2 download cache (avoid "mystery" folders in repo root)
+# Legacy dependency download cache
 _downloaded_resources/
 
 # ----------------------------------------------------------------------------------------------------------------------

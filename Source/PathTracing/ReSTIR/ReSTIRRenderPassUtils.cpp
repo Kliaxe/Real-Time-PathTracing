@@ -1,33 +1,21 @@
-#include <array>
-
 #include "ReSTIRRenderPassUtils.h"
 
-#include <string>
+#include <array>
 #include <vector>
 
-#include <nvvk/debug_util.hpp>
-#include <nvvk/resource_allocator.hpp>
+#include "Framework/Vulkan/Pipelines.h"
 
-namespace nvsamples
+namespace rtpt
 {
 
-void CreateReSTIRRayTracingPass(nvvk::ResourceAllocator* allocator,
-                                  const VkPhysicalDeviceRayTracingPipelinePropertiesKHR& rtProperties,
-                                  VkPipelineLayout pipelineLayout,
-                                  const VkShaderModuleCreateInfo& shaderCode,
-                                  uint32_t maxPipelineRayRecursionDepth,
-                                  const char* debugName,
-                                  ReSTIRRayTracingPassState& passState)
+void CreateReSTIRRayTracingPass(rtpt::ResourceAllocator& resources, const rtpt::Diagnostics* diagnostics, const VkPhysicalDeviceRayTracingPipelinePropertiesKHR& rtProperties, VkPipelineLayout pipelineLayout, std::span<const uint32_t> spirv, uint32_t maxPipelineRayRecursionDepth, const char* debugName, ReSTIRRayTracingPassState& passState)
 {
-  VkDevice device = allocator->getDevice();
-
-  VkShaderModule shaderModule = VK_NULL_HANDLE;
-  // ShaderMake embeds Slang output as a SPIR-V blob; Vulkan still needs a shader module wrapper.
-  NVVK_CHECK(vkCreateShaderModule(device, &shaderCode, nullptr, &shaderModule));
+  // Shader stages
+  // Every ReSTIR PT library exports the same entry points: a primary miss and hit pair for path rays, and a shadow miss and any-hit pair for visibility rays.
 
   enum ShaderStageIndex : uint32_t
   {
-    eRaygen = 0,
+    eRaygen,
     eMiss,
     eShadowMiss,
     eAnyHit,
@@ -36,29 +24,21 @@ void CreateReSTIRRayTracingPass(nvvk::ResourceAllocator* allocator,
     eStageCount,
   };
 
-  std::array<VkPipelineShaderStageCreateInfo, eStageCount> stages{};
-  for(VkPipelineShaderStageCreateInfo& stage : stages)
-  {
-    // All ray tracing entry points live in the same Slang module for this pass.
-    stage.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stage.module = shaderModule;
-  }
+  constexpr std::array<rtpt::RayTracingShaderStage, eStageCount> stages { {
+      { VK_SHADER_STAGE_RAYGEN_BIT_KHR, "rgenMain" },
+      { VK_SHADER_STAGE_MISS_BIT_KHR, "rmissMain" },
+      { VK_SHADER_STAGE_MISS_BIT_KHR, "shadowMissMain" },
+      { VK_SHADER_STAGE_ANY_HIT_BIT_KHR, "rahitMain" },
+      { VK_SHADER_STAGE_ANY_HIT_BIT_KHR, "shadowAnyHitMain" },
+      { VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, "rchitMain" },
+  } };
 
-  stages[eRaygen].stage       = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-  stages[eRaygen].pName       = "rgenMain";
-  stages[eMiss].stage         = VK_SHADER_STAGE_MISS_BIT_KHR;
-  stages[eMiss].pName         = "rmissMain";
-  stages[eShadowMiss].stage   = VK_SHADER_STAGE_MISS_BIT_KHR;
-  stages[eShadowMiss].pName   = "shadowMissMain";
-  stages[eAnyHit].stage       = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-  stages[eAnyHit].pName       = "rahitMain";
-  stages[eShadowAnyHit].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-  stages[eShadowAnyHit].pName = "shadowAnyHitMain";
-  stages[eClosestHit].stage   = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-  stages[eClosestHit].pName   = "rchitMain";
+  // Shader groups
+  // One template is edited and appended per group, so each step only changes the fields that differ from the previous group.
+  // Group order is the SBT order below: raygen 0, miss 1-2, hit 3-4. The shadow hit group has no closest-hit shader because visibility rays only need to know whether something blocks them.
 
-  // The group object is reused below to build the exact SBT group order.
-  VkRayTracingShaderGroupCreateInfoKHR group{VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR};
+  VkRayTracingShaderGroupCreateInfoKHR group { VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR };
+
   group.anyHitShader       = VK_SHADER_UNUSED_KHR;
   group.closestHitShader   = VK_SHADER_UNUSED_KHR;
   group.generalShader      = VK_SHADER_UNUSED_KHR;
@@ -67,18 +47,13 @@ void CreateReSTIRRayTracingPass(nvvk::ResourceAllocator* allocator,
   std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups;
   groups.reserve(5);
 
-  // Group order becomes the shader binding table layout. TraceRay calls use
-  // miss index 0 for radiance, miss index 1 for shadow rays, hit group 0 for
-  // primary/secondary rays, and hit group 1 for shadow visibility rays.
   group.type          = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
   group.generalShader = eRaygen;
   groups.push_back(group);
 
-  group.type          = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
   group.generalShader = eMiss;
   groups.push_back(group);
 
-  group.type          = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
   group.generalShader = eShadowMiss;
   groups.push_back(group);
 
@@ -88,181 +63,99 @@ void CreateReSTIRRayTracingPass(nvvk::ResourceAllocator* allocator,
   group.closestHitShader = eClosestHit;
   groups.push_back(group);
 
-  group.type             = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
-  group.generalShader    = VK_SHADER_UNUSED_KHR;
   group.anyHitShader     = eShadowAnyHit;
   group.closestHitShader = VK_SHADER_UNUSED_KHR;
   groups.push_back(group);
 
-  const VkRayTracingPipelineCreateInfoKHR pipelineInfo{
-      .sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
-      .stageCount                   = static_cast<uint32_t>(stages.size()),
-      .pStages                      = stages.data(),
-      .groupCount                   = static_cast<uint32_t>(groups.size()),
-      .pGroups                      = groups.data(),
-      .maxPipelineRayRecursionDepth = maxPipelineRayRecursionDepth,
-      .layout                       = pipelineLayout,
-  };
+  // Pipeline and SBT
+  // The recursion depth comes from the caller because it differs per pass: initial sampling recurses per bounce, while the reuse passes trace from a loop in ray generation.
 
-  // The pipeline owns shader group handles; the SBT created below stores copies of those handles.
-  NVVK_CHECK(vkCreateRayTracingPipelinesKHR(device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &passState.pipeline));
-  nvvk::DebugUtil::getInstance().setObjectName(passState.pipeline, debugName);
+  rtpt::CheckVk(rtpt::CreateRayTracingPipeline(resources.Device(), pipelineLayout, spirv, stages, groups, maxPipelineRayRecursionDepth, passState.pipeline), "CreateRayTracingPipeline(ReSTIR PT)");
 
-  passState.sbtGenerator.init(device, rtProperties);
-  // SBT size and alignment come from the physical-device ray tracing properties.
-  const size_t sbtBufferSize = passState.sbtGenerator.calculateSBTBufferSize(passState.pipeline, pipelineInfo);
-  NVVK_CHECK(allocator->createBuffer(passState.sbtBuffer, sbtBufferSize,
-                                     VK_BUFFER_USAGE_2_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT,
-                                     VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-                                     VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
-                                     passState.sbtGenerator.getBufferAlignment()));
-  NVVK_CHECK(passState.sbtGenerator.populateSBTBuffer(passState.sbtBuffer.address, passState.sbtBuffer.bufferSize,
-                                                      passState.sbtBuffer.mapping));
-  // Regions are passed directly to vkCmdTraceRaysKHR.
-  passState.sbtRegions = passState.sbtGenerator.getSBTRegions(0);
-  nvvk::DebugUtil::getInstance().setObjectName(passState.sbtBuffer.buffer, std::string(debugName) + " SBT");
+  constexpr std::array<uint32_t, 1> raygen { 0 };
+  constexpr std::array<uint32_t, 2> miss { 1, 2 };
+  constexpr std::array<uint32_t, 2> hit { 3, 4 };
 
-  vkDestroyShaderModule(device, shaderModule, nullptr);
+  rtpt::CheckVk(passState.sbt.Initialize(resources, passState.pipeline, 5, rtProperties, { .raygen = raygen, .miss = miss, .hit = hit, .callable = {} }), "ShaderBindingTable::Initialize(ReSTIR PT)");
+
+  if(diagnostics != nullptr)
+  {
+    diagnostics->SetObjectName(resources.Device(), VK_OBJECT_TYPE_PIPELINE, reinterpret_cast<uint64_t>(passState.pipeline), debugName);
+  }
 }
 
-void DestroyReSTIRRayTracingPass(nvvk::ResourceAllocator* allocator, ReSTIRRayTracingPassState& passState)
+void DestroyReSTIRRayTracingPass(VkDevice device, ReSTIRRayTracingPassState& passState)
 {
-  if(allocator == nullptr)
+  // The SBT is released first because it was built from the pipeline.
+  passState.sbt.Destroy();
+
+  if(passState.pipeline != VK_NULL_HANDLE)
   {
-    return;
+    vkDestroyPipeline(device, passState.pipeline, nullptr);
   }
 
-  VkDevice device = allocator->getDevice();
-  allocator->destroyBuffer(passState.sbtBuffer);
-  passState.sbtBuffer = {};
-  passState.sbtGenerator.deinit();
-  passState.sbtRegions = {};
-  vkDestroyPipeline(device, passState.pipeline, nullptr);
   passState.pipeline = VK_NULL_HANDLE;
 }
 
-VkPipeline CreateReSTIRComputePipeline(nvvk::ResourceAllocator* allocator,
-                                         VkPipelineLayout pipelineLayout,
-                                         const VkShaderModuleCreateInfo& shaderCode,
-                                         const char* debugName)
+VkPipeline CreateReSTIRComputePipeline(VkDevice device, const rtpt::Diagnostics* diagnostics, VkPipelineLayout pipelineLayout, std::span<const uint32_t> spirv, const char* debugName)
 {
-  VkShaderModule shaderModule = VK_NULL_HANDLE;
-  // Compute passes use a single entry point named "main".
-  NVVK_CHECK(vkCreateShaderModule(allocator->getDevice(), &shaderCode, nullptr, &shaderModule));
-
-  const VkPipelineShaderStageCreateInfo shaderStage{
-      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = shaderModule,
-      .pName  = "main",
-  };
-  const VkComputePipelineCreateInfo pipelineInfo{
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = shaderStage,
-      .layout = pipelineLayout,
-  };
-
   VkPipeline pipeline = VK_NULL_HANDLE;
-  NVVK_CHECK(vkCreateComputePipelines(allocator->getDevice(), VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
-  nvvk::DebugUtil::getInstance().setObjectName(pipeline, debugName);
-  vkDestroyShaderModule(allocator->getDevice(), shaderModule, nullptr);
+
+  rtpt::CheckVk(rtpt::CreateComputePipeline(device, pipelineLayout, spirv, pipeline), "CreateComputePipeline(ReSTIR PT)");
+
+  if(diagnostics != nullptr)
+  {
+    diagnostics->SetObjectName(device, VK_OBJECT_TYPE_PIPELINE, reinterpret_cast<uint64_t>(pipeline), debugName);
+  }
+
   return pipeline;
 }
 
-void TransitionStorageImageForWrite(VkCommandBuffer cmd, nvvk::Image& image, VkPipelineStageFlags2 dstStageMask)
+void TransitionReSTIRStorageImages(VkCommandBuffer cmd, rtpt::Image& accumulationImage, VkImage outputImage, VkPipelineStageFlags2 destinationStages)
 {
-  if(image.image == VK_NULL_HANDLE)
-  {
-    return;
-  }
+  std::array<VkImageMemoryBarrier2, 2> barriers {};
+  uint32_t count = 0;
 
-  if(image.descriptor.imageLayout == VK_IMAGE_LAYOUT_GENERAL)
-  {
-    // The image is already in the right layout, but this still orders previous writes before this pass.
-    const VkImageMemoryBarrier2 imageBarrier{
-        .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
-        .srcAccessMask = VK_ACCESS_2_NONE,
-        .dstStageMask  = dstStageMask,
-        .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-        .oldLayout     = VK_IMAGE_LAYOUT_GENERAL,
-        .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
-        .image         = image.image,
-        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
-    };
-    const VkDependencyInfo dependencyInfo{
-        .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers    = &imageBarrier,
-    };
-    vkCmdPipelineBarrier2(cmd, &dependencyInfo);
-    return;
-  }
+  // Accumulation image
+  // Same rule as TransitionStorageImageForWrite's eOrderAfterPreviousWrites: accumulated history must survive, so an image with contents is ordered after every earlier writer.
 
-  const VkImageMemoryBarrier2 imageBarrier{
-      .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-      .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
-      .srcAccessMask = VK_ACCESS_2_NONE,
-      .dstStageMask  = dstStageMask,
-      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-      .oldLayout     = image.descriptor.imageLayout,
-      .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
-      .image         = image.image,
-      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
+  const VkImageLayout accumulationOldLayout = accumulationImage.descriptor.imageLayout;
+  const bool accumulationHasContents = accumulationOldLayout != VK_IMAGE_LAYOUT_UNDEFINED;
+
+  barriers[count++] = {
+      .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+      .srcStageMask     = accumulationHasContents ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT : VK_PIPELINE_STAGE_2_NONE,
+      .srcAccessMask    = accumulationHasContents ? VK_ACCESS_2_MEMORY_WRITE_BIT : VK_ACCESS_2_NONE,
+      .dstStageMask     = destinationStages,
+      .dstAccessMask    = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+      .oldLayout        = accumulationOldLayout,
+      .newLayout        = VK_IMAGE_LAYOUT_GENERAL,
+      .image            = accumulationImage.image,
+      .subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
   };
-  const VkDependencyInfo dependencyInfo{
+
+  accumulationImage.descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+  // Output image
+  // The output target is owned by the caller and entered from UNDEFINED every frame, so its previous contents are discarded and the shaders only need write access.
+
+  barriers[count++] = {
+      .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+      .dstStageMask     = destinationStages,
+      .dstAccessMask    = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED,
+      .newLayout        = VK_IMAGE_LAYOUT_GENERAL,
+      .image            = outputImage,
+      .subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 },
+  };
+
+  const VkDependencyInfo dependency {
       .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .imageMemoryBarrierCount = 1,
-      .pImageMemoryBarriers    = &imageBarrier,
+      .imageMemoryBarrierCount = count,
+      .pImageMemoryBarriers    = barriers.data(),
   };
-  // First use this frame moves the image into GENERAL so shaders can write it.
-  vkCmdPipelineBarrier2(cmd, &dependencyInfo);
-  image.descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+  vkCmdPipelineBarrier2(cmd, &dependency);
 }
 
-void TransitionReSTIRStorageImages(VkCommandBuffer cmd, nvvk::Image& accumulationImage, VkImage outputImage,
-                                     VkPipelineStageFlags2 destinationStages)
-{
-  std::array<VkImageMemoryBarrier2, 2> imageBarriers{};
-  uint32_t                             imageBarrierCount = 0;
-
-  if(accumulationImage.descriptor.imageLayout != VK_IMAGE_LAYOUT_GENERAL)
-  {
-    // Accumulation is persistent, so only its first use after creation needs a layout transition.
-    imageBarriers[imageBarrierCount++] = VkImageMemoryBarrier2{
-        .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
-        .srcAccessMask = VK_ACCESS_2_NONE,
-        .dstStageMask  = destinationStages,
-        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-        .oldLayout     = accumulationImage.descriptor.imageLayout,
-        .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
-        .image         = accumulationImage.image,
-        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
-    };
-    accumulationImage.descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-  }
-
-  // The swapchain/G-buffer output image is external to ReSTIR, but final shading writes it as storage.
-  imageBarriers[imageBarrierCount++] = VkImageMemoryBarrier2{
-      .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-      .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
-      .srcAccessMask = VK_ACCESS_2_NONE,
-      .dstStageMask  = destinationStages,
-      .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-      .oldLayout     = VK_IMAGE_LAYOUT_GENERAL,
-      .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
-      .image         = outputImage,
-      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
-  };
-
-  // Both images must be writable before the ray tracing final shading pass starts.
-  const VkDependencyInfo dependencyInfo{
-      .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .imageMemoryBarrierCount = imageBarrierCount,
-      .pImageMemoryBarriers    = imageBarriers.data(),
-  };
-  vkCmdPipelineBarrier2(cmd, &dependencyInfo);
-}
-
-}  // namespace nvsamples
+}  // namespace rtpt

@@ -2,484 +2,377 @@
 #define RESTIR_PT_RESERVOIR_HLSLI
 
 #include "ReSTIR/PTParameters.h"
-// ReSTIRLuminance is the target function. Pulled in here so this header is
-// self-contained rather than depending on include order at each call site.
+// ReSTIRLuminance is the target function. Pulled in here so this header is self-contained rather than depending on include order at each call site.
 #include "ShaderIo.h"
-#include "ReSTIR/Common.h.slang"
+#include "ReSTIR/Common.hlsli"
 
-// Reservoir math for ReSTIR PT. A reservoir here represents one whole path, not a
-// light sample, which is the core difference from the DI reservoir next door.
-//
-// Working (unpacked) form. The packed 64-byte storage form lives in
-// ReSTIRPTPackedReservoir; this struct additionally carries the streaming state
-// (weightSum, targetPdf) that only matters while candidates are being combined.
+// ReSTIRPTReservoir
+// Working (unpacked) form of a ReSTIR PT reservoir. A reservoir here represents one whole path, not a light sample, which is the core difference from a DI reservoir.
+// The packed 64-byte storage form lives in ReSTIRPTPackedReservoir; this struct additionally carries the streaming state (weightSum, targetPdf) that only matters while candidates are being combined.
+
 struct ReSTIRPTReservoir
 {
-    // Integrand of the selected path, RGB. In the paper's primary sample space
-    // formulation F already folds in the MIS weight and the source PDF, so F is
-    // exactly the quantity a plain path tracer would add to its radiance sum for
-    // this contribution. That equivalence is what makes the resampled result
-    // checkable against the reference tracer.
-    float3 F;
+  // Integrand of the selected path, RGB. In the paper's primary sample space formulation F already folds in the MIS weight and the source PDF, so F is exactly the quantity a plain path tracer would add to its radiance sum for this contribution. That equivalence is what makes the resampled result checkable against the reference tracer.
+  float3 F;
 
-    // Unbiased contribution weight. The shaded estimate is F * ucw.
-    float ucw;
+  // Unbiased contribution weight. The shaded estimate is F * ucw.
+  float ucw;
 
-    // Running sum of resampling weights during streaming. Not needed after
-    // finalization, but kept so a partially built reservoir is self-describing.
-    float weightSum;
+  // Running sum of resampling weights during streaming. Not needed after finalization, but kept so a partially built reservoir is self-describing.
+  float weightSum;
 
-    // Target function value of the selected candidate, pHat = luminance(F).
-    // Resampling selects on luminance because the target function must be scalar;
-    // this is the source of ReSTIR's color noise, which Section 6.3 later corrects
-    // by shading with vector weights instead.
-    float targetPdf;
+  // Target function value of the selected candidate, pHat = luminance(F). Resampling selects on luminance because the target function must be scalar; this is the source of ReSTIR's color noise, which Section 6.3 later corrects by shading with vector weights instead.
+  float targetPdf;
 
-    // Confidence weight. Note this counts PATH TREES, not candidates within one:
-    // a single initial-sampling pass produces one sample of path space no matter
-    // how many NEE connections its tree contained. Counting candidates here would
-    // overstate confidence and skew the temporal/spatial MIS weights later.
-    float M;
+  // Confidence weight. This counts PATH TREES, not candidates within one: a single initial-sampling pass produces one sample of path space no matter how many NEE connections its tree contained. Counting candidates here would overstate confidence and skew the temporal/spatial MIS weights later.
+  float M;
 
-    // Regenerates the path prefix during random replay.
-    uint initRandomSeed;
-    // Regenerates the path past the reconnection vertex.
-    uint rcVertexRandomSeed;
-    // M is packed into the low bits on store; the rest are path type flags.
-    uint pathFlags;
+  // Hashed path lineage used for duplication and independent neighbor selection.
+  uint initRandomSeed;
+  // Original packed pixel coordinate used for sampling and replay.
+  uint samplePixel;
+  // M is packed into the low bits on store; the rest are path type flags (RESTIR_PT_PATH_FLAGS_*).
+  uint pathFlags;
 
-    // Reconnection vertex. Unused until the hybrid shift lands: with no reuse
-    // passes there is nothing to shift onto, so initial sampling leaves these
-    // cleared and RESTIR_PT_PATH_FLAGS_HAS_RC_VERTEX unset.
-    uint   rcVertexInstanceId;
-    uint   rcVertexPrimitiveIndex;
-    float2 rcVertexBarycentrics;
-    float3 rcVertexWi;
-    float3 rcVertexRadiance;
-    float  rcVertexJacobianTerms;
-    float  rcVertexNeeLightPdf;
+  // Reconnection vertex instance, or for an NEE endpoint the emissive light index. ReSTIRPTInvalidInstanceId when the path has no anchor.
+  uint rcVertexInstanceId;
+  // Reconnection vertex primitive within the instance; zero for an NEE endpoint.
+  uint rcVertexPrimitiveIndex;
+  // Barycentrics (u, v) on that primitive or light; the first coordinate is 1 - u - v.
+  float2 rcVertexBarycentrics;
+  // Continuation direction sampled at the reconnection vertex; zero for an NEE endpoint.
+  float3 rcVertexWi;
+  // Radiance arriving from the suffix, or the emitted radiance for an NEE endpoint.
+  float3 rcVertexRadiance;
+  // Equation 2's base denominator D_x; see ReSTIRPTPackedReservoir.
+  float rcVertexJacobianTerms;
+  // Original RNG frame, preserved through endpoint selection, storage, and reuse.
+  uint sampleFrame;
 };
 
-// ---------------------------------------------------------------------------
-// Reconnection vertex search
-// ---------------------------------------------------------------------------
-// Running state carried along a path while it looks for a vertex that is safe to
-// reconnect at. This is what makes the hybrid shift possible: the prefix before
-// the reconnection vertex is regenerated by replaying random numbers, and only
-// from the reconnection vertex onward is the path re-attached geometrically.
-//
-// The search must run during path tracing rather than afterwards, because the
-// throughput and sampled direction at the chosen vertex are not recoverable once
-// the path has moved on.
+// ReSTIRPTReconnectionSearch
+// Running state carried along a path while it looks for a vertex that is safe to reconnect at.
+// This is what makes the hybrid shift possible: the prefix before the reconnection vertex is regenerated by replaying random numbers, and only from the reconnection vertex onward is the path re-attached geometrically.
+// The search must run during path tracing rather than afterwards, because the throughput and sampled direction at the chosen vertex are not recoverable once the path has moved on.
+
 struct ReSTIRPTReconnectionSearch
 {
-    // Which accumulation site is about to publish a contribution. Set immediately
-    // before each site so the selection hook, which cannot see who called it, can
-    // record what the candidate actually was.
-    uint pendingEndpointKind;
+  // Which accumulation site is about to publish a contribution (RESTIR_PT_ENDPOINT_KIND_*). Set immediately before each site so the selection hook, which cannot see who called it, can record what the candidate actually was.
+  uint pendingEndpointKind;
 
-    // Set once a qualifying vertex has been found; the first one wins.
-    uint found;
-    // Depth index k of the reconnection vertex.
-    uint length;
+  // Set once a qualifying vertex has been found; the first one wins.
+  uint found;
+  // Depth index k of the reconnection vertex.
+  uint length;
 
-    // Identity of the reconnection vertex, enough to re-locate and re-shade it
-    // without storing a world position.
-    uint   instanceId;
-    uint   primitiveIndex;
-    float2 barycentrics;
+  // Instance of the reconnection vertex. With the two fields below, enough to re-locate and re-shade it without storing a world position.
+  uint instanceId;
+  // Primitive of the reconnection vertex.
+  uint primitiveIndex;
+  // Hit barycentrics of the reconnection vertex.
+  float2 barycentrics;
 
-    // Continuation direction sampled at the reconnection vertex. The suffix is
-    // reconstructed by re-evaluating the BSDF there for this direction.
-    float3 wi;
+  // Continuation direction sampled at the reconnection vertex. The suffix is reconstructed by re-evaluating the BSDF there for this direction.
+  float3 wi;
 
-    // Throughput of the path *after* the BSDF sample at the reconnection vertex.
-    // Dividing a candidate's integrand by this recovers the radiance arriving from
-    // the suffix, which is the quantity the shift actually reuses.
-    float3 suffixThroughput;
+  // Throughput of the path *after* the BSDF sample at the reconnection vertex. Dividing a candidate's integrand by this recovers the radiance arriving from the suffix, which is the quantity the shift actually reuses.
+  float3 suffixThroughput;
 
-    // Roughness at the preceding vertex, kept so the criteria can be evaluated
-    // against a pair of surfaces rather than a single one.
-    float prevRoughness;
+  // Roughness at the preceding vertex, kept so the criteria can be evaluated against a pair of surfaces rather than a single one.
+  float prevRoughness;
 
-    // State of the preceding vertex, captured as the path leaves it. Equation 2's
-    // base denominator needs the density and lobe of the event that produced the
-    // connection segment, and neither is recoverable once the path has moved on.
-    uint   prevLobeKind;
-    float  prevSamplePdf;
-    float3 prevGeometricNormal;
+  // Proposal group sampled at the preceding vertex, captured as the path leaves it. Equation 2's base denominator needs the density and lobe of the event that produced the connection segment, and neither is recoverable once the path has moved on.
+  uint prevLobeKind;
+  // Density of the BSDF sample leaving the preceding vertex, for the same reason.
+  float prevSamplePdf;
+  // Geometric normal of the preceding vertex, for the single-sided geometry term.
+  float3 prevGeometricNormal;
 
-    // Proposal group selected AT the reconnection vertex, producing wi above.
-    uint lobeKind;
+  // Proposal group selected AT the reconnection vertex, producing wi above.
+  uint lobeKind;
 
-    // Snapshot of the PREDECESSOR's lobe, frozen when the reconnection vertex was
-    // chosen. Distinct from prevLobeKind above, which keeps advancing with the
-    // path: a candidate selected several vertices later would otherwise store some
-    // unrelated vertex's lobe and silently evaluate the wrong BSDF group at shift
-    // time.
-    uint rcPrevLobeKind;
+  // Snapshot of the PREDECESSOR's lobe, frozen when the reconnection vertex was chosen. Distinct from prevLobeKind above, which keeps advancing with the path: a candidate selected several vertices later would otherwise store some unrelated vertex's lobe and silently evaluate the wrong BSDF group at shift time.
+  uint rcPrevLobeKind;
 
-    // Pending emissive NEE sample at the CURRENT vertex, published by the light
-    // sampler before its contribution is accumulated. A path whose selected
-    // contribution is that NEE event can adopt the light vertex as its anchor even
-    // when no interior vertex qualified - which is the only way direct lighting at
-    // the primary hit becomes shiftable at all.
-    uint   neeLightIndex;
-    float2 neeBarycentrics;
-    float3 neeRadiance;
-    float  neePdf;
-    // Depth of the shading vertex the NEE ray left from. The anchor is the light,
-    // so the replayed prefix must stop one vertex earlier.
-    uint   neeShadingDepth;
-    uint   neeValid;
+  // Emissive list index of the pending NEE sample at the CURRENT vertex, published by the light sampler before its contribution is accumulated. A path whose selected contribution is that NEE event can adopt the light vertex as its anchor even when no interior vertex qualified, which is the only way direct lighting at the primary hit becomes shiftable at all.
+  uint neeLightIndex;
+  // Barycentrics (u, v) of the pending NEE light point.
+  float2 neeBarycentrics;
+  // Emitted radiance at the pending NEE light point.
+  float3 neeRadiance;
+  // Solid angle density of the pending NEE light sample.
+  float neePdf;
+  // Depth of the shading vertex the NEE ray left from. The anchor is the light, so the replayed prefix must stop one vertex earlier.
+  uint neeShadingDepth;
+  // Nonzero once a pending NEE sample has been published.
+  uint neeValid;
 
-    // Equation 2's base denominator D_x, assembled once the reconnection vertex is
-    // chosen. See rcVertexJacobianTerms in PTParameters.h.
-    float jacobianTerms;
-    // Endpoint MIS term, not a Jacobian term. Set once unified NEE endpoints carry
-    // their technique metadata.
-    float neeLightPdf;
+  // Equation 2's base denominator D_x, assembled once the reconnection vertex is chosen. See rcVertexJacobianTerms in PTParameters.h.
+  float jacobianTerms;
 };
 
 ReSTIRPTReconnectionSearch EmptyPTReconnectionSearch()
 {
-    ReSTIRPTReconnectionSearch search;
-    search.pendingEndpointKind = RESTIR_PT_ENDPOINT_KIND_INTERIOR;
-    search.found            = 0;
-    search.length           = 0;
-    search.instanceId       = ReSTIRPTInvalidInstanceId;
-    search.primitiveIndex   = 0;
-    search.barycentrics     = float2(0.0);
-    search.wi               = float3(0.0);
-    search.suffixThroughput = float3(0.0);
-    search.prevRoughness       = 0.0;
-    search.prevLobeKind        = 0;
-    search.prevSamplePdf       = 0.0;
-    search.prevGeometricNormal = float3(0.0);
-    search.lobeKind            = 0;
-    search.rcPrevLobeKind      = 0;
-    search.neeLightIndex       = 0;
-    search.neeBarycentrics     = float2(0.0);
-    search.neeRadiance         = float3(0.0);
-    search.neePdf              = 0.0;
-    search.neeShadingDepth     = 0;
-    search.neeValid            = 0;
-    search.jacobianTerms       = 0.0;
-    search.neeLightPdf         = 0.0;
-    return search;
+  ReSTIRPTReconnectionSearch search;
+
+  search.pendingEndpointKind = RESTIR_PT_ENDPOINT_KIND_INTERIOR;
+  search.found               = 0;
+  search.length              = 0;
+  search.instanceId          = ReSTIRPTInvalidInstanceId;
+  search.primitiveIndex      = 0;
+  search.barycentrics        = (float2)0.0;
+  search.wi                  = (float3)0.0;
+  search.suffixThroughput    = (float3)0.0;
+  search.prevRoughness       = 0.0;
+  search.prevLobeKind        = 0;
+  search.prevSamplePdf       = 0.0;
+  search.prevGeometricNormal = (float3)0.0;
+  search.lobeKind            = 0;
+  search.rcPrevLobeKind      = 0;
+  search.neeLightIndex       = 0;
+  search.neeBarycentrics     = (float2)0.0;
+  search.neeRadiance         = (float3)0.0;
+  search.neePdf              = 0.0;
+  search.neeShadingDepth     = 0;
+  search.neeValid            = 0;
+  search.jacobianTerms       = 0.0;
+
+  return search;
 }
 
 // Legacy reconnection criteria from the original ReSTIR PT [Lin et al. 2022].
-//
-// Both thresholds guard the same failure: reconnecting where the path's density
-// changes sharply between two pixels. The distance test avoids the geometric
-// singularity of connecting across a near-zero gap; the roughness test avoids
-// glossy lobes, where redirecting the incoming direction changes the BSDF value
-// enormously. They are interdependent - a longer connection is safe at lower
-// roughness and vice versa - which is exactly why they need per-scene tuning, and
-// exactly what the footprint criteria of Section 4 replace.
-bool PassesLegacyReconnectionCriteria(float previousRoughness,
-                                      float vertexRoughness,
-                                      float connectionDistance,
-                                      float minRoughness,
-                                      float minDistance)
+// Both thresholds guard the same failure: reconnecting where the path's density changes sharply between two pixels. The distance test avoids the geometric singularity of connecting across a near-zero gap; the roughness test avoids glossy lobes, where redirecting the incoming direction changes the BSDF value enormously.
+// They are interdependent (a longer connection is safe at lower roughness and vice versa), which is exactly why they need per-scene tuning, and exactly what the footprint criteria of Section 4 replace.
+bool PassesLegacyReconnectionCriteria(float previousRoughness, float vertexRoughness, float connectionDistance, float minRoughness, float minDistance)
 {
-    return connectionDistance >= minDistance && min(previousRoughness, vertexRoughness) >= minRoughness;
+  return connectionDistance >= minDistance && min(previousRoughness, vertexRoughness) >= minRoughness;
 }
 
-// Dual ray footprint criteria (paper Section 4, Equation 5).
-//
-//   min( (p_{k-1}(w_{k-1}) G(x_{k-1}->x_k))^-1, (p_k(w_k) G(x_k->x_{k-1}))^-1 )
-//        >=  (c/100) * ||x0-x1||^2 / ( <n_x1, d_x1x0> / (4*pi) )
-//
-// The reciprocal of an area probability density IS a footprint - the area one
-// sample represents - so both sides are areas. The test asks whether the
-// reconnection's footprint is large compared to the primary ray's: a large
-// footprint means the density varies slowly across it, so redirecting the path
-// through a nearby pixel barely changes the density, and the shift Jacobian stays
-// near one.
-//
-// This replaces the legacy distance+roughness pair, whose two thresholds are
-// interdependent and need per-scene tuning. Here scene scale cancels: both sides
-// scale with the square of distance, leaving one dimensionless constant.
-//
-// Everything needed is available while the path is being traced, which matters:
-// the criteria must be sample-independent. Rejecting a reconnection later, based
-// on the Jacobian it produced, would make the decision depend on the sample and
-// bias the estimator.
-bool PassesFootprintReconnectionCriteria(float  previousSamplePdf,
-                                         float  vertexSamplePdf,
-                                         float3 previousPosition,
-                                         float3 previousNormal,
-                                         float3 vertexPosition,
-                                         float3 vertexNormal,
-                                         float3 primaryPosition,
-                                         float3 primaryNormal,
-                                         float3 cameraPosition,
-                                         float  footprintThreshold,
-                                         bool   skipInverseFootprint)
+// Dual ray footprint criteria (paper Section 4, Equation 5):
+//   min( (p_{k-1}(w_{k-1}) G(x_{k-1}->x_k))^-1, (p_k(w_k) G(x_k->x_{k-1}))^-1 ) >= (c/100) * ||x0-x1||^2 / ( <n_x1, d_x1x0> / (4*pi) )
+// The reciprocal of an area probability density IS a footprint, the area one sample represents, so both sides are areas. The test asks whether the reconnection's footprint is large compared to the primary ray's: a large footprint means the density varies slowly across it, so redirecting the path through a nearby pixel barely changes the density, and the shift Jacobian stays near one.
+// This replaces the legacy distance+roughness pair, whose two thresholds are interdependent and need per-scene tuning. Here scene scale cancels: both sides scale with the square of distance, leaving one dimensionless constant.
+// Everything needed is available while the path is being traced, which matters: the criteria must be sample-independent. Rejecting a reconnection later, based on the Jacobian it produced, would make the decision depend on the sample and bias the estimator.
+bool PassesFootprintReconnectionCriteria(float previousSamplePdf, float vertexSamplePdf, float3 previousPosition, float3 previousNormal, float3 vertexPosition, float3 vertexNormal, float3 primaryPosition, float3 primaryNormal, float3 cameraPosition, float footprintThreshold, bool skipInverseFootprint)
 {
-    const float3 delta      = vertexPosition - previousPosition;
-    const float  distanceSq = dot(delta, delta);
-    if(!(distanceSq > 1.0e-12))
+  const float3 delta      = vertexPosition - previousPosition;
+  const float  distanceSq = dot(delta, delta);
+
+  if(!(distanceSq > 1.0e-12))
+  {
+    return false;
+  }
+
+  const float3 direction = delta * rsqrt(distanceSq);
+
+  // Reconnection footprints
+  // Single-sided geometry terms, each measured at its own source vertex.
+  // Equation 5's RHS and its constant are verified against the paper (c = 0.02, "i.e. c/100 = 0.0002", over the primary ray footprint ||x0-x1||^2 divided by <n_x1, d_x1x0>/(4*pi)). The LHS orientation is NOT pinned down by the paper's wording, so it was settled by measurement.
+  // Mean forward Jacobian on Cornell Box at sampling radius 30, unpaired:
+  //   cosine at each source vertex (this code)   1.037
+  //   cosine at each receiving vertex            1.131
+  //   full symmetric cos*cos/d^2 term            1.170
+  // This form is the best of the three, so it stays. None of them changes the PAIRED path at radius 30, which sits at 1.66 in all three, so whatever makes paired reuse degrade with radius, it is not this criterion.
+
+  const float geometryForward = max(0.0, dot(previousNormal, direction)) / distanceSq;
+  const float geometryInverse = max(0.0, dot(vertexNormal, -direction)) / distanceSq;
+
+  const float densityForward = previousSamplePdf * geometryForward;
+  const float densityInverse = vertexSamplePdf * geometryInverse;
+
+  if(!(densityForward > 0.0))
+  {
+    return false;
+  }
+
+  float smallestFootprint = 1.0 / densityForward;
+
+  // Footnote 6: for a diffuse or emissive reconnection vertex the outgoing density does not change under reconnection, so this half of the test has nothing to constrain and is skipped rather than failed.
+  if(!skipInverseFootprint)
+  {
+    if(!(densityInverse > 0.0))
     {
-        return false;
+      return false;
     }
 
-    const float3 direction = delta * rsqrt(distanceSq);
+    smallestFootprint = min(smallestFootprint, 1.0 / densityInverse);
+  }
 
-    // Single-sided geometry terms, each measured at its own source vertex.
-    //
-    // Equation 5's RHS and its constant are verified against the paper (c = 0.02,
-    // "i.e. c/100 = 0.0002", over the primary ray footprint ||x0-x1||^2 divided by
-    // <n_x1, d_x1x0>/(4*pi)). The LHS orientation is NOT pinned down by the paper's
-    // wording, so it was settled by measurement. Mean forward Jacobian on Cornell
-    // Box at sampling radius 30, unpaired:
-    //
-    //   cosine at each source vertex (this code)   1.037
-    //   cosine at each receiving vertex            1.131
-    //   full symmetric cos*cos/d^2 term            1.170
-    //
-    // This form is the best of the three, so it stays. Note none of them changes the
-    // PAIRED path at radius 30, which sits at 1.66 in all three - so whatever makes
-    // paired reuse degrade with radius, it is not this criterion.
-    const float geometryForward = max(0.0, dot(previousNormal, direction)) / distanceSq;
-    const float geometryInverse = max(0.0, dot(vertexNormal, -direction)) / distanceSq;
+  // Primary ray footprint
+  // The area one pixel's primary ray covers at the first hit. This is what makes the criterion scene-independent: it is the natural length scale of "how far apart neighbouring pixels' paths start".
 
-    const float densityForward = previousSamplePdf * geometryForward;
-    const float densityInverse = vertexSamplePdf * geometryInverse;
-    if(!(densityForward > 0.0))
-    {
-        return false;
-    }
+  const float3 toCamera         = cameraPosition - primaryPosition;
+  const float  primaryDistance  = dot(toCamera, toCamera);
+  const float  viewCosine       = max(dot(primaryNormal, normalize(toCamera)), 1.0e-4);
+  const float  primaryFootprint = primaryDistance / (viewCosine / (4.0 * 3.14159265358979));
 
-    float smallestFootprint = 1.0 / densityForward;
-    if(!skipInverseFootprint)
-    {
-        // Footnote 6: for a diffuse or emissive reconnection vertex the outgoing
-        // density does not change under reconnection, so this half of the test has
-        // nothing to constrain and is skipped rather than failed.
-        if(!(densityInverse > 0.0))
-        {
-            return false;
-        }
-        smallestFootprint = min(smallestFootprint, 1.0 / densityInverse);
-    }
-
-    // Primary ray footprint: the area one pixel's primary ray covers at the first
-    // hit. This is what makes the criterion scene-independent - it is the natural
-    // length scale of "how far apart neighbouring pixels' paths start".
-    const float3 toCamera        = cameraPosition - primaryPosition;
-    const float  primaryDistance = dot(toCamera, toCamera);
-    const float  viewCosine      = max(dot(primaryNormal, normalize(toCamera)), 1.0e-4);
-    const float  primaryFootprint = primaryDistance / (viewCosine / (4.0 * 3.14159265358979));
-
-    // c/100 with the paper's c = 0.02, i.e. 0.0002.
-    return smallestFootprint >= (footprintThreshold / 100.0) * primaryFootprint;
+  // c/100 with the paper's c = 0.02, i.e. 0.0002.
+  return smallestFootprint >= (footprintThreshold / 100.0) * primaryFootprint;
 }
 
 ReSTIRPTReservoir EmptyPTReservoir()
 {
-    ReSTIRPTReservoir reservoir;
-    reservoir.F                      = float3(0.0);
-    reservoir.ucw                    = 0.0;
-    reservoir.weightSum              = 0.0;
-    reservoir.targetPdf              = 0.0;
-    reservoir.M                      = 0.0;
-    reservoir.initRandomSeed         = 0;
-    reservoir.rcVertexRandomSeed     = 0;
-    reservoir.pathFlags              = 0;
-    reservoir.rcVertexInstanceId     = ReSTIRPTInvalidInstanceId;
-    reservoir.rcVertexPrimitiveIndex = 0;
-    reservoir.rcVertexBarycentrics   = float2(0.0);
-    reservoir.rcVertexWi             = float3(0.0);
-    reservoir.rcVertexRadiance       = float3(0.0);
-    reservoir.rcVertexJacobianTerms  = 0.0;
-    reservoir.rcVertexNeeLightPdf    = 0.0;
-    return reservoir;
+  ReSTIRPTReservoir reservoir;
+
+  reservoir.F                      = (float3)0.0;
+  reservoir.ucw                    = 0.0;
+  reservoir.weightSum              = 0.0;
+  reservoir.targetPdf              = 0.0;
+  reservoir.M                      = 0.0;
+  reservoir.initRandomSeed         = 0;
+  reservoir.samplePixel              = 0;
+  reservoir.sampleFrame              = 0;
+  reservoir.pathFlags              = 0;
+  reservoir.rcVertexInstanceId     = ReSTIRPTInvalidInstanceId;
+  reservoir.rcVertexPrimitiveIndex = 0;
+  reservoir.rcVertexBarycentrics   = (float2)0.0;
+  reservoir.rcVertexWi             = (float3)0.0;
+  reservoir.rcVertexRadiance       = (float3)0.0;
+  reservoir.rcVertexJacobianTerms  = 0.0;
+
+  return reservoir;
 }
 
 bool IsValidPTReservoir(ReSTIRPTReservoir reservoir)
 {
-    return reservoir.M > 0.0 && reservoir.ucw > 0.0;
+  return reservoir.M > 0.0 && reservoir.ucw > 0.0;
 }
 
-// Streams one candidate path into the reservoir (weighted reservoir sampling).
-//
-// The candidate's source PDF is 1 because the path tracer generates paths by
-// consuming uniform random numbers in primary sample space, so the resampling
-// weight reduces to the target function value itself.
-//
-// randomValue is supplied by the caller rather than drawn here: the reservoir math
-// deliberately owns no RNG, which keeps this header free of path tracing
-// dependencies and lets the caller control which random stream is consumed.
-//
-// Returns true when this candidate replaced the currently selected one.
-// candidateUcw is the unbiased contribution weight the candidate arrives with. It
-// is 1 for a contribution that is already its own estimate, and the resampling
-// weight for one produced by an inner RIS - see PTNeeRis.h.slang, where keeping it
-// OUT of the contribution is what lets the shift rebuild that contribution
-// elsewhere.
+// Streams one candidate path into the reservoir (weighted reservoir sampling). Returns true when this candidate replaced the currently selected one.
+// The candidate's source PDF is 1 because the path tracer generates paths by consuming uniform random numbers in primary sample space, so the resampling weight reduces to the target function value times candidateUcw.
+// candidateUcw is the unbiased contribution weight the candidate arrives with. It is 1 for a contribution that is already its own estimate, and the resampling weight for one produced by an inner RIS; see PTNeeRis.hlsli, where keeping it OUT of the contribution is what lets the shift rebuild that contribution elsewhere.
+// randomValue is supplied by the caller rather than drawn here: the reservoir math deliberately owns no RNG, which keeps this header free of path tracing dependencies and lets the caller control which random stream is consumed.
 bool StreamPTCandidate(inout ReSTIRPTReservoir reservoir, float3 contribution, float candidateUcw, float randomValue)
 {
-    const float target = ReSTIRLuminance(contribution);
-    const float weight = target * candidateUcw;
-    if(!(weight > 0.0))
-    {
-        // Zero-luminance candidates (occluded, black, or NaN) carry no resampling
-        // weight. Skipping them entirely keeps weightSum finite and avoids
-        // selecting a sample that can never contribute.
-        return false;
-    }
+  const float target = ReSTIRLuminance(contribution);
+  const float weight = target * candidateUcw;
 
-    reservoir.weightSum += weight;
-
-    // Select this candidate with probability weight/weightSum. Applied
-    // incrementally, this leaves every candidate selected in proportion to its
-    // weight without needing to store the whole tree.
-    if(randomValue * reservoir.weightSum < weight)
-    {
-        reservoir.F         = contribution;
-        reservoir.targetPdf = target;
-        return true;
-    }
-
+  // Zero-luminance candidates (occluded, black, or NaN) carry no resampling weight. Skipping them entirely keeps weightSum finite and avoids selecting a sample that can never contribute.
+  if(!(weight > 0.0))
+  {
     return false;
+  }
+
+  reservoir.weightSum += weight;
+
+  // Select this candidate with probability weight/weightSum. Applied incrementally, this leaves every candidate selected in proportion to its weight without needing to store the whole tree.
+  if(randomValue * reservoir.weightSum < weight)
+  {
+    reservoir.F         = contribution;
+    reservoir.targetPdf = target;
+
+    return true;
+  }
+
+  return false;
 }
 
 // Attaches the current reconnection vertex to the reservoir's selected sample.
-//
-// Must be called immediately after a candidate wins selection, because the search
-// state describes the prefix of the path as it stands right now. Later vertices
-// would describe a different path.
-//
-// contributionDepth is the path depth at which the winning contribution occurred.
-// A contribution shallower than the reconnection vertex belongs to a path that
-// never reached it - direct lighting at the primary hit, for instance - and such a
-// path has no reconnection anchor at all. Marking it as having one would make the
-// shift reconnect at a vertex the path does not contain.
-void ApplyPTReconnectionToReservoir(inout ReSTIRPTReservoir reservoir,
-                                    ReSTIRPTReconnectionSearch search,
-                                    uint contributionDepth)
+// Must be called immediately after a candidate wins selection, because the search state describes the prefix of the path as it stands right now. Later vertices would describe a different path.
+// contributionDepth is the path depth at which the winning contribution occurred. A contribution shallower than the reconnection vertex belongs to a path that never reached it (direct lighting at the primary hit, for instance), and such a path has no reconnection anchor at all. Marking it as having one would make the shift reconnect at a vertex the path does not contain.
+void ApplyPTReconnectionToReservoir(inout ReSTIRPTReservoir reservoir, ReSTIRPTReconnectionSearch search, uint contributionDepth)
 {
-    // Recorded for every selected candidate, with or without an anchor: full
-    // replay needs to know where the path ends, and the depth is also what
-    // explains a missing anchor (depth 0 is direct lighting at the primary hit,
-    // which is too short to contain a reconnection vertex at all).
-    reservoir.pathFlags &= ~RESTIR_PT_PATH_FLAGS_ENDPOINT_DEPTH_MASK;
-    reservoir.pathFlags |= (min(contributionDepth, RESTIR_PT_MAX_ENDPOINT_DEPTH) << RESTIR_PT_PATH_FLAGS_ENDPOINT_DEPTH_SHIFT)
-                           & RESTIR_PT_PATH_FLAGS_ENDPOINT_DEPTH_MASK;
+  // Endpoint description
+  // Recorded for every selected candidate, with or without an anchor: full replay needs to know where the path ends and which estimator produced it, and the depth is also what explains a missing anchor (depth 0 is direct lighting at the primary hit, which is too short to contain a reconnection vertex at all).
 
-    reservoir.pathFlags &= ~RESTIR_PT_PATH_FLAGS_ENDPOINT_KIND_MASK;
-    reservoir.pathFlags |= (search.pendingEndpointKind << RESTIR_PT_PATH_FLAGS_ENDPOINT_KIND_SHIFT)
-                           & RESTIR_PT_PATH_FLAGS_ENDPOINT_KIND_MASK;
+  reservoir.pathFlags &= ~RESTIR_PT_PATH_FLAGS_ENDPOINT_DEPTH_MASK;
+  reservoir.pathFlags |= (min(contributionDepth, RESTIR_PT_MAX_ENDPOINT_DEPTH) << RESTIR_PT_PATH_FLAGS_ENDPOINT_DEPTH_SHIFT) & RESTIR_PT_PATH_FLAGS_ENDPOINT_DEPTH_MASK;
 
-    // Forced NEE light reconnection (paper Section 6.2.3). When the selected
-    // contribution is the emissive NEE sample just published at this vertex, the
-    // light vertex itself becomes the anchor. The usual depth guard below does not
-    // apply here: for an NEE endpoint the anchor IS the endpoint, so requiring the
-    // contribution to lie beyond it would reject every one of them.
-    //
-    // Preferred over any earlier interior anchor because the suffix past a light
-    // vertex is empty: reconnecting there needs no stored continuation direction
-    // and no replay beyond the shading vertex.
-    if(search.neeValid != 0 && search.neeShadingDepth == contributionDepth)
-    {
-        reservoir.pathFlags &= ~(RESTIR_PT_PATH_FLAGS_RC_LENGTH_MASK | RESTIR_PT_PATH_FLAGS_RC_LOBE_MASK
-                                 | RESTIR_PT_PATH_FLAGS_RC_PREV_LOBE_MASK);
-        // The anchor sits one vertex past the shading vertex, so the replayed
-        // prefix must stop at the shading vertex itself.
-        const uint anchorLength = min(contributionDepth + 1u, RESTIR_PT_MAX_RC_LENGTH);
-        reservoir.pathFlags |= RESTIR_PT_PATH_FLAGS_HAS_RC_VERTEX | RESTIR_PT_PATH_FLAGS_NEE_ENDPOINT
-                             | ((anchorLength << RESTIR_PT_PATH_FLAGS_RC_LENGTH_SHIFT) & RESTIR_PT_PATH_FLAGS_RC_LENGTH_MASK);
+  reservoir.pathFlags &= ~RESTIR_PT_PATH_FLAGS_ENDPOINT_KIND_MASK;
+  reservoir.pathFlags |= (search.pendingEndpointKind << RESTIR_PT_PATH_FLAGS_ENDPOINT_KIND_SHIFT) & RESTIR_PT_PATH_FLAGS_ENDPOINT_KIND_MASK;
 
-        // The light is addressed by its index in the emissive list, which yields
-        // both its geometry and its sampling probability at shift time.
-        reservoir.rcVertexInstanceId     = search.neeLightIndex;
-        reservoir.rcVertexPrimitiveIndex = 0;
-        reservoir.rcVertexBarycentrics   = search.neeBarycentrics;
-        reservoir.rcVertexWi             = float3(0.0);
-        // Emitted radiance only. The BSDF, light PDF and MIS weight all depend on
-        // the vertex the ray left from, so they must be recomputed in the target
-        // domain rather than baked in here.
-        reservoir.rcVertexRadiance      = search.neeRadiance;
-        reservoir.rcVertexNeeLightPdf   = search.neePdf;
-        reservoir.rcVertexJacobianTerms = 0.0;
-        return;
-    }
+  // Forced NEE light reconnection
+  // Paper Section 6.2.3. When the selected contribution is the emissive NEE sample just published at this vertex, the light vertex itself becomes the anchor.
+  // The usual depth guard below does not apply here: for an NEE endpoint the anchor IS the endpoint, so requiring the contribution to lie beyond it would reject every one of them.
+  // Preferred over any earlier interior anchor because the suffix past a light vertex is empty: reconnecting there needs no stored continuation direction and no replay beyond the shading vertex.
 
-    reservoir.pathFlags &= ~RESTIR_PT_PATH_FLAGS_NEE_ENDPOINT;
-    if(search.found == 0 || contributionDepth <= search.length)
-    {
-        // No usable anchor: the shift must fall back to replaying the whole path.
-        // That is always valid, just more expensive.
-        reservoir.pathFlags &= ~(RESTIR_PT_PATH_FLAGS_HAS_RC_VERTEX | RESTIR_PT_PATH_FLAGS_RC_LENGTH_MASK
-                                 | RESTIR_PT_PATH_FLAGS_RC_LOBE_MASK | RESTIR_PT_PATH_FLAGS_RC_PREV_LOBE_MASK);
-        reservoir.rcVertexInstanceId     = ReSTIRPTInvalidInstanceId;
-        reservoir.rcVertexPrimitiveIndex = 0;
-        reservoir.rcVertexBarycentrics   = float2(0.0);
-        reservoir.rcVertexWi             = float3(0.0);
-        reservoir.rcVertexRadiance       = float3(0.0);
-        reservoir.rcVertexJacobianTerms  = 0.0;
-        reservoir.rcVertexNeeLightPdf    = 0.0;
-        return;
-    }
+  if(search.neeValid != 0 && search.neeShadingDepth == contributionDepth)
+  {
+    reservoir.pathFlags &= ~(RESTIR_PT_PATH_FLAGS_RC_LENGTH_MASK | RESTIR_PT_PATH_FLAGS_RC_LOBE_MASK | RESTIR_PT_PATH_FLAGS_RC_PREV_LOBE_MASK);
 
-    reservoir.pathFlags &= ~RESTIR_PT_PATH_FLAGS_RC_LENGTH_MASK;
-    reservoir.pathFlags |= RESTIR_PT_PATH_FLAGS_HAS_RC_VERTEX
-                         | ((min(search.length, RESTIR_PT_MAX_RC_LENGTH) << RESTIR_PT_PATH_FLAGS_RC_LENGTH_SHIFT)
-                            & RESTIR_PT_PATH_FLAGS_RC_LENGTH_MASK);
+    // The anchor sits one vertex past the shading vertex, so the replayed prefix must stop at the shading vertex itself.
+    const uint anchorLength = min(contributionDepth + 1u, RESTIR_PT_MAX_RC_LENGTH);
 
-    reservoir.rcVertexInstanceId     = search.instanceId;
-    reservoir.rcVertexPrimitiveIndex = search.primitiveIndex;
-    reservoir.rcVertexBarycentrics   = search.barycentrics;
-    reservoir.rcVertexWi             = search.wi;
-    reservoir.rcVertexJacobianTerms  = search.jacobianTerms;
-    reservoir.rcVertexNeeLightPdf    = search.neeLightPdf;
+    reservoir.pathFlags |= RESTIR_PT_PATH_FLAGS_HAS_RC_VERTEX | RESTIR_PT_PATH_FLAGS_NEE_ENDPOINT | ((anchorLength << RESTIR_PT_PATH_FLAGS_RC_LENGTH_SHIFT) & RESTIR_PT_PATH_FLAGS_RC_LENGTH_MASK);
 
-    // The lobes are part of the shift's contract, not decoration: evaluating a
-    // different group in the target domain silently changes the estimator.
-    reservoir.pathFlags &= ~(RESTIR_PT_PATH_FLAGS_RC_LOBE_MASK | RESTIR_PT_PATH_FLAGS_RC_PREV_LOBE_MASK);
-    reservoir.pathFlags |= (search.lobeKind << RESTIR_PT_PATH_FLAGS_RC_LOBE_SHIFT) & RESTIR_PT_PATH_FLAGS_RC_LOBE_MASK;
-    reservoir.pathFlags |= (search.rcPrevLobeKind << RESTIR_PT_PATH_FLAGS_RC_PREV_LOBE_SHIFT) & RESTIR_PT_PATH_FLAGS_RC_PREV_LOBE_MASK;
+    // The light is addressed by its index in the emissive list, which yields both its geometry and its sampling probability at shift time.
+    reservoir.rcVertexInstanceId     = search.neeLightIndex;
+    reservoir.rcVertexPrimitiveIndex = 0;
+    reservoir.rcVertexBarycentrics   = search.neeBarycentrics;
+    reservoir.rcVertexWi             = (float3)0.0;
 
-    // Recover the radiance arriving from the suffix by removing the prefix
-    // throughput the shift will recompute in the target domain. Channels where the
-    // throughput vanished carry no light, so zero is the correct answer there
-    // rather than a division blow-up.
-    reservoir.rcVertexRadiance = select(search.suffixThroughput > 0.0, reservoir.F / max(search.suffixThroughput, 1.0e-8), float3(0.0));
+    // Emitted radiance only. The BSDF, light PDF and MIS weight all depend on the vertex the ray left from, so they must be recomputed in the target domain rather than baked in here.
+    reservoir.rcVertexRadiance      = search.neeRadiance;
+    reservoir.rcVertexJacobianTerms = 0.0;
+
+    return;
+  }
+
+  // No usable anchor
+  // The shift must fall back to replaying the whole path. That is always valid, just more expensive.
+
+  reservoir.pathFlags &= ~RESTIR_PT_PATH_FLAGS_NEE_ENDPOINT;
+
+  if(search.found == 0 || contributionDepth <= search.length)
+  {
+    reservoir.pathFlags &= ~(RESTIR_PT_PATH_FLAGS_HAS_RC_VERTEX | RESTIR_PT_PATH_FLAGS_RC_LENGTH_MASK | RESTIR_PT_PATH_FLAGS_RC_LOBE_MASK | RESTIR_PT_PATH_FLAGS_RC_PREV_LOBE_MASK);
+
+    reservoir.rcVertexInstanceId     = ReSTIRPTInvalidInstanceId;
+    reservoir.rcVertexPrimitiveIndex = 0;
+    reservoir.rcVertexBarycentrics   = (float2)0.0;
+    reservoir.rcVertexWi             = (float3)0.0;
+    reservoir.rcVertexRadiance       = (float3)0.0;
+    reservoir.rcVertexJacobianTerms  = 0.0;
+
+    return;
+  }
+
+  // Interior anchor
+
+  reservoir.pathFlags &= ~RESTIR_PT_PATH_FLAGS_RC_LENGTH_MASK;
+  reservoir.pathFlags |= RESTIR_PT_PATH_FLAGS_HAS_RC_VERTEX | ((min(search.length, RESTIR_PT_MAX_RC_LENGTH) << RESTIR_PT_PATH_FLAGS_RC_LENGTH_SHIFT) & RESTIR_PT_PATH_FLAGS_RC_LENGTH_MASK);
+
+  reservoir.rcVertexInstanceId     = search.instanceId;
+  reservoir.rcVertexPrimitiveIndex = search.primitiveIndex;
+  reservoir.rcVertexBarycentrics   = search.barycentrics;
+  reservoir.rcVertexWi             = search.wi;
+  reservoir.rcVertexJacobianTerms  = search.jacobianTerms;
+
+  // Lobes
+  // The lobes are part of the shift's contract, not decoration: evaluating a different group in the target domain silently changes the estimator.
+
+  reservoir.pathFlags &= ~(RESTIR_PT_PATH_FLAGS_RC_LOBE_MASK | RESTIR_PT_PATH_FLAGS_RC_PREV_LOBE_MASK);
+  reservoir.pathFlags |= (search.lobeKind << RESTIR_PT_PATH_FLAGS_RC_LOBE_SHIFT) & RESTIR_PT_PATH_FLAGS_RC_LOBE_MASK;
+  reservoir.pathFlags |= (search.rcPrevLobeKind << RESTIR_PT_PATH_FLAGS_RC_PREV_LOBE_SHIFT) & RESTIR_PT_PATH_FLAGS_RC_PREV_LOBE_MASK;
+
+  // Suffix radiance
+  // Recovered by removing the prefix throughput the shift will recompute in the target domain. Channels where the throughput vanished carry no light, so zero is the correct answer there rather than a division blow-up.
+
+  reservoir.rcVertexRadiance = select(search.suffixThroughput > 0.0, reservoir.F / max(search.suffixThroughput, 1.0e-8), (float3)0.0);
 }
 
 // Converts the streamed weights into the unbiased contribution weight.
-//
-// ucw = weightSum / pHat(selected) makes the estimate F * ucw unbiased: the
-// selected candidate is scaled back up by the total weight it was chosen against,
-// so the expected value equals the sum over all candidates - which is exactly what
-// the reference path tracer computes by summing them directly.
-//
-// confidenceWeight is the reservoir's M, passed explicitly because initial
-// sampling sets it to one path tree rather than to the candidate count.
+// ucw = weightSum / pHat(selected) makes the estimate F * ucw unbiased: the selected candidate is scaled back up by the total weight it was chosen against, so the expected value equals the sum over all candidates, which is exactly what the reference path tracer computes by summing them directly.
+// confidenceWeight is the reservoir's M, passed explicitly because initial sampling sets it to one path tree rather than to the candidate count.
 void FinalizePTReservoir(inout ReSTIRPTReservoir reservoir, float confidenceWeight)
 {
-    if(reservoir.targetPdf > 0.0)
-    {
-        reservoir.ucw = reservoir.weightSum / reservoir.targetPdf;
-        reservoir.M   = confidenceWeight;
-    }
-    else
-    {
-        // No candidate ever carried weight; the pixel contributes nothing. M stays
-        // at zero so later reuse treats this as "no sample" and not as a confident
-        // black sample, which would darken neighbors that resample from it.
-        reservoir.ucw = 0.0;
-        reservoir.M   = 0.0;
-    }
+  if(reservoir.targetPdf > 0.0)
+  {
+    reservoir.ucw = reservoir.weightSum / reservoir.targetPdf;
+    reservoir.M   = confidenceWeight;
+  }
+  else
+  {
+    // No candidate ever carried weight; the pixel contributes nothing. M stays at zero so later reuse treats this as "no sample" and not as a confident black sample, which would darken neighbors that resample from it.
+    reservoir.ucw = 0.0;
+    reservoir.M   = 0.0;
+  }
 }
 
 // Radiance this reservoir represents.
 float3 EvaluatePTReservoirRadiance(ReSTIRPTReservoir reservoir)
 {
-    return reservoir.F * reservoir.ucw;
+  return reservoir.F * reservoir.ucw;
 }
 
 #endif // RESTIR_PT_RESERVOIR_HLSLI

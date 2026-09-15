@@ -18,3 +18,4 @@ Content/**/*.exr filter=lfs diff=lfs merge=lfs -text
 *.glb binary
 *.spv binary
 *.pdf binary
+Source/Sampling/Generated/*.bin binary

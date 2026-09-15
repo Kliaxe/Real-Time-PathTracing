@@ -1,215 +1,253 @@
 #include "SceneRuntime.h"
 
-// Role:
-// Centralizes scene rebuild/destroy, descriptor updates, scene-info buffer updates,
-// and now the acceleration structures needed by ray tracing.
-
 #include <algorithm>
+#include <span>
+#include <stdexcept>
 #include <vector>
 
-#include <glm/gtc/matrix_transform.hpp>
-#include <nvapp/application.hpp>
-#include <nvutils/camera_manipulator.hpp>
-#include <nvutils/logger.hpp>
-#include <nvvk/acceleration_structures.hpp>
-#include <nvvk/barriers.hpp>
-#include <nvvk/check_error.hpp>
-#include <nvvk/descriptors.hpp>
+#include <fmt/format.h>
+#include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
+#include "Framework/Platform/Log.h"
+#include "Framework/Vulkan/Diagnostics.h"
+#include "GltfImport.h"
 #include "Shaders/ShaderIo.h"
 
-namespace nvsamples
+namespace rtpt
 {
 
 namespace
 {
 
-// These budgets only affect how many BLAS the builder tries to batch together.
-// They do not change the final BLAS contents, only the temporary build strategy.
-constexpr VkDeviceSize kBlasScratchBudget = 128ull * 1024ull * 1024ull;
-constexpr VkDeviceSize kBlasBuildBudget   = 512ull * 1024ull * 1024ull;
-constexpr VkDeviceSize kTlasInstanceAlignment = 16;
+// BottomLevelGeometry
+// One mesh's BLAS geometry description paired with its build range, as AccelerationStructureBuild::AddGeometry takes them.
 
-VkDeviceSize QueryAccelerationStructureScratchAlignment(VkPhysicalDevice physicalDevice)
+struct BottomLevelGeometry
 {
-  VkPhysicalDeviceAccelerationStructurePropertiesKHR accelProps{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR,
-  };
-  VkPhysicalDeviceProperties2 props{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-      .pNext = &accelProps,
-  };
-  vkGetPhysicalDeviceProperties2(physicalDevice, &props);
-  return accelProps.minAccelerationStructureScratchOffsetAlignment;
-}
+  // Triangle geometry pointing into the uploaded glTF blob.
+  VkAccelerationStructureGeometryKHR geometry {};
 
-// Convert one imported mesh into the triangle description Vulkan expects for a
-// bottom-level acceleration structure (BLAS). The important contract here is
-// that the imported glTF buffer already has a valid device address, so the BLAS
-// build can read positions and indices directly from the same geometry buffers
-// the raster path already uses.
-nvvk::AccelerationStructureGeometryInfo CreateBottomLevelGeometry(const shaderio::GltfMesh& gltfMesh)
+  // Primitive count for the build.
+  VkAccelerationStructureBuildRangeInfoKHR range {};
+};
+
+// Describes a mesh to the BLAS build straight from its streams in the glTF blob, so no geometry is copied.
+BottomLevelGeometry CreateBottomLevelGeometry(const shaderio::GltfMesh& gltfMesh)
 {
-  nvvk::AccelerationStructureGeometryInfo result{};
+  const shaderio::TriangleMesh triMesh = gltfMesh.triMesh;
 
-  const shaderio::TriangleMesh triMesh      = gltfMesh.triMesh;
-  const uint32_t              triangleCount = static_cast<uint32_t>(triMesh.indices.count / 3U);
-
-  VkAccelerationStructureGeometryTrianglesDataKHR triangles{
+  const VkAccelerationStructureGeometryTrianglesDataKHR triangles {
       .sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
       .vertexFormat = VK_FORMAT_R32G32B32_SFLOAT,
-      .vertexData   = {.deviceAddress = VkDeviceAddress(gltfMesh.gltfBuffer) + triMesh.positions.offset},
+      .vertexData   = { .deviceAddress = VkDeviceAddress(gltfMesh.gltfBuffer) + triMesh.positions.offset },
       .vertexStride = triMesh.positions.byteStride,
       .maxVertex    = triMesh.positions.count - 1,
       .indexType    = VkIndexType(gltfMesh.indexType),
-      .indexData    = {.deviceAddress = VkDeviceAddress(gltfMesh.gltfBuffer) + triMesh.indices.offset},
+      .indexData    = { .deviceAddress = VkDeviceAddress(gltfMesh.gltfBuffer) + triMesh.indices.offset },
   };
 
-  result.geometry = VkAccelerationStructureGeometryKHR{
-      .sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
-      .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
-      .geometry     = {.triangles = triangles},
-      .flags        = 0,
+  return {
+      .geometry = {
+          .sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+          .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
+          .geometry     = { .triangles = triangles },
+      },
+      .range = { .primitiveCount = static_cast<uint32_t>(triMesh.indices.count / 3U) },
   };
-
-  result.rangeInfo = VkAccelerationStructureBuildRangeInfoKHR{.primitiveCount = triangleCount};
-
-  return result;
 }
-
 
 bool UsesAlphaMask(const shaderio::GltfMetallicRoughness& material)
 {
   return material.alphaMode == shaderio::GltfAlphaMode::eMask;
 }
 
+// Checked accessors for the constructor's initializer list, which builds the SceneUploader from references before the body can validate anything.
+rtpt::ResourceAllocator& RequireResources(const SceneRuntime::CreateInfo& createInfo)
+{
+  if(createInfo.resources == nullptr)
+  {
+    throw std::invalid_argument("SceneRuntime requires a resource allocator");
+  }
+
+  return *createInfo.resources;
+}
+
+rtpt::UploadContext& RequireUploads(const SceneRuntime::CreateInfo& createInfo)
+{
+  if(createInfo.uploads == nullptr)
+  {
+    throw std::invalid_argument("SceneRuntime requires an upload context");
+  }
+
+  return *createInfo.uploads;
+}
+
 }  // namespace
 
 SceneRuntime::SceneRuntime(const CreateInfo& createInfo)
-    : m_App(createInfo.app)
-    , m_Allocator(createInfo.allocator)
-    , m_StagingUploader(createInfo.stagingUploader)
-    , m_SceneUploader(createInfo.app, createInfo.allocator, createInfo.stagingUploader, createInfo.samplerPool)
+    : m_Device(createInfo.device)
+    , m_Resources(createInfo.resources)
+    , m_Uploads(createInfo.uploads)
+    , m_Execution(createInfo.execution)
+    , m_SceneUploader(RequireResources(createInfo), RequireUploads(createInfo))
 {
+  if(m_Device == nullptr || m_Resources == nullptr || m_Uploads == nullptr || m_Execution == nullptr)
+  {
+    throw std::invalid_argument("SceneRuntime requires initialized Vulkan services");
+  }
 }
 
 void SceneRuntime::Destroy()
 {
-  // Destroy TLAS before BLAS because the top-level structure references the
-  // bottom-level ones. The queue is idle before Destroy() is called, so this is
-  // purely about clear ownership order.
+  // The TLAS references BLAS addresses and the BLASes reference scene buffers, so teardown runs from the top down.
   DestroyTopLevelAccelerationStructure();
   DestroyBottomLevelAccelerationStructures();
   DestroySceneResources();
   DestroyTextures();
+
+  m_Execution->CollectRetiredResources();
 }
 
-void SceneRuntime::RebuildScene(VkQueue queue, const SceneUploader::UploadInput& input, bool resetCamera,
-                                nvutils::CameraManipulator* cameraManip)
+void SceneRuntime::RebuildScene(const SceneUploader::UploadInput& input, VkExtent2D viewport, bool resetCamera, rtpt::CameraController* camera)
 {
-  vkQueueWaitIdle(queue);
+  // Teardown
+  // Queued GPU work may still reference the old scene, so it is drained before anything is destroyed. Camera history from the old scene is meaningless for the new one.
+
+  m_Execution->Drain();
   Destroy();
   InvalidateFrameHistory();
 
-  // First pass: upload the scene buffers and textures.
-  // This is still pure scene-data preparation. No ray tracing structures exist yet.
-  VkCommandBuffer cmd = m_App->createTempCmdBuffer();
+  // Upload
+  // The uploader fills this runtime's containers; the device arrays must exist before their addresses can be written into the scene uniform.
 
-  SceneUploader::UploadState uploadState{
+  SceneUploader::UploadState uploadState {
       .sceneResource      = m_SceneResource,
       .textures           = m_Textures,
       .materialAttributes = m_MaterialAttributes,
   };
-  const int environmentTextureIndex = m_SceneUploader.Upload(cmd, input, uploadState);
 
-  nvsamples::CreateGltfSceneInfoBuffer(m_SceneResource, *m_StagingUploader);
-  m_StagingUploader->cmdUploadAppended(cmd);
+  const int environmentTextureIndex = m_SceneUploader.Upload(input, uploadState);
+
+  CreateGltfSceneDataBuffers(m_SceneResource, *m_Resources, *m_Uploads);
+
+  // Scene uniform
+  // Initial values for the scene uniform: the HDRI switches on when one was loaded, the procedural sky starts off, and one default point light is set. Camera matrices are filled per frame by UpdateSceneBuffer.
 
   shaderio::GltfSceneInfo& sceneInfo = m_SceneResource.sceneInfo;
-  sceneInfo.useSky                   = 0;
-  sceneInfo.useHdrEnv                = (environmentTextureIndex >= 0) ? 1 : 0;
-  sceneInfo.environmentTextureIndex  = environmentTextureIndex;
-  sceneInfo.instances                = (shaderio::GltfInstance*)m_SceneResource.bInstances.address;
-  sceneInfo.meshes                   = (shaderio::GltfMesh*)m_SceneResource.bMeshes.address;
-  sceneInfo.materials                = (shaderio::GltfMetallicRoughness*)m_SceneResource.bMaterials.address;
-  sceneInfo.backgroundColor          = {0.85f, 0.85f, 0.85f};
-  sceneInfo.numLights                = 1;
-  sceneInfo.viewportSize             = glm::vec2(static_cast<float>(m_App->getViewportSize().width),
-                                                 static_cast<float>(m_App->getViewportSize().height));
-  sceneInfo.punctualLights[0].color     = glm::vec3(1.0f);
-  sceneInfo.punctualLights[0].intensity = 4.0f;
-  sceneInfo.punctualLights[0].position  = glm::vec3(1.0f, 1.0f, 1.0f);
-  sceneInfo.punctualLights[0].direction = glm::vec3(1.0f, 1.0f, 1.0f);
+
+  sceneInfo.useSky                      = 0;
+  sceneInfo.useHdrEnv                   = environmentTextureIndex >= 0 ? 1 : 0;
+  sceneInfo.environmentTextureIndex     = environmentTextureIndex;
+  sceneInfo.instances                   = reinterpret_cast<shaderio::GltfInstance*>(m_SceneResource.bInstances.address);
+  sceneInfo.meshes                      = reinterpret_cast<shaderio::GltfMesh*>(m_SceneResource.bMeshes.address);
+  sceneInfo.materials                   = reinterpret_cast<shaderio::GltfMetallicRoughness*>(m_SceneResource.bMaterials.address);
+  sceneInfo.backgroundColor             = { 0.85F, 0.85F, 0.85F };
+  sceneInfo.numLights                   = 1;
+  sceneInfo.viewportSize                = { static_cast<float>(viewport.width), static_cast<float>(viewport.height) };
+  sceneInfo.punctualLights[0].color     = glm::vec3(1.0F);
+  sceneInfo.punctualLights[0].intensity = 4.0F;
+  sceneInfo.punctualLights[0].position  = glm::vec3(1.0F);
+  sceneInfo.punctualLights[0].direction = glm::vec3(1.0F);
   sceneInfo.punctualLights[0].type      = shaderio::GltfLightType::ePoint;
-  sceneInfo.punctualLights[0].coneAngle = 0.9f;
-  sceneInfo.emissiveTriangles           = (shaderio::EmissiveTriangleLight*)m_SceneResource.bEmissiveTriangles.address;
-  sceneInfo.emissiveTriangleCdf         = (float*)m_SceneResource.bEmissiveTriangleCdf.address;
-  sceneInfo.environmentCdf              = (float*)m_SceneResource.bEnvironmentCdf.address;
-  sceneInfo.environmentPdf              = (float*)m_SceneResource.bEnvironmentPdf.address;
+  sceneInfo.punctualLights[0].coneAngle = 0.9F;
+  sceneInfo.emissiveTriangles           = reinterpret_cast<shaderio::EmissiveTriangleLight*>(m_SceneResource.bEmissiveTriangles.address);
+  sceneInfo.emissiveTriangleCdf         = reinterpret_cast<float*>(m_SceneResource.bEmissiveTriangleCdf.address);
+  sceneInfo.environmentCdf              = reinterpret_cast<float*>(m_SceneResource.bEnvironmentCdf.address);
+  sceneInfo.environmentPdf              = reinterpret_cast<float*>(m_SceneResource.bEnvironmentPdf.address);
   sceneInfo.emissiveTriangleCount       = static_cast<uint32_t>(m_SceneResource.emissiveTriangles.size());
   sceneInfo.environmentWidth            = m_SceneResource.environmentWidth;
   sceneInfo.environmentHeight           = m_SceneResource.environmentHeight;
 
-  m_App->submitAndWaitTempCmdBuffer(cmd);
+  CreateGltfSceneInfoBuffer(m_SceneResource, *m_Resources, *m_Uploads);
 
-  // Second pass: build BLAS from uploaded mesh buffers.
+  // Acceleration structures
+  // The TLAS references BLAS addresses, so the bottom level is built first.
+
   BuildBottomLevelAccelerationStructures();
-
-  // Third pass: build the TLAS from scene instances.
-  // This is where mesh-level acceleration structures become a world-space scene.
   BuildTopLevelAccelerationStructure();
 
-  if(resetCamera && cameraManip != nullptr)
+  // Camera
+  // Optionally moves the camera to a fixed start pose that frames the origin, with clip planes suited to the built-in scenes.
+
+  if(resetCamera && camera != nullptr)
   {
-    cameraManip->setClipPlanes({0.01F, 100.0F});
-    cameraManip->setLookat({0.0F, 0.5F, 5.0}, {0.F, 0.F, 0.F}, {0.0F, 1.0F, 0.0F});
+    rtpt::CameraState state = camera->State();
+    state.clipPlanes        = { 0.01F, 100.0F };
+
+    camera->SetState(state);
+    camera->SetLookAt({ 0.0F, 0.5F, 5.0F }, { 0.0F, 0.0F, 0.0F }, { 0.0F, 1.0F, 0.0F });
   }
 }
 
 bool SceneRuntime::IsReady() const
 {
-  return m_SceneResource.bSceneInfo.buffer != VK_NULL_HANDLE;
+  return static_cast<bool>(m_SceneResource.bSceneInfo);
 }
 
-void SceneRuntime::UpdateTextureDescriptors(VkDevice device, nvvk::DescriptorPack& descPack, uint32_t maxTextureDescriptors) const
+void SceneRuntime::UpdateTextureDescriptors(rtpt::DescriptorPack& descPack, uint32_t maxTextureDescriptors) const
 {
-  if(m_Textures.empty())
-  {
-    return;
-  }
+  // Capacity
+  // The descriptor arrays have a fixed size. Textures beyond it are left out with a warning.
 
   const uint32_t textureCount = std::min(static_cast<uint32_t>(m_Textures.size()), maxTextureDescriptors);
+
   if(textureCount == 0)
   {
     return;
   }
+
   if(textureCount < m_Textures.size())
   {
-    LOGW("Texture count (%zu) exceeds descriptor capacity (%u). Extra textures will be ignored.\n", m_Textures.size(),
-         maxTextureDescriptors);
+    rtpt::Log(rtpt::LogLevel::Warning, fmt::format("Texture count ({}) exceeds descriptor capacity ({}); extra textures are ignored", m_Textures.size(), maxTextureDescriptors));
   }
 
-  nvvk::WriteSetContainer write;
-  const uint32_t         setCount  = std::max(1u, static_cast<uint32_t>(descPack.getSets().size()));
-  nvvk::Image*           allImages = const_cast<nvvk::Image*>(m_Textures.data());
+  // Image infos
+  // Each texture is published three ways: as a combined image sampler, and as the separate image and sampler that HLSL-style bindings declare.
 
-  // Some descriptor packs, like the path tracer's, allocate one descriptor set
-  // per frame-in-flight. Populate every set so each frame can bind its own set
-  // without needing a texture re-upload right before rendering.
-  for(uint32_t setIndex = 0; setIndex < setCount; ++setIndex)
+  std::vector<VkDescriptorImageInfo> combined(textureCount);
+  std::vector<VkDescriptorImageInfo> sampled(textureCount);
+  std::vector<VkDescriptorImageInfo> samplers(textureCount);
+
+  for(uint32_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
   {
-    VkWriteDescriptorSet allTextures = descPack.makeWrite(shaderio::BindingPoints::eTextures, setIndex, 0, textureCount);
-    write.append(allTextures, allImages);
+    combined[textureIndex] = m_Textures[textureIndex].Descriptor();
+    sampled[textureIndex]  = {
+        .imageView   = combined[textureIndex].imageView,
+        .imageLayout = combined[textureIndex].imageLayout,
+    };
+    samplers[textureIndex] = { .sampler = combined[textureIndex].sampler };
   }
 
-  vkUpdateDescriptorSets(device, write.size(), write.data(), 0, nullptr);
+  // Writes
+  // The same arrays go into every set of the pack.
+
+  std::vector<VkWriteDescriptorSet> writes;
+  writes.reserve(descPack.Sets().size() * 3U);
+
+  for(uint32_t setIndex = 0; setIndex < descPack.Sets().size(); ++setIndex)
+  {
+    VkWriteDescriptorSet combinedWrite = descPack.MakeWrite(shaderio::BindingPoints::eTextures, setIndex, 0, textureCount);
+    combinedWrite.pImageInfo           = combined.data();
+    writes.push_back(combinedWrite);
+
+    VkWriteDescriptorSet sampledWrite = descPack.MakeWrite(shaderio::BindingPoints::eHlslTextures, setIndex, 0, textureCount);
+    sampledWrite.pImageInfo           = sampled.data();
+    writes.push_back(sampledWrite);
+
+    VkWriteDescriptorSet samplerWrite = descPack.MakeWrite(shaderio::BindingPoints::eHlslTextureSamplers, setIndex, 0, textureCount);
+    samplerWrite.pImageInfo           = samplers.data();
+    writes.push_back(samplerWrite);
+  }
+
+  vkUpdateDescriptorSets(m_Device->Handle(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
-void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
-                                     const glm::vec3& cameraPosition, const VkExtent2D& viewportSize)
+void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewMatrix, const glm::mat4& projMatrix, const glm::vec3& cameraPosition, const VkExtent2D& viewportSize)
 {
   const glm::mat4 currentViewProjMatrix = projMatrix * viewMatrix;
 
+  // Without history, previous frames are seeded with the current one so temporal passes see a stationary camera instead of a jump from identity.
   if(!m_HasFrameHistory)
   {
     m_PreviousViewMatrix             = viewMatrix;
@@ -219,97 +257,93 @@ void SceneRuntime::UpdateSceneBuffer(VkCommandBuffer cmd, const glm::mat4& viewM
     m_PreviousPreviousCameraPosition = cameraPosition;
   }
 
-  m_SceneResource.sceneInfo.viewProjMatrix         = currentViewProjMatrix;
-  m_SceneResource.sceneInfo.viewMatrix             = viewMatrix;
-  m_SceneResource.sceneInfo.prevViewProjMatrix     = m_PreviousViewProjMatrix;
-  m_SceneResource.sceneInfo.prevViewMatrix         = m_PreviousViewMatrix;
-  m_SceneResource.sceneInfo.prevPrevViewProjMatrix = m_PreviousPreviousViewProjMatrix;
+  // Camera state
 
-  // Shared camera-ray reconstruction uses the inverse view-projection matrix.
-  m_SceneResource.sceneInfo.viewProjInvMatrix  = glm::inverse(m_SceneResource.sceneInfo.viewProjMatrix);
-  m_SceneResource.sceneInfo.viewInvMatrix  = glm::inverse(viewMatrix);
-  m_SceneResource.sceneInfo.cameraPosition = cameraPosition;
-  m_SceneResource.sceneInfo.prevCameraPosition = m_PreviousCameraPosition;
-  m_SceneResource.sceneInfo.prevPrevCameraPosition = m_PreviousPreviousCameraPosition;
-  m_SceneResource.sceneInfo.viewportSize   = glm::vec2(static_cast<float>(viewportSize.width), static_cast<float>(viewportSize.height));
-  m_SceneResource.sceneInfo.instances      = (shaderio::GltfInstance*)m_SceneResource.bInstances.address;
-  m_SceneResource.sceneInfo.meshes         = (shaderio::GltfMesh*)m_SceneResource.bMeshes.address;
-  m_SceneResource.sceneInfo.materials      = (shaderio::GltfMetallicRoughness*)m_SceneResource.bMaterials.address;
-  m_SceneResource.sceneInfo.emissiveTriangles   = (shaderio::EmissiveTriangleLight*)m_SceneResource.bEmissiveTriangles.address;
-  m_SceneResource.sceneInfo.emissiveTriangleCdf = (float*)m_SceneResource.bEmissiveTriangleCdf.address;
-  m_SceneResource.sceneInfo.environmentCdf      = (float*)m_SceneResource.bEnvironmentCdf.address;
-  m_SceneResource.sceneInfo.environmentPdf      = (float*)m_SceneResource.bEnvironmentPdf.address;
-  m_SceneResource.sceneInfo.emissiveTriangleCount = static_cast<uint32_t>(m_SceneResource.emissiveTriangles.size());
-  m_SceneResource.sceneInfo.environmentWidth      = m_SceneResource.environmentWidth;
-  m_SceneResource.sceneInfo.environmentHeight     = m_SceneResource.environmentHeight;
+  shaderio::GltfSceneInfo& sceneInfo = m_SceneResource.sceneInfo;
 
-  const VkPipelineStageFlags2 shaderReadStages =
-      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR
-      | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+  sceneInfo.viewProjMatrix         = currentViewProjMatrix;
+  sceneInfo.viewMatrix             = viewMatrix;
+  sceneInfo.prevViewProjMatrix     = m_PreviousViewProjMatrix;
+  sceneInfo.prevViewMatrix         = m_PreviousViewMatrix;
+  sceneInfo.prevPrevViewProjMatrix = m_PreviousPreviousViewProjMatrix;
+  sceneInfo.viewProjInvMatrix      = glm::inverse(currentViewProjMatrix);
+  sceneInfo.viewInvMatrix          = glm::inverse(viewMatrix);
+  sceneInfo.cameraPosition         = cameraPosition;
+  sceneInfo.prevCameraPosition     = m_PreviousCameraPosition;
+  sceneInfo.prevPrevCameraPosition = m_PreviousPreviousCameraPosition;
+  sceneInfo.viewportSize           = { static_cast<float>(viewportSize.width), static_cast<float>(viewportSize.height) };
 
-  // Use an explicit barrier here instead of the convenience helper. The helper
-  // infers acceleration-structure read access for ray tracing stages, but this
-  // buffer is ordinary scene data read as shader data, not a BLAS/TLAS handle.
-  const VkBufferMemoryBarrier2 beforeUpdateBarrier{
+  // Upload
+  // The whole uniform is rewritten inside the frame's command buffer, so the update lands in order with the passes that read it. Barriers bracket the transfer.
+
+  constexpr VkPipelineStageFlags2 shaderReadStages = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+
+  const VkBufferMemoryBarrier2 beforeUpdate {
       .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
       .srcStageMask  = shaderReadStages,
       .srcAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
       .dstStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
       .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
       .buffer        = m_SceneResource.bSceneInfo.buffer,
-      .offset        = 0,
       .size          = sizeof(shaderio::GltfSceneInfo),
   };
-  const VkDependencyInfo beforeUpdateDependency{
-      .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+
+  const VkDependencyInfo beforeDependency {
+      .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
       .bufferMemoryBarrierCount = 1,
-      .pBufferMemoryBarriers    = &beforeUpdateBarrier,
+      .pBufferMemoryBarriers    = &beforeUpdate,
   };
-  vkCmdPipelineBarrier2(cmd, &beforeUpdateDependency);
 
-  vkCmdUpdateBuffer(cmd, m_SceneResource.bSceneInfo.buffer, 0, sizeof(shaderio::GltfSceneInfo), &m_SceneResource.sceneInfo);
+  vkCmdPipelineBarrier2(cmd, &beforeDependency);
 
-  const VkBufferMemoryBarrier2 afterUpdateBarrier{
+  vkCmdUpdateBuffer(cmd, m_SceneResource.bSceneInfo.buffer, 0, sizeof(shaderio::GltfSceneInfo), &sceneInfo);
+
+  const VkBufferMemoryBarrier2 afterUpdate {
       .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
       .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
       .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
       .dstStageMask  = shaderReadStages,
       .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
       .buffer        = m_SceneResource.bSceneInfo.buffer,
-      .offset        = 0,
       .size          = sizeof(shaderio::GltfSceneInfo),
   };
-  const VkDependencyInfo afterUpdateDependency{
-      .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+
+  const VkDependencyInfo afterDependency {
+      .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
       .bufferMemoryBarrierCount = 1,
-      .pBufferMemoryBarriers    = &afterUpdateBarrier,
+      .pBufferMemoryBarriers    = &afterUpdate,
   };
-  vkCmdPipelineBarrier2(cmd, &afterUpdateDependency);
+
+  vkCmdPipelineBarrier2(cmd, &afterDependency);
+
+  // History
+  // Shift the history by one frame. N-2 must take the old previous values before those are overwritten with the current frame.
 
   m_PreviousViewMatrix             = viewMatrix;
   m_PreviousPreviousViewProjMatrix = m_PreviousViewProjMatrix;
   m_PreviousViewProjMatrix         = currentViewProjMatrix;
   m_PreviousPreviousCameraPosition = m_PreviousCameraPosition;
   m_PreviousCameraPosition         = cameraPosition;
-  m_HasFrameHistory               = true;
+  m_HasFrameHistory                = true;
 }
 
 void SceneRuntime::InvalidateFrameHistory()
 {
-  m_HasFrameHistory               = false;
-  m_PreviousViewMatrix            = glm::mat4(1.0f);
-  m_PreviousViewProjMatrix        = glm::mat4(1.0f);
-  m_PreviousPreviousViewProjMatrix = glm::mat4(1.0f);
-  m_PreviousCameraPosition        = glm::vec3(0.0f);
-  m_PreviousPreviousCameraPosition = glm::vec3(0.0f);
+  // The identity values are placeholders; the next UpdateSceneBuffer replaces them with the current frame before use.
+  m_HasFrameHistory                = false;
+  m_PreviousViewMatrix             = glm::mat4(1.0F);
+  m_PreviousViewProjMatrix         = glm::mat4(1.0F);
+  m_PreviousPreviousViewProjMatrix = glm::mat4(1.0F);
+  m_PreviousCameraPosition         = glm::vec3(0.0F);
+  m_PreviousPreviousCameraPosition = glm::vec3(0.0F);
 }
 
-nvsamples::GltfSceneResource& SceneRuntime::GetSceneResource()
+GltfSceneResource& SceneRuntime::GetSceneResource()
 {
   return m_SceneResource;
 }
 
-const nvsamples::GltfSceneResource& SceneRuntime::GetSceneResource() const
+const GltfSceneResource& SceneRuntime::GetSceneResource() const
 {
   return m_SceneResource;
 }
@@ -324,12 +358,12 @@ const shaderio::GltfSceneInfo& SceneRuntime::GetSceneInfo() const
   return m_SceneResource.sceneInfo;
 }
 
-const std::vector<nvvk::AccelerationStructure>& SceneRuntime::GetBottomLevelAccelerationStructures() const
+const std::vector<rtpt::AccelerationStructure>& SceneRuntime::GetBottomLevelAccelerationStructures() const
 {
   return m_BottomLevelAS;
 }
 
-const nvvk::AccelerationStructure& SceneRuntime::GetTopLevelAccelerationStructure() const
+const rtpt::AccelerationStructure& SceneRuntime::GetTopLevelAccelerationStructure() const
 {
   return m_TopLevelAS;
 }
@@ -341,60 +375,33 @@ void SceneRuntime::BuildBottomLevelAccelerationStructures()
     return;
   }
 
-  // Build data is the CPU-side description of "how to build each BLAS".
-  // Each imported mesh becomes one BLAS build entry.
-  std::vector<nvvk::AccelerationStructureBuildData> blasBuildData;
-  blasBuildData.reserve(m_SceneResource.meshes.size());
+  // Build descriptions
+  // One BLAS per mesh, so m_BottomLevelAS lines up with mesh indices and instances can look theirs up directly.
+
+  std::vector<rtpt::AccelerationStructureBuild> builds;
+  builds.reserve(m_SceneResource.meshes.size());
 
   for(const shaderio::GltfMesh& mesh : m_SceneResource.meshes)
   {
-    nvvk::AccelerationStructureBuildData buildData{VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR};
-    buildData.addGeometry(CreateBottomLevelGeometry(mesh));
-    buildData.finalizeGeometry(m_App->getDevice(), VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
-    blasBuildData.push_back(buildData);
+    const BottomLevelGeometry geometry = CreateBottomLevelGeometry(mesh);
+
+    rtpt::AccelerationStructureBuild build(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
+    build.AddGeometry(geometry.geometry, geometry.range);
+
+    rtpt::CheckVk(build.Finalize(m_Device->Handle()), "finalize bottom-level acceleration structure");
+
+    builds.push_back(std::move(build));
   }
 
-  m_BottomLevelAS.resize(blasBuildData.size());
+  // Build
+  // All BLASes are built in one batch; the builder aligns scratch memory to the device's minimum scratch offset alignment.
 
-  // The builder is an execution helper: it allocates the VkAccelerationStructureKHR
-  // objects and records vkCmdBuildAccelerationStructuresKHR commands for us.
-  nvvk::AccelerationStructureBuilder blasBuilder;
-  blasBuilder.init(m_Allocator);
+  m_BottomLevelAS.resize(builds.size());
 
-  std::span<nvvk::AccelerationStructureBuildData> buildDataSpan(blasBuildData);
-  std::span<nvvk::AccelerationStructure>          blasSpan(m_BottomLevelAS);
+  rtpt::AccelerationStructureBuilder builder;
+  builder.Initialize(*m_Resources, *m_Execution, m_Device->Support().accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment);
 
-  const VkDeviceSize scratchSize = blasBuilder.getScratchSize(kBlasScratchBudget, buildDataSpan);
-
-  // Scratch memory is temporary GPU workspace used only while the BLAS build runs.
-  // It is not part of the final BLAS and can be destroyed after the build completes.
-  nvvk::Buffer scratchBuffer;
-  NVVK_CHECK(m_Allocator->createBuffer(scratchBuffer, scratchSize,
-                                       VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT
-                                           | VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
-                                       VMA_MEMORY_USAGE_AUTO, {}, blasBuilder.getScratchAlignment()));
-
-  VkCommandBuffer cmd = m_App->createTempCmdBuffer();
-
-  // The geometry data was uploaded in a previous transfer submission.
-  // This barrier tells Vulkan that those transfer writes must be visible before
-  // acceleration structure build reads start on the same queue.
-  nvvk::accelerationStructureBarrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT,
-                                     VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_2_SHADER_READ_BIT);
-
-  VkResult buildResult = VK_INCOMPLETE;
-  while(buildResult == VK_INCOMPLETE)
-  {
-    buildResult = blasBuilder.cmdCreateBlas(cmd, buildDataSpan, blasSpan, scratchBuffer.address, scratchBuffer.bufferSize,
-                                            kBlasBuildBudget);
-  }
-
-  NVVK_CHECK(buildResult);
-  m_App->submitAndWaitTempCmdBuffer(cmd);
-
-  m_Allocator->destroyBuffer(scratchBuffer);
-  blasBuilder.destroyNonCompactedBlas();
-  blasBuilder.deinit();
+  rtpt::CheckVk(builder.Build(builds, m_BottomLevelAS), "build bottom-level acceleration structures");
 }
 
 void SceneRuntime::BuildTopLevelAccelerationStructure()
@@ -404,126 +411,97 @@ void SceneRuntime::BuildTopLevelAccelerationStructure()
     return;
   }
 
-  // TLAS instances are the scene-level link between world transforms and BLAS handles.
-  // One TLAS instance says: "place this BLAS at this transform with this visibility mask".
-  m_TlasInstances.clear();
+  // Instance records
+  // Exactly one TLAS instance per scene instance, in the same order, because shaders index the scene instance array with InstanceIndex(). The custom index records the scene instance index as well.
+  // Both triangle faces are always hit. Only alpha-masked materials leave opacity to the shaders; everything else is forced opaque so any-hit shaders are skipped.
+
   m_TlasInstances.reserve(m_SceneResource.instances.size());
 
   for(size_t instanceIndex = 0; instanceIndex < m_SceneResource.instances.size(); ++instanceIndex)
   {
     const shaderio::GltfInstance& sceneInstance = m_SceneResource.instances[instanceIndex];
+
+    // Every mesh gets a BLAS, so this only fires if the scene arrays and the acceleration structures fall out of sync; skipping the instance would silently shift every later InstanceIndex().
     if(sceneInstance.meshIndex >= m_BottomLevelAS.size())
     {
-      LOGW("Skipping TLAS instance %zu because mesh index %u has no BLAS.\n", instanceIndex, sceneInstance.meshIndex);
-      continue;
+      throw std::logic_error(fmt::format("Scene instance {} references mesh {}, but only {} BLASes were built; the TLAS needs one instance per scene instance so InstanceIndex() matches the scene instance array", instanceIndex, sceneInstance.meshIndex, m_BottomLevelAS.size()));
     }
 
-    VkAccelerationStructureInstanceKHR tlasInstance{};
-    tlasInstance.transform = nvvk::toTransformMatrixKHR(sceneInstance.transform);
-    tlasInstance.instanceCustomIndex = static_cast<uint32_t>(instanceIndex);
-    tlasInstance.accelerationStructureReference = m_BottomLevelAS[sceneInstance.meshIndex].address;
-    tlasInstance.instanceShaderBindingTableRecordOffset = 0;
-    tlasInstance.mask = 0xFF;
+    VkGeometryInstanceFlagsKHR flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
 
-    VkGeometryInstanceFlagsKHR instanceFlags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
-    if(sceneInstance.materialIndex < m_SceneResource.materials.size()
-       && !UsesAlphaMask(m_SceneResource.materials[sceneInstance.materialIndex]))
+    if(sceneInstance.materialIndex < m_SceneResource.materials.size() && !UsesAlphaMask(m_SceneResource.materials[sceneInstance.materialIndex]))
     {
-      // Opaque materials can skip any-hit entirely, but masked materials must
-      // leave visibility to the shader-side alpha test.
-      instanceFlags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+      flags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
     }
-    tlasInstance.flags = instanceFlags;
-    m_TlasInstances.push_back(tlasInstance);
+
+    m_TlasInstances.push_back({
+        .transform                              = rtpt::ToTransformMatrix(glm::value_ptr(sceneInstance.transform)),
+        .instanceCustomIndex                    = static_cast<uint32_t>(instanceIndex),
+        .mask                                   = 0xFF,
+        .instanceShaderBindingTableRecordOffset = 0,
+        .flags                                  = flags,
+        .accelerationStructureReference         = m_BottomLevelAS[sceneInstance.meshIndex].address,
+    });
   }
 
-  if(m_TlasInstances.empty())
-  {
-    return;
-  }
+  // Instance buffer
+  // The build reads the instance records from device memory, aligned for VkAccelerationStructureInstanceKHR.
 
-  // The TLAS build reads an array of VkAccelerationStructureInstanceKHR from a
-  // regular GPU buffer. This buffer is separate from the final TLAS itself.
-  NVVK_CHECK(m_Allocator->createBuffer(
-      m_TlasInstancesBuffer, std::span<const VkAccelerationStructureInstanceKHR>(m_TlasInstances).size_bytes(),
-      VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT,
-      VMA_MEMORY_USAGE_AUTO, {}, kTlasInstanceAlignment));
+  const std::span instances(m_TlasInstances);
 
-  nvvk::AccelerationStructureBuildData tlasBuildData{VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR};
-  const nvvk::AccelerationStructureGeometryInfo instanceGeometry =
-      tlasBuildData.makeInstanceGeometry(m_TlasInstances.size(), m_TlasInstancesBuffer.address);
-  tlasBuildData.addGeometry(instanceGeometry);
-  const VkAccelerationStructureBuildSizesInfoKHR sizeInfo =
-      tlasBuildData.finalizeGeometry(m_App->getDevice(), VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR);
+  rtpt::CheckVk(m_Resources->CreateBuffer(m_TlasInstancesBuffer, instances.size_bytes(), VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0, alignof(VkAccelerationStructureInstanceKHR)), "ResourceAllocator::CreateBuffer(TLAS instances)");
 
-  const VkDeviceSize scratchAlignment = QueryAccelerationStructureScratchAlignment(m_Allocator->getPhysicalDevice());
+  m_Uploads->UploadBuffer(m_TlasInstancesBuffer.buffer, 0, std::as_bytes(instances), { .stages = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, .access = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR });
 
-  nvvk::Buffer scratchBuffer;
-  NVVK_CHECK(m_Allocator->createBuffer(scratchBuffer, sizeInfo.buildScratchSize,
-                                       VK_BUFFER_USAGE_2_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_2_SHADER_DEVICE_ADDRESS_BIT
-                                           | VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
-                                       VMA_MEMORY_USAGE_AUTO, {}, scratchAlignment));
+  // Build
 
-  NVVK_CHECK(m_StagingUploader->appendBuffer(m_TlasInstancesBuffer, 0, std::span<const VkAccelerationStructureInstanceKHR>(m_TlasInstances)));
-  NVVK_CHECK(m_Allocator->createAcceleration(m_TopLevelAS, tlasBuildData.makeCreateInfo()));
+  const VkAccelerationStructureGeometryInstancesDataKHR instanceData {
+      .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+      .data  = { .deviceAddress = m_TlasInstancesBuffer.address },
+  };
 
-  VkCommandBuffer cmd = m_App->createTempCmdBuffer();
-  m_StagingUploader->cmdUploadAppended(cmd);
+  const VkAccelerationStructureGeometryKHR geometry {
+      .sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+      .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
+      .geometry     = { .instances = instanceData },
+  };
 
-  // The TLAS build reads the uploaded instance buffer, so we need the same kind
-  // of transfer-write -> acceleration-structure-read dependency as for BLAS.
-  nvvk::accelerationStructureBarrier(cmd, VK_ACCESS_TRANSFER_WRITE_BIT,
-                                     VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_2_SHADER_READ_BIT);
+  const VkAccelerationStructureBuildRangeInfoKHR range {
+      .primitiveCount = static_cast<uint32_t>(m_TlasInstances.size()),
+  };
 
-  tlasBuildData.cmdBuildAccelerationStructure(cmd, m_TopLevelAS.accel, scratchBuffer.address);
-  m_App->submitAndWaitTempCmdBuffer(cmd);
+  rtpt::AccelerationStructureBuild build(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR);
+  build.AddGeometry(geometry, range);
 
-  m_Allocator->destroyBuffer(scratchBuffer);
+  rtpt::CheckVk(build.Finalize(m_Device->Handle()), "finalize top-level acceleration structure");
+
+  rtpt::AccelerationStructureBuilder builder;
+  builder.Initialize(*m_Resources, *m_Execution, m_Device->Support().accelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment);
+
+  rtpt::CheckVk(builder.Build(build, m_TopLevelAS), "build top-level acceleration structure");
 }
 
 void SceneRuntime::DestroyTopLevelAccelerationStructure()
 {
-  m_Allocator->destroyAcceleration(m_TopLevelAS);
-  m_Allocator->destroyBuffer(m_TlasInstancesBuffer);
+  m_TopLevelAS.Reset();
+  m_TlasInstancesBuffer.Reset();
   m_TlasInstances.clear();
-  m_TopLevelAS = {};
-  m_TlasInstancesBuffer = {};
 }
 
 void SceneRuntime::DestroyBottomLevelAccelerationStructures()
 {
-  for(nvvk::AccelerationStructure& blas : m_BottomLevelAS)
-  {
-    m_Allocator->destroyAcceleration(blas);
-  }
   m_BottomLevelAS.clear();
 }
 
 void SceneRuntime::DestroySceneResources()
 {
-  m_Allocator->destroyBuffer(m_SceneResource.bSceneInfo);
-  m_Allocator->destroyBuffer(m_SceneResource.bMeshes);
-  m_Allocator->destroyBuffer(m_SceneResource.bMaterials);
-  m_Allocator->destroyBuffer(m_SceneResource.bInstances);
-  m_Allocator->destroyBuffer(m_SceneResource.bEmissiveTriangles);
-  m_Allocator->destroyBuffer(m_SceneResource.bEmissiveTriangleCdf);
-  m_Allocator->destroyBuffer(m_SceneResource.bEnvironmentCdf);
-  m_Allocator->destroyBuffer(m_SceneResource.bEnvironmentPdf);
-  for(auto& gltfData : m_SceneResource.bGltfDatas)
-  {
-    m_Allocator->destroyBuffer(gltfData);
-  }
   m_SceneResource = {};
   m_MaterialAttributes.clear();
 }
 
 void SceneRuntime::DestroyTextures()
 {
-  for(auto& texture : m_Textures)
-  {
-    m_Allocator->destroyImage(texture);
-  }
   m_Textures.clear();
 }
 
-}  // namespace nvsamples
+}  // namespace rtpt

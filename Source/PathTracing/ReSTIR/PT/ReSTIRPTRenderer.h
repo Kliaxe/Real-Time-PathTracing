@@ -4,49 +4,33 @@
 #include <memory>
 #include <vector>
 
-#include <vulkan/vulkan_core.h>
+#include <volk.h>
 
 #include "PathTracing/ReSTIR/PT/ReSTIRPTParameterContext.h"
 #include "PathTracing/ReSTIR/PT/ReSTIRPTRendererTypes.h"
 #include "PathTracing/ReSTIR/PT/ReSTIRPTResources.h"
 #include "PathTracing/ReSTIR/PT/ReSTIRPTSettings.h"
-// Frame parity tracking and ray-tracing pass helpers, kept separate from the
-// renderer because they are ordinary Vulkan plumbing with no ReSTIR PT specifics.
+// Frame parity tracking and ray-tracing pass helpers, kept separate from the renderer because they are ordinary Vulkan plumbing with no ReSTIR PT specifics.
 #include "PathTracing/ReSTIR/ReSTIRFrameContext.h"
 #include "PathTracing/ReSTIR/ReSTIRRenderPassUtils.h"
-// NRD integration is shared with the reference path tracer; the renderers differ
-// only in which pass produces the signals.
-#include "Denoising/DenoiserResources.h"
-#include "Denoising/NrdDenoiser.h"
-#include "nvvk/descriptors.hpp"
-#include "nvutils/profiler.hpp"
-#include "nvvk/profiler_vk.hpp"
+// Accumulation and NRD history are shared with the reference path tracer; the renderers differ only in which pass produces the signals.
+#include "PathTracing/Common/ResolveHistory.h"
+#include "Framework/Vulkan/Descriptors.h"
 
-namespace nvapp
-{
-class Application;
-}
-
-namespace nvsamples
+namespace rtpt
 {
 
+// ReSTIRPTRenderer
 // Real-Time PathTracing ReSTIR PT Enhanced renderer.
-//
-// Implements "ReSTIR PT Enhanced" (Lin, Kettunen, Wyman; I3D 2026) from the paper
-// rather than porting an existing implementation. Direct and global illumination
-// share one reservoir (Section 6.1), so there is no separate direct-lighting pass.
-//
-// CPU responsibility: own Vulkan state, update descriptors/parameters, and record
-// the pass sequence. Shader responsibility: perform the resampling math.
-//
-// Pass sequence: light tiles, initial sampling, temporal reuse, the spatial
-// pre-pass and spatial reuse, final shading, and the duplication map. Every reuse
-// pass is optional; with all of them off the renderer is a 1spp path tracer routed
-// through the reservoir plumbing, which is the correctness gate - that
-// configuration must converge to the same image as the reference path tracer.
+// Implements "ReSTIR PT Enhanced" (Lin, Kettunen, Wyman; I3D 2026) from the paper rather than porting an existing implementation. Direct and global illumination share one reservoir (Section 6.1), so there is no separate direct-lighting pass.
+// CPU responsibility: own Vulkan state, update descriptors/parameters, and record the pass sequence. Shader responsibility: perform the resampling math.
+// Pass sequence: light tiles, initial sampling, temporal reuse, the spatial pre-pass and spatial reuse, final shading, and the duplication map. Every reuse pass is optional; with all of them off the renderer is a 1spp path tracer routed through the reservoir plumbing, which is the correctness gate - that configuration must converge to the same image as the reference path tracer.
+// No per-pass GPU timing is recorded here. Wall-clock around the process cannot separate a pass from thermal drift - the same configuration measured 6.7 and 14.5 ms/frame hours apart on this machine - so a claim about a pass needs timestamps taken inside the frame that produced it.
+
 class ReSTIRPTRenderer
 {
 public:
+
   using CreateInfo  = ReSTIRPTRendererCreateInfo;
   using RenderInput = ReSTIRPTRenderInput;
 
@@ -62,38 +46,26 @@ public:
 
   uint32_t GetAccumulatedFrameCount() const;
   uint32_t GetPipelineBounceLimit() const;
-  // Bytes of reservoir storage currently allocated, surfaced in the UI because a
-  // 64-byte reservoir per pixel per array dominates this renderer's memory use.
+
+  // Bytes of reservoir storage currently allocated, surfaced in the UI because a 64-byte reservoir per pixel per array dominates this renderer's memory use.
   VkDeviceSize GetReservoirMemoryUsage() const;
+
   void         InvalidateHistory();
 
-
-  nvvk::DescriptorPack&       GetDescriptorPack();
-  const nvvk::DescriptorPack& GetDescriptorPack() const;
+  rtpt::DescriptorPack&       GetDescriptorPack();
+  const rtpt::DescriptorPack& GetDescriptorPack() const;
 
   void Render(const RenderInput& input);
 
 private:
+
   // Whether Section 6.2.2's compacted pre-pass runs this frame.
   bool UseSortedPrepass() const;
 
-  using AccumulationSignature = ReSTIRPTAccumulationSignature;
-  using DenoiserSignature     = ReSTIRPTDenoiserHistorySignature;
-  using RayTracingPassState   = ReSTIRRayTracingPassState;
+  using RayTracingPassState = ReSTIRRayTracingPassState;
 
-  struct FrameState
-  {
-    // Snapshot of decisions that must stay consistent while recording one frame.
-    VkExtent2D            viewportSize{};
-    AccumulationSignature accumulationSignature{};
-    DenoiserSignature     denoiserSignature{};
-    bool                  referenceRadianceActive = false;
-    bool                  denoiseEnabled    = false;
-    // Final shading writes NRD guide buffers only when NRD will consume them, so a
-    // debug view - which replaces the beauty image - suppresses them.
-    bool                  denoiserSignalsNeeded      = false;
-    bool                  denoiserHistoryInvalidated = false;
-  };
+  // Creation
+  // Called once from Initialize, in an order where each step only depends on the ones before it.
 
   void QueryRayTracingProperties();
   void CreateDescriptorSetLayout();
@@ -104,18 +76,20 @@ private:
   void CreateSpatialPipeline();
   void CreateFinalShadingPipeline();
 
+  // Frame setup
+
   bool       CanRender(const RenderInput& input) const;
   void       EnsureViewportResources(VkExtent2D viewportSize);
   void       EnsureParameterContext(VkExtent2D viewportSize);
-  FrameState BeginFrame(const RenderInput& input, VkExtent2D viewportSize);
+  ResolveHistory::FrameState BeginFrame(const RenderInput& input, VkExtent2D viewportSize);
 
   shaderio::ReSTIRPTParameters   BuildShaderParameters();
-  shaderio::ReSTIRPTPushConstant BuildPushConstant(const RenderInput& input, bool denoiserSignalsNeeded) const;
+  shaderio::ReSTIRPTPushConstant BuildPushConstant(const RenderInput& input, const ResolveHistory::FrameState& frameState) const;
+
+  // Frame recording
 
   void UpdateParameterBuffer(uint32_t frameSetIndex, const shaderio::ReSTIRPTParameters& parameters);
   void UpdateFrameDescriptors(const RenderInput& input);
-  void PrepareDenoiser(const RenderInput& input, const FrameState& frameState);
-  void RunDenoiserIfNeeded(const RenderInput& input, const FrameState& frameState);
   void PrepareStorageImages(const RenderInput& input, bool denoiserSignalsNeeded);
   void ClearHistoryIfNeeded(VkCommandBuffer cmd);
   void ClearHistoryBuffers(VkCommandBuffer cmd);
@@ -127,73 +101,85 @@ private:
   void RunFinalShadingPass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant);
   void RunDuplicationMapPass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant);
   void RunLightTilePass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant);
+
   // Section 6.2.2. Builds the sorted work list, then traces it indirectly.
   void RunSortedSpatialPrepass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant);
-  void FinishFrame(const FrameState& frameState);
 
-  // External owners give us the Vulkan application and allocator.
-  nvapp::Application*      m_App                   = nullptr;
-  nvvk::ResourceAllocator* m_Allocator             = nullptr;
+  void FinishFrame(const ResolveHistory::FrameState& frameState);
+
+  // Lifetime dependencies
+  // Borrowed from Application through CreateInfo; see ReSTIRPTRendererCreateInfo.
+
+  // Logical device the pipelines and descriptor sets are created on.
+  rtpt::VulkanDevice*      m_Device                = nullptr;
+  // Allocator for parameter buffers and the resource classes below.
+  rtpt::ResourceAllocator* m_GpuResources          = nullptr;
+  // Optional debug naming; null disables it.
+  const rtpt::Diagnostics* m_Diagnostics           = nullptr;
+  // Shared sampling volume must outlive initial sampling and every replay pass.
+  const rtpt::SpatiotemporalBlueNoise* m_BlueNoise = nullptr;
+  // Frames that can be in flight at once; one descriptor set and parameter buffer each.
+  uint32_t                 m_FrameSlotCount        = 0;
+  // Size of the bindless texture arrays in the descriptor layout.
   uint32_t                 m_MaxTextureDescriptors = 0;
 
-  // The bounce limit comes from Vulkan ray recursion support, not just the UI.
+  // History state
+
+  // Sampling time advances even when camera changes invalidate reuse history.
+  uint32_t m_RngFrameNumber = 0;
+
+  // The bounce limit comes from Vulkan ray recursion support and the reconnection-length field, not just the UI.
   uint32_t m_PipelineBounceLimit = 0;
-  // Accumulation is presentation history, separate from ReSTIR reuse history.
-  uint32_t m_AccumulatedFrames = 0;
-  // ReSTIR history must be cleared when previous reservoirs/surfaces no longer match.
-  bool m_HistoryInvalidated       = true;
-  bool m_HasAccumulationSignature = false;
-  bool m_HasDenoiserSignature     = false;
   // GPU buffers are cleared lazily because the clear must be recorded into a command buffer.
   bool m_NeedsHistoryClear = true;
 
-  ReSTIRPTSettings      m_Settings{};
-  AccumulationSignature m_LastAccumulationSignature{};
-  DenoiserSignature     m_LastDenoiserSignature{};
+  // User-facing settings, read at the start of every frame.
+  ReSTIRPTSettings m_Settings {};
 
+  // Resources
+
+  // Frame index and surface-buffer parity.
   ReSTIRFrameContext m_FrameContext;
+  // Viewport-sized reservoirs, surfaces, and the other per-pass buffers.
   ReSTIRPTResources    m_Resources;
-  // NRD input images and the denoiser itself, shared with the reference path tracer.
-  DenoiserResources    m_DenoiserResources;
-  NrdDenoiser          m_NrdDenoiser;
+  // Accumulation counter, history signatures, and the NRD denoiser with its input images, shared with the reference path tracer.
+  // ReSTIR reuse history is separate and restarts from its FrameState::accumulationRestarted.
+  ResolveHistory       m_History;
   // Parameter context is recreated when viewport-dependent reservoir layout changes.
   std::unique_ptr<ReSTIRPTParameterContext> m_ParameterContext;
-  // One mapped uniform buffer per nvpro frame set avoids CPU/GPU overwrite hazards.
-  std::vector<nvvk::Buffer> m_ParameterBuffers;
+  // One mapped uniform buffer per frame slot avoids CPU/GPU overwrite hazards.
+  std::vector<rtpt::Buffer> m_ParameterBuffers;
 
-  nvvk::DescriptorPack m_DescPack;
+  // Pipelines
+  // Every pass shares one descriptor layout and push constant range, so the same set binds for ray tracing and compute alike.
+
+  // One descriptor set per frame slot.
+  rtpt::DescriptorPack m_DescPack;
+  // The layout every pass pipeline is built against.
   VkPipelineLayout     m_PipelineLayout = VK_NULL_HANDLE;
-  // Initial sampling traces the path tree; final shading only resolves reservoirs,
-  // which needs no rays, so it is a compute pass.
+  // Initial sampling traces the path tree, so it is a ray tracing pass that recurses once per bounce.
   RayTracingPassState m_InitialSamplingPass;
-  // Temporal reuse. A ray tracing pass rather than compute, because the hybrid
-  // shift traces: one ray per replayed bounce plus one for the reconnection, driven
-  // from a loop in ray generation.
+  // Temporal reuse. A ray tracing pass rather than compute, because the hybrid shift traces: one ray per replayed bounce plus one for the reconnection, driven from a loop in ray generation.
   RayTracingPassState m_TemporalPass;
-  // Spatial reuse. Reads the temporal output array and writes a third one, so a
-  // pixel never reads a neighbour that another invocation is concurrently
-  // rewriting - which is what the third reservoir array exists for.
-  // Section 3 pre-pass: shifts each pixel's path into its paired partner's domain
-  // so both partners can share the result. Ray tracing, not compute: recovering
-  // the partner's surface and running the shift both trace.
+  // Section 3 pre-pass: shifts each pixel's path into its paired partner's domain so both partners can share the result.
+  // Ray tracing, not compute: recovering the partner's surface and running the shift both trace.
   RayTracingPassState m_SpatialPrepass;
+  // Spatial reuse. Reads a neighbourhood of the array temporal reuse wrote and writes the other array, which holds last frame's history and is dead once temporal has run.
+  // Never writing the array it reads is what keeps a pixel from reading a neighbour that another invocation is concurrently rewriting.
   RayTracingPassState m_SpatialPass;
+  // Final shading only resolves reservoirs, which needs no rays, so it is a compute pass.
   VkPipeline          m_FinalShadingPipeline = VK_NULL_HANDLE;
-  // Section 5's correlation measure. Compute, like final shading: it only reads
-  // reservoirs and writes a scalar per pixel, so it needs no rays.
+  // Section 5's correlation measure. Compute, like final shading: it only reads reservoirs and writes a scalar per pixel, so it needs no rays.
   VkPipeline          m_DuplicationMapPipeline = VK_NULL_HANDLE;
+  // Section 6.1 light tile presampling, dispatched before initial sampling reads the tiles.
   VkPipeline          m_LightTilePipeline      = VK_NULL_HANDLE;
-  // Section 6.2.2: build the compacted work list, then publish its length.
+  // Section 6.2.2: build the compacted work list.
   VkPipeline          m_PrepassClassifyPipeline = VK_NULL_HANDLE;
+  // Section 6.2.2: publish the work list's length as the indirect trace dimensions.
   VkPipeline          m_PrepassOffsetsPipeline  = VK_NULL_HANDLE;
 
-  // Per-pass GPU timing. Wall-clock around the process cannot separate a pass from
-  // thermal drift - the same configuration measured 6.7 and 14.5 ms/frame hours
-  // apart on this machine - so a claim about a pass needs timestamps taken inside
-  // the frame that produced it.
-
-  VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_RtProperties{
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
+  // Device ray tracing limits. Recursion depth bounds m_PipelineBounceLimit, and every SBT is built against these properties.
+  VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_RtProperties { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR };
 };
 
-}  // namespace nvsamples
+}  // namespace rtpt

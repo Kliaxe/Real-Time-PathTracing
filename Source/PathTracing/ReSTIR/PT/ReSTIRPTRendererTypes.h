@@ -4,122 +4,61 @@
 #include <cstddef>
 #include <cstdint>
 
-#include <glm/mat4x4.hpp>
-#include <glm/vec3.hpp>
-#include <vulkan/vulkan_core.h>
+#include <volk.h>
 
-#include "Common/GltfUtils.hpp"
+#include "Framework/Vulkan/Diagnostics.h"
+#include "Framework/Vulkan/GpuResources.h"
+#include "Framework/Vulkan/VulkanDevice.h"
+#include "Rendering/RenderTargetView.h"
+#include "Scene/SceneGpuResources.h"
 #include "PathTracing/ReSTIR/PT/ReSTIRPTParameterContext.h"
 #include "Shaders/ShaderIo.h"
-#include "nvvk/gbuffers.hpp"
-#include "nvvk/resources.hpp"
+#include "Sampling/SpatiotemporalBlueNoise.h"
 
-namespace nvapp
-{
-class Application;
-}
-
-namespace nvvk
-{
-class ResourceAllocator;
-}
-
-namespace nvsamples
+namespace rtpt
 {
 
+// ReSTIRPTRendererCreateInfo
 // CPU-side construction parameters for the ReSTIR PT renderer.
-// These are stable lifetime dependencies supplied by Application.
+// These are stable lifetime dependencies supplied by Application; the renderer borrows them and must be destroyed before they are.
+
 struct ReSTIRPTRendererCreateInfo
 {
-  nvapp::Application*      app                   = nullptr;
-  nvvk::ResourceAllocator* allocator             = nullptr;
+  // Logical device and its ray tracing support queries.
+  rtpt::VulkanDevice*      device                = nullptr;
+  // Allocates every buffer and image the renderer owns.
+  rtpt::ResourceAllocator* resources             = nullptr;
+  // Optional. Names Vulkan objects for debugging tools when present.
+  const rtpt::Diagnostics* diagnostics           = nullptr;
+  // Shared immutable sampling volume, also used by the reference tracer.
+  const SpatiotemporalBlueNoise* blueNoise         = nullptr;
+  // Frames that can be in flight at once. One descriptor set and one parameter buffer are allocated per slot.
+  uint32_t                 frameSlotCount        = 0;
+  // Size of the bindless texture arrays in the descriptor layout.
   uint32_t                 maxTextureDescriptors = 0;
 };
 
+// ReSTIRPTRenderInput
 // One-frame render input borrowed from Application and SceneRuntime.
 // Nothing here is owned by the renderer; it only records commands against it.
+
 struct ReSTIRPTRenderInput
 {
+  // Command buffer this frame's passes are recorded into.
   VkCommandBuffer                     cmd                = VK_NULL_HANDLE;
-  const nvsamples::GltfSceneResource* sceneResource      = nullptr;
+  // GPU scene buffers; the scene info address is passed to the shaders through push constants.
+  const rtpt::GltfSceneResource*      sceneResource      = nullptr;
+  // CPU copy of the scene info, used for history signatures and NRD camera state.
   const shaderio::GltfSceneInfo*      sceneInfo          = nullptr;
-  const nvvk::AccelerationStructure*  topLevelAS         = nullptr;
-  nvvk::GBuffer*                      gBuffers           = nullptr;
-  uint32_t                            renderedImageIndex = 0;
+  // Scene TLAS bound for every ray tracing pass.
+  const rtpt::AccelerationStructure*  topLevelAS         = nullptr;
+  // Target image written by final shading. Its extent is the render resolution.
+  rtpt::RenderTargetView              output {};
+  // Selects this frame's descriptor set and parameter buffer, so frames in flight never share them.
+  uint32_t                            frameSlot = 0;
+  // Time since the previous frame in milliseconds, handed to NRD. Zero lets NRD measure real frame time itself.
+  float                               frameTimeMilliseconds = 0.0f;
 };
-
-// Compact CPU-side key answering "can the history from last frame still be
-// trusted?". Accumulation averages pixels visually, so it depends on the camera
-// as well as the lighting environment; any change here means the average is of
-// two different images and must restart.
-struct ReSTIRPTAccumulationSignature
-{
-  glm::mat4                     viewProjMatrix{};
-  glm::mat4                     viewProjInvMatrix{};
-  glm::mat4                     viewInvMatrix{};
-  glm::vec3                     cameraPosition{};
-  int                           useSky                  = 0;
-  int                           useHdrEnv               = 0;
-  int                           environmentTextureIndex = -1;
-  int                           pad0                    = 0;
-  glm::vec3                     backgroundColor{};
-  int                           pad1 = 0;
-  shaderio::SkySimpleParameters skySimpleParam{};
-  VkDeviceAddress               topLevelAsAddress = 0;
-  VkExtent2D                    viewportSize{};
-};
-
-inline ReSTIRPTAccumulationSignature MakeReSTIRPTAccumulationSignature(const shaderio::GltfSceneInfo& sceneInfo,
-                                                                      VkDeviceAddress                topLevelAsAddress,
-                                                                      VkExtent2D                     viewportSize)
-{
-  // Kept explicit so adding or removing a history dependency is easy to review.
-  ReSTIRPTAccumulationSignature signature{};
-  signature.viewProjMatrix          = sceneInfo.viewProjMatrix;
-  signature.viewProjInvMatrix       = sceneInfo.viewProjInvMatrix;
-  signature.viewInvMatrix           = sceneInfo.viewInvMatrix;
-  signature.cameraPosition          = sceneInfo.cameraPosition;
-  signature.useSky                  = sceneInfo.useSky;
-  signature.useHdrEnv               = sceneInfo.useHdrEnv;
-  signature.environmentTextureIndex = sceneInfo.environmentTextureIndex;
-  signature.backgroundColor         = sceneInfo.backgroundColor;
-  signature.skySimpleParam          = sceneInfo.skySimpleParam;
-  signature.topLevelAsAddress       = topLevelAsAddress;
-  signature.viewportSize            = viewportSize;
-  return signature;
-}
-
-// Answers the narrower question "can NRD's temporal history still be trusted?".
-// Deliberately smaller than the accumulation signature: NRD reprojects with the
-// motion vectors this renderer writes, so a camera move is not a reason to drop
-// its history - only a change to what is being lit or to the buffer sizes is.
-struct ReSTIRPTDenoiserHistorySignature
-{
-  int                           useSky                  = 0;
-  int                           useHdrEnv               = 0;
-  int                           environmentTextureIndex = -1;
-  int                           pad0                    = 0;
-  glm::vec3                     backgroundColor{};
-  int                           pad1 = 0;
-  shaderio::SkySimpleParameters skySimpleParam{};
-  VkDeviceAddress               topLevelAsAddress = 0;
-  VkExtent2D                    viewportSize{};
-};
-
-inline ReSTIRPTDenoiserHistorySignature MakeReSTIRPTDenoiserHistorySignature(const shaderio::GltfSceneInfo& sceneInfo,
-                                                                            VkDeviceAddress topLevelAsAddress,
-                                                                            VkExtent2D      viewportSize)
-{
-  ReSTIRPTDenoiserHistorySignature signature{};
-  signature.useSky                  = sceneInfo.useSky;
-  signature.useHdrEnv               = sceneInfo.useHdrEnv;
-  signature.environmentTextureIndex = sceneInfo.environmentTextureIndex;
-  signature.backgroundColor         = sceneInfo.backgroundColor;
-  signature.skySimpleParam          = sceneInfo.skySimpleParam;
-  signature.topLevelAsAddress       = topLevelAsAddress;
-  signature.viewportSize            = viewportSize;
-  return signature;
-}
 
 inline bool IsReSTIRPTTemporalResamplingEnabled(ReSTIRPTResamplingMode resamplingMode)
 {
@@ -142,4 +81,4 @@ inline uint32_t GetReSTIRPTFrameSetIndex(uint32_t frameCycleIndex, size_t setCou
   return std::min(frameCycleIndex, uint32_t(setCount - 1));
 }
 
-}  // namespace nvsamples
+}  // namespace rtpt

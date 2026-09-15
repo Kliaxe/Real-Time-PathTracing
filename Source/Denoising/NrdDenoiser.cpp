@@ -5,25 +5,21 @@
 #include <cassert>
 #include <cstring>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <glm/gtc/type_ptr.hpp>
-#include <nvapp/application.hpp>
-#include <nvvk/check_error.hpp>
-#include <nvvk/debug_util.hpp>
+#include "Framework/Vulkan/Diagnostics.h"
 
-#include "Common/Utils.hpp"
-
-#include "_autogen/NrdCompose.slang.h"
-
-namespace nvsamples
+namespace rtpt
 {
 
 namespace
 {
 
+// Denoised outputs are half float, matching the renderer's noisy radiance inputs.
 constexpr VkFormat kDenoisedRadianceFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-constexpr uint32_t kComposeGroupSize       = 8;
 
 template <typename T>
 T AlignTo(T value, T alignment)
@@ -36,11 +32,6 @@ uint32_t DivideUp(uint32_t x, uint16_t y)
   return (x + y - 1u) / y;
 }
 
-VkShaderModuleCreateInfo GetComposeShaderCode()
-{
-  return nvsamples::GetShaderModuleCreateInfo(std::span(NrdCompose_slang));
-}
-
 bool IsNrdSuccess(nrd::Result result)
 {
   return result == nrd::Result::SUCCESS;
@@ -49,25 +40,33 @@ bool IsNrdSuccess(nrd::Result result)
 }  // namespace
 
 NrdDenoiser::NrdDenoiser(const CreateInfo& createInfo)
-    : m_App(createInfo.app)
-    , m_Allocator(createInfo.allocator)
+    : m_Device(createInfo.device)
+    , m_Resources(createInfo.resources)
+    , m_Diagnostics(createInfo.diagnostics)
+    , m_FrameSlotCount(createInfo.frameSlotCount)
+    , m_ComposePass(NrdComposePass::CreateInfo { .device = createInfo.device, .frameSlotCount = createInfo.frameSlotCount })
 {
 }
 
 void NrdDenoiser::Initialize()
 {
-  if(m_App == nullptr || m_Allocator == nullptr || m_Instance != nullptr)
+  // Missing dependencies or a repeat call leave the denoiser not ready rather than failing; callers check IsReady.
+  if(m_Device == VK_NULL_HANDLE || m_Resources == nullptr || m_FrameSlotCount == 0 || m_Instance != nullptr)
   {
     return;
   }
 
   m_LibraryDesc = nrd::GetLibraryDesc();
 
-  const nrd::DenoiserDesc denoiserDesc{
+  // NRD instance
+  // One REBLUR_DIFFUSE_SPECULAR denoiser matches the renderers' split diffuse/specular signals.
+
+  const nrd::DenoiserDesc denoiserDesc {
       .identifier = kDenoiserIdentifier,
       .denoiser   = nrd::Denoiser::REBLUR_DIFFUSE_SPECULAR,
   };
-  const nrd::InstanceCreationDesc instanceCreateInfo{
+
+  const nrd::InstanceCreationDesc instanceCreateInfo {
       .denoisers   = &denoiserDesc,
       .denoisersNum = 1,
   };
@@ -80,12 +79,18 @@ void NrdDenoiser::Initialize()
 
   m_InstanceDesc = nrd::GetInstanceDesc(*m_Instance);
 
-  VkPhysicalDeviceProperties2 properties{
+  // Constant buffer alignment
+  // Each dispatch's constants live at a dynamic offset into one uniform buffer, so offsets must respect the device's minimum alignment.
+
+  VkPhysicalDeviceProperties2 properties {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
   };
-  vkGetPhysicalDeviceProperties2(m_Allocator->getPhysicalDevice(), &properties);
+
+  vkGetPhysicalDeviceProperties2(m_Resources->PhysicalDevice(), &properties);
+
   m_ConstantBufferAlignment = std::max(1u, static_cast<uint32_t>(properties.properties.limits.minUniformBufferOffsetAlignment));
 
+  // Defaults until a renderer supplies DenoiserSettings; the values match the DenoiserSettings defaults.
   m_ReblurSettings.maxAccumulatedFrameNum      = 30;
   m_ReblurSettings.maxFastAccumulatedFrameNum  = 6;
 
@@ -94,17 +99,20 @@ void NrdDenoiser::Initialize()
 
 void NrdDenoiser::Destroy()
 {
-  if(m_Allocator == nullptr)
+  if(m_Resources == nullptr)
   {
     return;
   }
 
+  // Vulkan objects go first; they were built from m_InstanceDesc, which the NRD instance owns.
   DestroyVulkanState();
 
   if(m_Instance != nullptr)
   {
     nrd::DestroyInstance(*m_Instance);
   }
+
+  // Reset to the pre-Initialize state so a later Initialize starts from a clean history.
 
   m_LibraryDesc            = nullptr;
   m_InstanceDesc           = nullptr;
@@ -113,15 +121,18 @@ void NrdDenoiser::Destroy()
   m_PreviousViewMatrix     = glm::mat4(1.0f);
   m_PreviousProjectionMatrix = glm::mat4(1.0f);
   m_FrameIndex             = 0;
+  m_CurrentFrameSlot       = 0;
 }
 
 bool NrdDenoiser::IsReady() const
 {
-  return m_Instance != nullptr && m_PipelineLayout != VK_NULL_HANDLE && !m_Pipelines.empty() && m_ComposePipeline != VK_NULL_HANDLE;
+  return m_Instance != nullptr && m_PipelineLayout != VK_NULL_HANDLE && !m_Pipelines.empty() && m_ComposePass.IsReady();
 }
 
 void NrdDenoiser::InvalidateHistory()
 {
+  // The next PrepareFrame requests CLEAR_AND_RESTART and treats the camera as having no previous frame.
+
   m_HistoryInvalidated   = true;
   m_HasPreviousMatrices  = false;
   m_FrameIndex           = 0;
@@ -134,32 +145,45 @@ void NrdDenoiser::PrepareFrame(const FrameInput& input, const DenoiserResources&
     return;
   }
 
+  // Frame state
+  // The renderer's inputs are not read here; they are bound in Denoise.
+  // A resize inside EnsureForViewport also invalidates history, so it runs before the invalidation is resolved below.
+
   (void)denoiserInputs;
+
   EnsureForViewport(input.viewportSize);
+
   m_EnableMaterialDemodulation = input.enableMaterialDemodulation;
+  m_CurrentFrameSlot = std::min(input.frameSlot, m_FrameSlotCount - 1);
+
   if(input.settings != nullptr)
   {
     ApplyDenoiserSettings(*input.settings);
   }
+
   m_HistoryInvalidated = m_HistoryInvalidated || input.historyInvalidated;
+
+  // NRD's frame index sequence restarts together with the history.
   if(m_HistoryInvalidated)
   {
     m_FrameIndex = 0;
   }
+
   UpdateCommonSettings(input);
 
-  // Kept out of assert(): NDEBUG removes the whole expression, so wrapping these
-  // would mean NRD never receives camera matrices, frame index or REBLUR settings
-  // in a release build - and it fails silently, because a denoiser with no settings
-  // still dispatches, it just denoises against garbage.
+  // Submit settings
+  // Kept out of assert(): NDEBUG removes the whole expression, so wrapping these would mean NRD never receives camera matrices, frame index or REBLUR settings in a release build.
+  // And it fails silently, because a denoiser with no settings still dispatches; it just denoises against garbage.
+
   const nrd::Result commonSettingsResult = nrd::SetCommonSettings(*m_Instance, m_CommonSettings);
   assert(IsNrdSuccess(commonSettingsResult));
+
   const nrd::Result denoiserSettingsResult = nrd::SetDenoiserSettings(*m_Instance, kDenoiserIdentifier, &m_ReblurSettings);
   assert(IsNrdSuccess(denoiserSettingsResult));
+
   if(!IsNrdSuccess(commonSettingsResult) || !IsNrdSuccess(denoiserSettingsResult))
   {
-    // Leave the invalidation pending so the next frame retries from a clean history
-    // rather than accumulating onto settings NRD rejected.
+    // Leave the invalidation pending so the next frame retries from a clean history rather than accumulating onto settings NRD rejected.
     return;
   }
 
@@ -168,18 +192,26 @@ void NrdDenoiser::PrepareFrame(const FrameInput& input, const DenoiserResources&
 
 void NrdDenoiser::ApplyDenoiserSettings(const DenoiserSettings& settings)
 {
+  // Accumulation and blur
+  // The fast history length is clamped to the main one.
+
   m_ReblurSettings.maxAccumulatedFrameNum      = settings.maxAccumulatedFrames;
   m_ReblurSettings.maxFastAccumulatedFrameNum  = std::min(settings.maxFastAccumulatedFrames, settings.maxAccumulatedFrames);
   m_ReblurSettings.diffusePrepassBlurRadius    = settings.diffusePrepassBlurRadius;
   m_ReblurSettings.specularPrepassBlurRadius   = settings.specularPrepassBlurRadius;
   m_ReblurSettings.enableAntiFirefly           = settings.enableAntiFirefly;
   m_ReblurSettings.maxBlurRadius               = settings.maxBlurRadius;
+
+  // Hit distance normalization
   // Same three values the shaders normalize with; see DenoiserSettings.
+
   m_ReblurSettings.hitDistanceParameters.A     = settings.hitDistanceA;
   m_ReblurSettings.hitDistanceParameters.B     = settings.hitDistanceB;
   m_ReblurSettings.hitDistanceParameters.C     = settings.hitDistanceC;
-  // Per renderer, not global: only a renderer that leaves one lobe's hit distance
-  // at zero wants NRD to go looking for a replacement.
+
+  // Hit distance reconstruction
+  // Per renderer, not global: only a renderer that leaves one lobe's hit distance at zero wants NRD to go looking for a replacement.
+
   switch(settings.hitDistanceReconstructionMode)
   {
     case HitDistanceReconstructionMode::eArea3x3:
@@ -195,111 +227,140 @@ void NrdDenoiser::ApplyDenoiserSettings(const DenoiserSettings& settings)
   }
 }
 
-void NrdDenoiser::Denoise(VkCommandBuffer cmd,
-                                   const DenoiserResources& denoiserInputs,
-                                   VkImageView rawBeautyImageView,
-                                   VkImageView outputImageView,
-                                   DenoiserDebugView debugView,
-                                   VkExtent2D viewportSize)
+void NrdDenoiser::Denoise(VkCommandBuffer cmd, const DenoiserResources& denoiserInputs, VkImageView rawBeautyImageView, VkImageView outputImageView, DenoiserDebugView debugView, VkExtent2D viewportSize)
 {
-  if(!IsReady() || cmd == VK_NULL_HANDLE || rawBeautyImageView == VK_NULL_HANDLE || outputImageView == VK_NULL_HANDLE
-     || viewportSize.width == 0 || viewportSize.height == 0)
+  if(!IsReady() || cmd == VK_NULL_HANDLE || rawBeautyImageView == VK_NULL_HANDLE || outputImageView == VK_NULL_HANDLE || viewportSize.width == 0 || viewportSize.height == 0)
   {
     return;
   }
 
   EnsureForViewport(viewportSize);
 
-  TransitionImageToGeneral(cmd, const_cast<nvvk::Image&>(denoiserInputs.GetMotionVectorsImage()), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-  TransitionImageToGeneral(cmd, const_cast<nvvk::Image&>(denoiserInputs.GetNormalRoughnessImage()), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-  TransitionImageToGeneral(cmd, const_cast<nvvk::Image&>(denoiserInputs.GetBaseColorMetalnessImage()),
-                           VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-  TransitionImageToGeneral(cmd, const_cast<nvvk::Image&>(denoiserInputs.GetViewZImage()), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-  TransitionImageToGeneral(cmd, const_cast<nvvk::Image&>(denoiserInputs.GetDiffuseRadianceHitDistanceImage()),
-                           VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-  TransitionImageToGeneral(cmd, const_cast<nvvk::Image&>(denoiserInputs.GetSpecularRadianceHitDistanceImage()),
-                           VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  // Image layouts
+  // NRD binds every image with GENERAL layout. The renderer's inputs are normally GENERAL already, since it wrote them as storage images; the transition only acts on images still tracked in another layout.
+  // The const_casts are needed because the transition records the new layout on the image, while DenoiserResources is only passed here as const.
+
+  TransitionImageToGeneral(cmd, const_cast<rtpt::Image&>(denoiserInputs.GetMotionVectorsImage()), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  TransitionImageToGeneral(cmd, const_cast<rtpt::Image&>(denoiserInputs.GetNormalRoughnessImage()), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  TransitionImageToGeneral(cmd, const_cast<rtpt::Image&>(denoiserInputs.GetBaseColorMetalnessImage()), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  TransitionImageToGeneral(cmd, const_cast<rtpt::Image&>(denoiserInputs.GetViewZImage()), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  TransitionImageToGeneral(cmd, const_cast<rtpt::Image&>(denoiserInputs.GetDiffuseRadianceHitDistanceImage()), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  TransitionImageToGeneral(cmd, const_cast<rtpt::Image&>(denoiserInputs.GetSpecularRadianceHitDistanceImage()), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
   TransitionImageToGeneral(cmd, m_DiffuseOutputImage, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
   TransitionImageToGeneral(cmd, m_SpecularOutputImage, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
-  for(nvvk::Image& image : m_PermanentPoolImages)
+  for(rtpt::Image& image : m_PermanentPoolImages)
   {
     TransitionImageToGeneral(cmd, image, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
   }
 
-  for(nvvk::Image& image : m_TransientPoolImages)
+  for(rtpt::Image& image : m_TransientPoolImages)
   {
     TransitionImageToGeneral(cmd, image, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
   }
+
+  // Record
+  // BeginFrame resets this slot's pool and constant offsets, so it must precede every descriptor allocation and upload that follows.
 
   FrameResources& frameResources = GetCurrentFrameResources();
+
   BeginFrame(frameResources);
   UpdateFrameSet(frameResources);
   DispatchNrd(cmd, frameResources, denoiserInputs);
-  ComposeDenoisedResult(cmd, frameResources, denoiserInputs, rawBeautyImageView, outputImageView, debugView, viewportSize);
+
+  // Compose
+  // The last NRD dispatch already published its writes, so the compose pass reads the outputs directly and only its own result needs a barrier after.
+
+  const NrdComposePass::RecordInput composeInput {
+      .denoiserInputs             = &denoiserInputs,
+      .denoisedDiffuseImageView   = m_DiffuseOutputImage.descriptor.imageView,
+      .denoisedSpecularImageView  = m_SpecularOutputImage.descriptor.imageView,
+      .rawBeautyImageView         = rawBeautyImageView,
+      .outputImageView            = outputImageView,
+      .debugView                  = debugView,
+      .enableMaterialDemodulation = m_EnableMaterialDemodulation,
+      .viewportSize               = viewportSize,
+      .frameSlot                  = m_CurrentFrameSlot,
+  };
+
+  m_ComposePass.Record(cmd, composeInput);
+
+  // Makes the composed output visible to whatever compute work the renderer records next.
+  InsertComputeBarrier(cmd);
 }
 
-const nvvk::Image& NrdDenoiser::GetDiffuseOutputImage() const
+const rtpt::Image& NrdDenoiser::GetDiffuseOutputImage() const
 {
   return m_DiffuseOutputImage;
 }
 
-const nvvk::Image& NrdDenoiser::GetSpecularOutputImage() const
+const rtpt::Image& NrdDenoiser::GetSpecularOutputImage() const
 {
   return m_SpecularOutputImage;
 }
 
 void NrdDenoiser::CreateVulkanState()
 {
+  // Order follows dependencies: the frame layout embeds the samplers, the pipeline layout uses the set layouts, and the pipelines use the pipeline layout.
+  // The compose pass is independent of NRD's objects; it is built after NRD's pipelines so the creation order matches the dispatch order.
+
   CreateSamplers();
   CreateDescriptorSetLayouts();
   CreatePipelineLayout();
   CreatePipelines();
+  m_ComposePass.Initialize();
   CreateFrameResources();
 }
 
 void NrdDenoiser::DestroyVulkanState()
 {
-  if(m_Allocator == nullptr)
+  if(m_Resources == nullptr)
   {
     return;
   }
 
-  VkDevice device = m_Allocator->getDevice();
+  VkDevice device = m_Device;
 
-  DestroyViewportResources(false);
+  // Images and per-slot pools go before the layouts and pipelines they were created against.
+
+  DestroyViewportResources();
   DestroyFrameResources();
 
   for(VkPipeline pipeline : m_Pipelines)
   {
     vkDestroyPipeline(device, pipeline, nullptr);
   }
+
   m_Pipelines.clear();
 
-  vkDestroyPipeline(device, m_ComposePipeline, nullptr);
+  // The compose pass owns its pipeline, layouts, and sets, and releases them in the same place the compose pipeline used to go.
+  m_ComposePass.Destroy();
+
+  // Destroying VK_NULL_HANDLE is a no-op, so this is safe after a partial or failed Initialize.
+
   vkDestroyPipelineLayout(device, m_PipelineLayout, nullptr);
-  vkDestroyPipelineLayout(device, m_ComposePipelineLayout, nullptr);
   vkDestroyDescriptorSetLayout(device, m_ResourceSetLayout, nullptr);
   vkDestroyDescriptorSetLayout(device, m_FrameSetLayout, nullptr);
-  vkDestroyDescriptorSetLayout(device, m_ComposeSetLayout, nullptr);
   vkDestroySampler(device, m_NearestSampler, nullptr);
   vkDestroySampler(device, m_LinearSampler, nullptr);
 
-  m_ComposePipeline       = VK_NULL_HANDLE;
-  m_PipelineLayout        = VK_NULL_HANDLE;
-  m_ComposePipelineLayout = VK_NULL_HANDLE;
-  m_ResourceSetLayout     = VK_NULL_HANDLE;
-  m_FrameSetLayout        = VK_NULL_HANDLE;
-  m_ComposeSetLayout      = VK_NULL_HANDLE;
-  m_NearestSampler        = VK_NULL_HANDLE;
-  m_LinearSampler         = VK_NULL_HANDLE;
+  // Nulled handles make IsReady false and a repeated Destroy harmless.
+
+  m_PipelineLayout    = VK_NULL_HANDLE;
+  m_ResourceSetLayout = VK_NULL_HANDLE;
+  m_FrameSetLayout    = VK_NULL_HANDLE;
+  m_NearestSampler    = VK_NULL_HANDLE;
+  m_LinearSampler     = VK_NULL_HANDLE;
 }
 
 void NrdDenoiser::CreateSamplers()
 {
-  VkDevice device = m_Allocator->getDevice();
+  // Samplers
+  // The two samplers NRD's shaders declare, nrd::Sampler::NEAREST_CLAMP and LINEAR_CLAMP, in that order.
 
-  const VkSamplerCreateInfo nearestSamplerInfo{
+  VkDevice device = m_Device;
+
+  const VkSamplerCreateInfo nearestSamplerInfo {
       .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
       .magFilter    = VK_FILTER_NEAREST,
       .minFilter    = VK_FILTER_NEAREST,
@@ -309,9 +370,10 @@ void NrdDenoiser::CreateSamplers()
       .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
       .maxLod       = VK_LOD_CLAMP_NONE,
   };
-  NVVK_CHECK(vkCreateSampler(device, &nearestSamplerInfo, nullptr, &m_NearestSampler));
 
-  const VkSamplerCreateInfo linearSamplerInfo{
+  rtpt::CheckVk(vkCreateSampler(device, &nearestSamplerInfo, nullptr, &m_NearestSampler), "vkCreateSampler(NRD nearest)");
+
+  const VkSamplerCreateInfo linearSamplerInfo {
       .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
       .magFilter    = VK_FILTER_LINEAR,
       .minFilter    = VK_FILTER_LINEAR,
@@ -321,34 +383,36 @@ void NrdDenoiser::CreateSamplers()
       .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
       .maxLod       = VK_LOD_CLAMP_NONE,
   };
-  NVVK_CHECK(vkCreateSampler(device, &linearSamplerInfo, nullptr, &m_LinearSampler));
+
+  rtpt::CheckVk(vkCreateSampler(device, &linearSamplerInfo, nullptr, &m_LinearSampler), "vkCreateSampler(NRD linear)");
 }
 
 void NrdDenoiser::CreateDescriptorSetLayouts()
 {
-  VkDevice device = m_Allocator->getDevice();
+  VkDevice device = m_Device;
 
+  // Binding numbers
   // NRD describes the SPIR-V binding ranges for its generated compute passes.
-  // The wrapper mirrors that layout in Vulkan instead of hard-coding a local
-  // descriptor contract.
-  const uint32_t textureBinding =
-      m_LibraryDesc->spirvBindingOffsets.textureOffset + m_InstanceDesc->resourcesBaseRegisterIndex;
-  const uint32_t storageBinding =
-      m_LibraryDesc->spirvBindingOffsets.storageTextureAndBufferOffset + m_InstanceDesc->resourcesBaseRegisterIndex;
-  const uint32_t samplerBinding =
-      m_LibraryDesc->spirvBindingOffsets.samplerOffset + m_InstanceDesc->samplersBaseRegisterIndex;
-  const uint32_t constantBufferBinding =
-      m_LibraryDesc->spirvBindingOffsets.constantBufferOffset + m_InstanceDesc->constantBufferRegisterIndex;
+  // The wrapper mirrors that layout in Vulkan instead of hard-coding a local descriptor contract.
+
+  const uint32_t textureBinding = m_LibraryDesc->spirvBindingOffsets.textureOffset + m_InstanceDesc->resourcesBaseRegisterIndex;
+  const uint32_t storageBinding = m_LibraryDesc->spirvBindingOffsets.storageTextureAndBufferOffset + m_InstanceDesc->resourcesBaseRegisterIndex;
+  const uint32_t samplerBinding = m_LibraryDesc->spirvBindingOffsets.samplerOffset + m_InstanceDesc->samplersBaseRegisterIndex;
+  const uint32_t constantBufferBinding = m_LibraryDesc->spirvBindingOffsets.constantBufferOffset + m_InstanceDesc->constantBufferRegisterIndex;
+
+  // Resource set
+  // Sized for the largest dispatch: perSetTexturesMaxNum sampled images followed by perSetStorageTexturesMaxNum storage images.
+  // A dispatch that uses fewer leaves the remaining bindings unwritten, which is valid as long as the dispatch's pipeline does not statically use them.
 
   std::vector<VkDescriptorSetLayoutBinding> resourceBindings;
   std::vector<VkDescriptorBindingFlags>     resourceBindingFlags;
-  resourceBindings.reserve(m_InstanceDesc->descriptorPoolDesc.perSetTexturesMaxNum
-                           + m_InstanceDesc->descriptorPoolDesc.perSetStorageTexturesMaxNum);
+
+  resourceBindings.reserve(m_InstanceDesc->descriptorPoolDesc.perSetTexturesMaxNum + m_InstanceDesc->descriptorPoolDesc.perSetStorageTexturesMaxNum);
   resourceBindingFlags.reserve(resourceBindings.capacity());
 
   for(uint32_t textureIndex = 0; textureIndex < m_InstanceDesc->descriptorPoolDesc.perSetTexturesMaxNum; ++textureIndex)
   {
-    resourceBindings.push_back(VkDescriptorSetLayoutBinding{
+    resourceBindings.push_back(VkDescriptorSetLayoutBinding {
         .binding         = textureBinding + textureIndex,
         .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
         .descriptorCount = 1,
@@ -359,7 +423,7 @@ void NrdDenoiser::CreateDescriptorSetLayouts()
 
   for(uint32_t storageIndex = 0; storageIndex < m_InstanceDesc->descriptorPoolDesc.perSetStorageTexturesMaxNum; ++storageIndex)
   {
-    resourceBindings.push_back(VkDescriptorSetLayoutBinding{
+    resourceBindings.push_back(VkDescriptorSetLayoutBinding {
         .binding         = storageBinding + storageIndex,
         .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
         .descriptorCount = 1,
@@ -368,26 +432,34 @@ void NrdDenoiser::CreateDescriptorSetLayouts()
     resourceBindingFlags.push_back(0);
   }
 
-  const VkDescriptorSetLayoutBindingFlagsCreateInfo resourceBindingFlagsInfo{
+  const VkDescriptorSetLayoutBindingFlagsCreateInfo resourceBindingFlagsInfo {
       .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
       .bindingCount  = static_cast<uint32_t>(resourceBindingFlags.size()),
       .pBindingFlags = resourceBindingFlags.data(),
   };
-  const VkDescriptorSetLayoutCreateInfo resourceLayoutInfo{
+
+  const VkDescriptorSetLayoutCreateInfo resourceLayoutInfo {
       .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
       .pNext        = &resourceBindingFlagsInfo,
       .bindingCount = static_cast<uint32_t>(resourceBindings.size()),
       .pBindings    = resourceBindings.data(),
   };
-  NVVK_CHECK(vkCreateDescriptorSetLayout(device, &resourceLayoutInfo, nullptr, &m_ResourceSetLayout));
 
-  const VkSampler samplers[] = {m_NearestSampler, m_LinearSampler};
+  rtpt::CheckVk(vkCreateDescriptorSetLayout(device, &resourceLayoutInfo, nullptr, &m_ResourceSetLayout), "vkCreateDescriptorSetLayout(NRD resources)");
+
+  // Frame set
+  // Samplers are immutable, baked into the layout in nrd::Sampler order, so the set only ever needs its constant buffer written.
+  // The constant buffer is dynamic so one set serves every dispatch, each at its own offset.
+
+  const VkSampler samplers[] = { m_NearestSampler, m_LinearSampler };
   assert(m_InstanceDesc->samplersNum <= std::size(samplers));
+
   std::vector<VkDescriptorSetLayoutBinding> frameBindings;
   frameBindings.reserve(m_InstanceDesc->samplersNum + 1);
+
   for(uint32_t samplerIndex = 0; samplerIndex < m_InstanceDesc->samplersNum; ++samplerIndex)
   {
-    frameBindings.push_back(VkDescriptorSetLayoutBinding{
+    frameBindings.push_back(VkDescriptorSetLayoutBinding {
         .binding            = samplerBinding + samplerIndex,
         .descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLER,
         .descriptorCount    = 1,
@@ -395,233 +467,161 @@ void NrdDenoiser::CreateDescriptorSetLayouts()
         .pImmutableSamplers = &samplers[samplerIndex],
     });
   }
-  frameBindings.push_back(VkDescriptorSetLayoutBinding{
+
+  frameBindings.push_back(VkDescriptorSetLayoutBinding {
       .binding         = constantBufferBinding,
       .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
       .descriptorCount = 1,
       .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
   });
 
-  const VkDescriptorSetLayoutCreateInfo frameLayoutInfo{
+  const VkDescriptorSetLayoutCreateInfo frameLayoutInfo {
       .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
       .bindingCount = static_cast<uint32_t>(frameBindings.size()),
       .pBindings    = frameBindings.data(),
   };
-  NVVK_CHECK(vkCreateDescriptorSetLayout(device, &frameLayoutInfo, nullptr, &m_FrameSetLayout));
 
-  const std::array<VkDescriptorSetLayoutBinding, 11> composeBindings{{
-      VkDescriptorSetLayoutBinding{
-          .binding         = 0,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .descriptorCount = 1,
-          .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
-      },
-      VkDescriptorSetLayoutBinding{
-          .binding         = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .descriptorCount = 1,
-          .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
-      },
-      VkDescriptorSetLayoutBinding{
-          .binding         = 2,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .descriptorCount = 1,
-          .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
-      },
-      VkDescriptorSetLayoutBinding{
-          .binding         = 3,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .descriptorCount = 1,
-          .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
-      },
-      VkDescriptorSetLayoutBinding{
-          .binding         = 4,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .descriptorCount = 1,
-          .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
-      },
-      VkDescriptorSetLayoutBinding{
-          .binding         = 5,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .descriptorCount = 1,
-          .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
-      },
-      VkDescriptorSetLayoutBinding{
-          .binding         = 6,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .descriptorCount = 1,
-          .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
-      },
-      VkDescriptorSetLayoutBinding{
-          .binding         = 7,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .descriptorCount = 1,
-          .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
-      },
-      VkDescriptorSetLayoutBinding{
-          .binding         = 8,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .descriptorCount = 1,
-          .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
-      },
-      VkDescriptorSetLayoutBinding{
-          .binding         = 9,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .descriptorCount = 1,
-          .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
-      },
-      VkDescriptorSetLayoutBinding{
-          .binding         = 10,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-          .descriptorCount = 1,
-          .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT,
-      },
-  }};
-  const VkDescriptorSetLayoutCreateInfo composeLayoutInfo{
-      .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = static_cast<uint32_t>(composeBindings.size()),
-      .pBindings    = composeBindings.data(),
-  };
-  NVVK_CHECK(vkCreateDescriptorSetLayout(device, &composeLayoutInfo, nullptr, &m_ComposeSetLayout));
+  rtpt::CheckVk(vkCreateDescriptorSetLayout(device, &frameLayoutInfo, nullptr, &m_FrameSetLayout), "vkCreateDescriptorSetLayout(NRD frame)");
 }
 
 void NrdDenoiser::CreatePipelineLayout()
 {
-  VkDevice device = m_Allocator->getDevice();
+  VkDevice device = m_Device;
 
-  const std::array<VkDescriptorSetLayout, 2> setLayouts{
+  // NRD pipeline layout
+  // NRD's shaders declare their per-dispatch resources in register space resourcesSpaceIndex and their samplers and constant buffer in constantBufferAndSamplersSpaceIndex, and DXC maps register space N to descriptor set N.
+  // This layout and the binding in DispatchNrd put the resource set at set 0 and the frame set at set 1, so the instance must report exactly those spaces; any other NRD build would bind every descriptor to the wrong set.
+
+  const uint32_t resourcesSpace = m_InstanceDesc->resourcesSpaceIndex;
+  const uint32_t frameSpace     = m_InstanceDesc->constantBufferAndSamplersSpaceIndex;
+
+  if(resourcesSpace != 0 || frameSpace != 1)
+  {
+    throw std::runtime_error("NRD register spaces do not match the pipeline layout: expected resources in space 0 and constants and samplers in space 1, got " + std::to_string(resourcesSpace) + " and " + std::to_string(frameSpace));
+  }
+
+  const std::array<VkDescriptorSetLayout, 2> setLayouts {
       m_ResourceSetLayout,
       m_FrameSetLayout,
   };
-  const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
+
+  const VkPipelineLayoutCreateInfo pipelineLayoutInfo {
       .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
       .setLayoutCount = static_cast<uint32_t>(setLayouts.size()),
       .pSetLayouts    = setLayouts.data(),
   };
-  NVVK_CHECK(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &m_PipelineLayout));
 
-  struct ComposePushConstants
-  {
-    uint32_t debugView = 0;
-    uint32_t useMaterialDemodulation = 0;
-  };
-  const VkPushConstantRange composePushConstantRange{
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset     = 0,
-      .size       = sizeof(ComposePushConstants),
-  };
-  const VkPipelineLayoutCreateInfo composePipelineLayoutInfo{
-      .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount         = 1,
-      .pSetLayouts            = &m_ComposeSetLayout,
-      .pushConstantRangeCount = 1,
-      .pPushConstantRanges    = &composePushConstantRange,
-  };
-  NVVK_CHECK(vkCreatePipelineLayout(device, &composePipelineLayoutInfo, nullptr, &m_ComposePipelineLayout));
+  rtpt::CheckVk(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &m_PipelineLayout), "vkCreatePipelineLayout(NRD)");
 }
 
 void NrdDenoiser::CreatePipelines()
 {
-  VkDevice device = m_Allocator->getDevice();
+  VkDevice device = m_Device;
+
+  // NRD pipelines
+  // One compute pipeline per NRD pipeline description, pushed in order so DispatchDesc::pipelineIndex indexes m_Pipelines directly.
+  // Shader modules are only needed until pipeline creation, so each is destroyed right after.
+
   m_Pipelines.reserve(m_InstanceDesc->pipelinesNum);
 
   for(uint32_t pipelineIndex = 0; pipelineIndex < m_InstanceDesc->pipelinesNum; ++pipelineIndex)
   {
     const nrd::PipelineDesc& pipelineDesc = m_InstanceDesc->pipelines[pipelineIndex];
-    const VkShaderModuleCreateInfo shaderCode{
+
+    const VkShaderModuleCreateInfo shaderCode {
         .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         .codeSize = static_cast<size_t>(pipelineDesc.computeShaderSPIRV.size),
         .pCode    = static_cast<const uint32_t*>(pipelineDesc.computeShaderSPIRV.bytecode),
     };
 
     VkShaderModule shaderModule = VK_NULL_HANDLE;
-    NVVK_CHECK(vkCreateShaderModule(device, &shaderCode, nullptr, &shaderModule));
 
-    const VkPipelineShaderStageCreateInfo shaderStage{
+    rtpt::CheckVk(vkCreateShaderModule(device, &shaderCode, nullptr, &shaderModule), "vkCreateShaderModule(NRD)");
+
+    const VkPipelineShaderStageCreateInfo shaderStage {
         .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
         .module = shaderModule,
         .pName  = m_InstanceDesc->shaderEntryPoint,
     };
-    const VkComputePipelineCreateInfo pipelineInfo{
+
+    const VkComputePipelineCreateInfo pipelineInfo {
         .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .stage  = shaderStage,
         .layout = m_PipelineLayout,
     };
 
     VkPipeline pipeline = VK_NULL_HANDLE;
-    NVVK_CHECK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
+
+    rtpt::CheckVk(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline), "vkCreateComputePipelines(NRD)");
+
     m_Pipelines.push_back(pipeline);
     vkDestroyShaderModule(device, shaderModule, nullptr);
   }
-
-  const VkShaderModuleCreateInfo composeShaderCode = GetComposeShaderCode();
-  VkShaderModule                 composeShaderModule = VK_NULL_HANDLE;
-  NVVK_CHECK(vkCreateShaderModule(device, &composeShaderCode, nullptr, &composeShaderModule));
-
-  const VkPipelineShaderStageCreateInfo composeShaderStage{
-      .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-      .module = composeShaderModule,
-      .pName  = "main",
-  };
-  const VkComputePipelineCreateInfo composePipelineInfo{
-      .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-      .stage  = composeShaderStage,
-      .layout = m_ComposePipelineLayout,
-  };
-  NVVK_CHECK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &composePipelineInfo, nullptr, &m_ComposePipeline));
-  vkDestroyShaderModule(device, composeShaderModule, nullptr);
 }
 
 void NrdDenoiser::CreateFrameResources()
 {
-  const uint32_t frameCount = std::max(1u, m_App->getFrameCycleSize());
+  const uint32_t frameCount = m_FrameSlotCount;
+
   m_FrameResources.resize(frameCount);
 
   for(FrameResources& frameResources : m_FrameResources)
   {
+    // Descriptor pool
+    // Sized for NRD's worst case of setsMaxNum resource sets, plus the frame set (the + 1 on maxSets).
+    // The frame set adds the single dynamic uniform buffer and its immutable sampler bindings. The spec does not say whether immutable samplers consume pool space, so they are reserved to stay safe. The compose set comes from NrdComposePass's own pool.
+
     const VkDescriptorPoolSize poolSizes[] = {
-        VkDescriptorPoolSize{
+        VkDescriptorPoolSize {
             .type            = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-            .descriptorCount = m_InstanceDesc->descriptorPoolDesc.setsMaxNum * m_InstanceDesc->descriptorPoolDesc.perSetTexturesMaxNum + 10,
+            .descriptorCount = m_InstanceDesc->descriptorPoolDesc.setsMaxNum * m_InstanceDesc->descriptorPoolDesc.perSetTexturesMaxNum,
         },
-        VkDescriptorPoolSize{
+        VkDescriptorPoolSize {
             .type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .descriptorCount = m_InstanceDesc->descriptorPoolDesc.setsMaxNum * m_InstanceDesc->descriptorPoolDesc.perSetStorageTexturesMaxNum + 1,
+            .descriptorCount = m_InstanceDesc->descriptorPoolDesc.setsMaxNum * m_InstanceDesc->descriptorPoolDesc.perSetStorageTexturesMaxNum,
         },
-        VkDescriptorPoolSize{
+        VkDescriptorPoolSize {
             .type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
             .descriptorCount = 1,
         },
+        VkDescriptorPoolSize {
+            .type            = VK_DESCRIPTOR_TYPE_SAMPLER,
+            .descriptorCount = m_InstanceDesc->samplersNum,
+        },
     };
-    const VkDescriptorPoolCreateInfo poolInfo{
+
+    const VkDescriptorPoolCreateInfo poolInfo {
         .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = m_InstanceDesc->descriptorPoolDesc.setsMaxNum + 2,
+        .maxSets       = m_InstanceDesc->descriptorPoolDesc.setsMaxNum + 1,
         .poolSizeCount = static_cast<uint32_t>(std::size(poolSizes)),
         .pPoolSizes    = poolSizes,
     };
-    NVVK_CHECK(vkCreateDescriptorPool(m_Allocator->getDevice(), &poolInfo, nullptr, &frameResources.descriptorPool));
 
-    const uint32_t constantBufferSize =
-        std::max(1u, m_InstanceDesc->descriptorPoolDesc.setsMaxNum) * AlignTo(m_InstanceDesc->constantBufferMaxDataSize, m_ConstantBufferAlignment);
-    NVVK_CHECK(m_Allocator->createBuffer(frameResources.constantBuffer, constantBufferSize, VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT,
-                                         VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
-                                         VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT));
+    rtpt::CheckVk(vkCreateDescriptorPool(m_Device, &poolInfo, nullptr, &frameResources.descriptorPool), "vkCreateDescriptorPool(NRD frame)");
+
+    // Constant buffer
+    // Room for one maximum-size, aligned constant block per possible dispatch, host-mapped so uploads are a memcpy and a flush.
+
+    const uint32_t constantBufferSize = std::max(1u, m_InstanceDesc->descriptorPoolDesc.setsMaxNum) * AlignTo(m_InstanceDesc->constantBufferMaxDataSize, m_ConstantBufferAlignment);
+
+    rtpt::CheckVk(m_Resources->CreateBuffer(frameResources.constantBuffer, constantBufferSize, VK_BUFFER_USAGE_2_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_AUTO_PREFER_HOST, VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT), "ResourceAllocator::CreateBuffer(NRD constants)");
   }
 }
 
 void NrdDenoiser::DestroyFrameResources()
 {
-  if(m_Allocator == nullptr)
+  if(m_Resources == nullptr)
   {
     return;
   }
 
-  VkDevice device = m_Allocator->getDevice();
+  VkDevice device = m_Device;
+
+  // Destroying a pool frees every set allocated from it, so the sets need no separate release.
   for(FrameResources& frameResources : m_FrameResources)
   {
-    m_Allocator->destroyBuffer(frameResources.constantBuffer);
+    frameResources.constantBuffer.Reset();
     vkDestroyDescriptorPool(device, frameResources.descriptorPool, nullptr);
     frameResources = {};
   }
@@ -629,68 +629,27 @@ void NrdDenoiser::DestroyFrameResources()
   m_FrameResources.clear();
 }
 
-void NrdDenoiser::DestroyViewportResources(bool deferDestruction)
+void NrdDenoiser::DestroyViewportResources()
 {
-  auto releaseImage = [&](nvvk::Image& image) {
-    if(image.image == VK_NULL_HANDLE)
-    {
-      return;
-    }
-
-    if(deferDestruction)
-    {
-      ScheduleImageDestroy(image);
-    }
-    else
-    {
-      m_Allocator->destroyImage(image);
-    }
-  };
-
-  releaseImage(m_DiffuseOutputImage);
-  releaseImage(m_SpecularOutputImage);
-
-  for(nvvk::Image& image : m_PermanentPoolImages)
-  {
-    releaseImage(image);
-  }
-  for(nvvk::Image& image : m_TransientPoolImages)
-  {
-    releaseImage(image);
-  }
-
-  m_DiffuseOutputImage  = {};
-  m_SpecularOutputImage = {};
+  m_DiffuseOutputImage.Reset();
+  m_SpecularOutputImage.Reset();
   m_PermanentPoolImages.clear();
   m_TransientPoolImages.clear();
+
+  // Clearing the size forces the next EnsureForViewport to reallocate.
   m_ViewportSize = {};
-}
-
-void NrdDenoiser::ScheduleImageDestroy(nvvk::Image image)
-{
-  if(image.image == VK_NULL_HANDLE || m_App == nullptr || m_Allocator == nullptr)
-  {
-    return;
-  }
-
-  nvvk::ResourceAllocator* allocator = m_Allocator;
-  m_App->submitResourceFree([allocator, image]() mutable {
-    if(allocator != nullptr)
-    {
-      allocator->destroyImage(image);
-    }
-  });
 }
 
 void NrdDenoiser::EnsureForViewport(VkExtent2D viewportSize)
 {
+  // A zero extent keeps the current images rather than allocating nothing.
   if(viewportSize.width == 0 || viewportSize.height == 0)
   {
     return;
   }
 
-  if(m_ViewportSize.width == viewportSize.width && m_ViewportSize.height == viewportSize.height
-     && m_DiffuseOutputImage.image != VK_NULL_HANDLE)
+  // Reallocating at an unchanged size would throw away NRD's history.
+  if(m_ViewportSize.width == viewportSize.width && m_ViewportSize.height == viewportSize.height && m_DiffuseOutputImage.image != VK_NULL_HANDLE)
   {
     return;
   }
@@ -700,46 +659,58 @@ void NrdDenoiser::EnsureForViewport(VkExtent2D viewportSize)
 
 void NrdDenoiser::RecreateViewportResources(VkExtent2D viewportSize)
 {
-  DestroyViewportResources(true);
+  DestroyViewportResources();
+
+  // The new pool images hold no history, so NRD must clear and restart on the next frame.
 
   m_ViewportSize       = viewportSize;
   m_HistoryInvalidated = true;
 
+  // Outputs
+
   m_DiffuseOutputImage  = CreateStorageImage(viewportSize, kDenoisedRadianceFormat, "NrdDiffuseOutput");
   m_SpecularOutputImage = CreateStorageImage(viewportSize, kDenoisedRadianceFormat, "NrdSpecularOutput");
 
+  // Internal pools
+  // NRD describes each pool image by format and a downsample factor relative to the viewport; the vectors keep NRD's order so indexInPool maps directly.
+
   m_PermanentPoolImages.reserve(m_InstanceDesc->permanentPoolSize);
+
   for(uint32_t imageIndex = 0; imageIndex < m_InstanceDesc->permanentPoolSize; ++imageIndex)
   {
-    const VkExtent2D imageSize{
+    const VkExtent2D imageSize {
         .width  = DivideUp(viewportSize.width, m_InstanceDesc->permanentPool[imageIndex].downsampleFactor),
         .height = DivideUp(viewportSize.height, m_InstanceDesc->permanentPool[imageIndex].downsampleFactor),
     };
-    m_PermanentPoolImages.push_back(CreateStorageImage(imageSize, ToVkFormat(m_InstanceDesc->permanentPool[imageIndex].format),
-                                                       "NrdPermanentPool"));
+
+    m_PermanentPoolImages.push_back(CreateStorageImage(imageSize, ToVkFormat(m_InstanceDesc->permanentPool[imageIndex].format), "NrdPermanentPool"));
   }
 
   m_TransientPoolImages.reserve(m_InstanceDesc->transientPoolSize);
+
   for(uint32_t imageIndex = 0; imageIndex < m_InstanceDesc->transientPoolSize; ++imageIndex)
   {
-    const VkExtent2D imageSize{
+    const VkExtent2D imageSize {
         .width  = DivideUp(viewportSize.width, m_InstanceDesc->transientPool[imageIndex].downsampleFactor),
         .height = DivideUp(viewportSize.height, m_InstanceDesc->transientPool[imageIndex].downsampleFactor),
     };
-    m_TransientPoolImages.push_back(CreateStorageImage(imageSize, ToVkFormat(m_InstanceDesc->transientPool[imageIndex].format),
-                                                       "NrdTransientPool"));
+
+    m_TransientPoolImages.push_back(CreateStorageImage(imageSize, ToVkFormat(m_InstanceDesc->transientPool[imageIndex].format), "NrdTransientPool"));
   }
 }
 
-nvvk::Image NrdDenoiser::CreateStorageImage(VkExtent2D viewportSize, VkFormat format, const char* debugName) const
+rtpt::Image NrdDenoiser::CreateStorageImage(VkExtent2D viewportSize, VkFormat format, const char* debugName) const
 {
-  nvvk::Image image;
+  rtpt::Image image;
 
-  VkImageCreateInfo imageInfo{
+  // Image description
+  // Every NRD image is both read (sampled) and written (storage) by some pass.
+
+  VkImageCreateInfo imageInfo {
       .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType     = VK_IMAGE_TYPE_2D,
       .format        = format,
-      .extent        = {.width = viewportSize.width, .height = viewportSize.height, .depth = 1},
+      .extent        = { .width = viewportSize.width, .height = viewportSize.height, .depth = 1 },
       .mipLevels     = 1,
       .arrayLayers   = 1,
       .samples       = VK_SAMPLE_COUNT_1_BIT,
@@ -748,19 +719,27 @@ nvvk::Image NrdDenoiser::CreateStorageImage(VkExtent2D viewportSize, VkFormat fo
       .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
   };
-  VkImageViewCreateInfo viewInfo{
+
+  VkImageViewCreateInfo viewInfo {
       .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .viewType         = VK_IMAGE_VIEW_TYPE_2D,
       .format           = format,
-      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
+      .subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 },
   };
 
-  NVVK_CHECK(m_Allocator->createImage(image, imageInfo, viewInfo));
+  // Allocate
+  // descriptor.imageLayout is the CPU-side layout record TransitionImageToGeneral reads, so it starts as UNDEFINED. Samplers come from the frame set, never the image descriptor.
+
+  rtpt::CheckVk(m_Resources->CreateImage(image, imageInfo, &viewInfo), "ResourceAllocator::CreateImage(NRD target)");
+
   image.descriptor.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   image.descriptor.sampler     = VK_NULL_HANDLE;
-  (void)debugName;
-  NVVK_DBG_NAME(image.image);
-  NVVK_DBG_NAME(image.descriptor.imageView);
+
+  if(m_Diagnostics != nullptr)
+  {
+    m_Diagnostics->SetObjectName(m_Device, VK_OBJECT_TYPE_IMAGE, reinterpret_cast<uint64_t>(image.image), debugName);
+  }
+
   return image;
 }
 
@@ -768,19 +747,24 @@ void NrdDenoiser::UpdateCommonSettings(const FrameInput& input)
 {
   const shaderio::GltfSceneInfo& sceneInfo = *input.sceneInfo;
 
+  // Camera matrices
   // NRD receives current and previous camera transforms in view/clip space.
-  // The renderer has no jitter here, and motion vectors are written as
-  // screen-UV deltas with Z as previous-viewZ minus current-viewZ.
+  // The projection is recovered as viewProj * viewInverse because the scene info carries no standalone projection matrix.
+  // With no previous frame since a reset, the current matrices stand in for the previous ones so NRD sees a still camera.
+
   const glm::mat4 currentViewMatrix       = sceneInfo.viewMatrix;
   const glm::mat4 currentProjectionMatrix = sceneInfo.viewProjMatrix * sceneInfo.viewInvMatrix;
   const glm::mat4 previousViewMatrix      = m_HasPreviousMatrices ? m_PreviousViewMatrix : currentViewMatrix;
-  const glm::mat4 previousProjectionMatrix =
-      m_HasPreviousMatrices ? m_PreviousProjectionMatrix : currentProjectionMatrix;
+  const glm::mat4 previousProjectionMatrix = m_HasPreviousMatrices ? m_PreviousProjectionMatrix : currentProjectionMatrix;
 
   CopyMatrix(currentProjectionMatrix, m_CommonSettings.viewToClipMatrix);
   CopyMatrix(previousProjectionMatrix, m_CommonSettings.viewToClipMatrixPrev);
   CopyMatrix(currentViewMatrix, m_CommonSettings.worldToViewMatrix);
   CopyMatrix(previousViewMatrix, m_CommonSettings.worldToViewMatrixPrev);
+
+  // Motion, jitter, and resolution
+  // The renderer has no jitter here, and motion vectors are written as screen-UV deltas with Z as previous-viewZ minus current-viewZ.
+  // The z scale is 1 rather than NRD's 2D default of 0, so NRD uses that viewZ delta. Resource and rect sizes both equal the viewport because there is no dynamic resolution.
 
   m_CommonSettings.motionVectorScale[0] = 1.0f;
   m_CommonSettings.motionVectorScale[1] = 1.0f;
@@ -797,25 +781,31 @@ void NrdDenoiser::UpdateCommonSettings(const FrameInput& input)
   m_CommonSettings.rectSize[1]          = static_cast<uint16_t>(input.viewportSize.height);
   m_CommonSettings.rectSizePrev[0]      = static_cast<uint16_t>(input.viewportSize.width);
   m_CommonSettings.rectSizePrev[1]      = static_cast<uint16_t>(input.viewportSize.height);
+
+  // Depth, history, and optional inputs
+  // viewZ is written in full float, so no scale is needed. Sky pixels carry a 1e32 sentinel, far beyond denoisingRange, so NRD ignores them.
+  // Base colour / metalness is no longer an NRD input: 4.17 dropped IN_BASECOLOR_METALNESS, which earlier versions used only to patch motion vectors where specular motion prevailed. The image itself is still produced, because the compose pass needs it to rebuild the diffuse demodulation factor.
+
   m_CommonSettings.viewZScale           = 1.0f;
   m_CommonSettings.denoisingRange       = 500000.0f;
-  // This is NRD's local history rejection threshold. Higher values keep more
-  // reprojected history through camera motion, but can also make trails easier to see.
-  m_CommonSettings.disocclusionThreshold =
-      input.settings != nullptr ? input.settings->disocclusionThreshold : DenoiserSettings{}.disocclusionThreshold;
+
+  // This is NRD's local history rejection threshold. Higher values keep more reprojected history through camera motion, but can also make trails easier to see.
+  m_CommonSettings.disocclusionThreshold = input.settings != nullptr ? input.settings->disocclusionThreshold : DenoiserSettings {}.disocclusionThreshold;
+
   m_CommonSettings.disocclusionThresholdAlternate = 0.05f;
   m_CommonSettings.splitScreen          = 0.0f;
   m_CommonSettings.frameIndex           = m_FrameIndex;
-  m_CommonSettings.accumulationMode =
-      m_HistoryInvalidated ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
+  m_CommonSettings.accumulationMode = m_HistoryInvalidated ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
   m_CommonSettings.isMotionVectorInWorldSpace        = false;
   m_CommonSettings.isHistoryConfidenceAvailable      = false;
   m_CommonSettings.isDisocclusionThresholdMixAvailable = false;
   m_CommonSettings.enableValidation                  = false;
-  // Base colour / metalness is no longer an NRD input: 4.17 dropped
-  // IN_BASECOLOR_METALNESS, which earlier versions used only to patch motion vectors
-  // where specular motion prevailed. The image itself is still produced, because the
-  // compose pass needs it to rebuild the diffuse demodulation factor.
+
+  // NRD turns this into a frame-rate scale, max(33.3 ms / delta, 1), that REBLUR's temporal accumulation and anti-lag use to decide how strongly history is kept.
+  m_CommonSettings.timeDeltaBetweenFrames = input.frameTimeMilliseconds;
+
+  // Advance history
+  // The current matrices become next frame's previous matrices, and NRD's frame index advances by exactly one per frame.
 
   m_PreviousViewMatrix       = currentViewMatrix;
   m_PreviousProjectionMatrix = currentProjectionMatrix;
@@ -826,28 +816,39 @@ void NrdDenoiser::UpdateCommonSettings(const FrameInput& input)
 NrdDenoiser::FrameResources& NrdDenoiser::GetCurrentFrameResources()
 {
   assert(!m_FrameResources.empty());
-  const uint32_t frameIndex = std::min(m_App->getFrameCycleIndex(), uint32_t(m_FrameResources.size() - 1));
+
+  const uint32_t frameIndex = std::min(m_CurrentFrameSlot, uint32_t(m_FrameResources.size() - 1));
+
   return m_FrameResources[frameIndex];
 }
 
 void NrdDenoiser::BeginFrame(FrameResources& frameResources)
 {
+  // Reset slot state
+  // This slot's previous frame has finished by the time the slot records again, so its sets and constant offsets can be reused wholesale.
+
   frameResources.constantBufferOffset        = 0;
   frameResources.previousConstantBufferOffset = 0;
   frameResources.frameSet                    = VK_NULL_HANDLE;
 
-  NVVK_CHECK(vkResetDescriptorPool(m_Allocator->getDevice(), frameResources.descriptorPool, 0));
+  rtpt::CheckVk(vkResetDescriptorPool(m_Device, frameResources.descriptorPool, 0), "vkResetDescriptorPool(NRD frame)");
+
+  // The frame set is allocated first so every dispatch can bind it.
   frameResources.frameSet = AllocateDescriptorSet(frameResources, m_FrameSetLayout);
 }
 
 void NrdDenoiser::UpdateFrameSet(FrameResources& frameResources)
 {
-  const VkDescriptorBufferInfo constantBufferInfo{
+  // Constant buffer binding
+  // Written once at offset 0 with the maximum constant size; each dispatch supplies its real offset as the dynamic offset.
+
+  const VkDescriptorBufferInfo constantBufferInfo {
       .buffer = frameResources.constantBuffer.buffer,
       .offset = 0,
       .range  = m_InstanceDesc->constantBufferMaxDataSize,
   };
-  const VkWriteDescriptorSet write{
+
+  const VkWriteDescriptorSet write {
       .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
       .dstSet          = frameResources.frameSet,
       .dstBinding      = m_LibraryDesc->spirvBindingOffsets.constantBufferOffset + m_InstanceDesc->constantBufferRegisterIndex,
@@ -855,12 +856,13 @@ void NrdDenoiser::UpdateFrameSet(FrameResources& frameResources)
       .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
       .pBufferInfo     = &constantBufferInfo,
   };
-  vkUpdateDescriptorSets(m_Allocator->getDevice(), 1, &write, 0, nullptr);
+
+  vkUpdateDescriptorSets(m_Device, 1, &write, 0, nullptr);
 }
 
 VkDescriptorSet NrdDenoiser::AllocateDescriptorSet(FrameResources& frameResources, VkDescriptorSetLayout layout)
 {
-  const VkDescriptorSetAllocateInfo allocInfo{
+  const VkDescriptorSetAllocateInfo allocInfo {
       .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
       .descriptorPool     = frameResources.descriptorPool,
       .descriptorSetCount = 1,
@@ -868,74 +870,90 @@ VkDescriptorSet NrdDenoiser::AllocateDescriptorSet(FrameResources& frameResource
   };
 
   VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
-  NVVK_CHECK(vkAllocateDescriptorSets(m_Allocator->getDevice(), &allocInfo, &descriptorSet));
+
+  rtpt::CheckVk(vkAllocateDescriptorSets(m_Device, &allocInfo, &descriptorSet), "vkAllocateDescriptorSets(NRD)");
+
   return descriptorSet;
 }
 
-uint32_t NrdDenoiser::UploadConstantData(FrameResources& frameResources,
-                                                  const void*     constantData,
-                                                  uint32_t        constantDataSize,
-                                                  bool            reusePreviousData)
+uint32_t NrdDenoiser::UploadConstantData(FrameResources& frameResources, const void* constantData, uint32_t constantDataSize, bool reusePreviousData)
 {
+  // A dispatch with no constants still needs a valid dynamic offset; 0 is always in range.
   if(constantDataSize == 0 || constantData == nullptr)
   {
     return 0;
   }
 
+  // NRD flags constants identical to the previous dispatch, so that upload is bound again instead of copied.
   if(reusePreviousData)
   {
     return frameResources.previousConstantBufferOffset;
   }
 
+  // Append
+  // The buffer is sized for setsMaxNum maximum-size blocks, so wrapping to the start should not happen within one frame; it guards against overrunning the mapping if it ever does.
+
   const uint32_t alignedConstantDataSize = AlignTo(constantDataSize, m_ConstantBufferAlignment);
+
   if(frameResources.constantBufferOffset + alignedConstantDataSize > frameResources.constantBuffer.bufferSize)
   {
     frameResources.constantBufferOffset = 0;
   }
 
   const uint32_t currentOffset = frameResources.constantBufferOffset;
+
   std::memcpy(frameResources.constantBuffer.mapping + currentOffset, constantData, constantDataSize);
-  NVVK_CHECK(m_Allocator->autoFlushBuffer(frameResources.constantBuffer, currentOffset, constantDataSize));
+
+  rtpt::CheckVk(m_Resources->FlushBuffer(frameResources.constantBuffer, currentOffset, constantDataSize), "ResourceAllocator::FlushBuffer(NRD constants)");
 
   frameResources.constantBufferOffset         += alignedConstantDataSize;
   frameResources.previousConstantBufferOffset  = currentOffset;
+
   return currentOffset;
 }
 
-void NrdDenoiser::UpdateResourceSet(VkDescriptorSet                      resourceSet,
-                                             const nrd::DispatchDesc&            dispatchDesc,
-                                             const DenoiserResources&   denoiserInputs)
+void NrdDenoiser::UpdateResourceSet(VkDescriptorSet resourceSet, const nrd::DispatchDesc& dispatchDesc, const DenoiserResources& denoiserInputs)
 {
   const nrd::PipelineDesc& pipelineDesc = m_InstanceDesc->pipelines[dispatchDesc.pipelineIndex];
 
-  // Each dispatch can bind a different slice of NRD's permanent/transient
-  // pools. Translate the NRD resource list into the descriptor set expected by
-  // the pipeline selected for this dispatch.
+  // Translate NRD resources
+  // Each dispatch can bind a different slice of NRD's permanent/transient pools.
+  // Translate the NRD resource list into the descriptor set expected by the pipeline selected for this dispatch.
+  // imageInfos is reserved up front because each write keeps a pointer to its entry; a reallocation would leave those pointers dangling.
+
   std::vector<VkDescriptorImageInfo> imageInfos;
   std::vector<VkWriteDescriptorSet>  writes;
+
   imageInfos.reserve(dispatchDesc.resourcesNum);
   writes.reserve(dispatchDesc.resourcesNum);
+
+  // The dispatch's resource list is flat and in range order, so one running index walks it while each range assigns consecutive bindings of its type.
 
   uint32_t resourceIndex = 0;
   uint32_t sampledBindingIndex = 0;
   uint32_t storageBindingIndex = 0;
+
   for(uint32_t rangeIndex = 0; rangeIndex < pipelineDesc.resourceRangesNum; ++rangeIndex)
   {
     const nrd::ResourceRangeDesc& resourceRange = pipelineDesc.resourceRanges[rangeIndex];
+
     for(uint32_t descriptorIndex = 0; descriptorIndex < resourceRange.descriptorsNum; ++descriptorIndex)
     {
       const nrd::ResourceDesc& resourceDesc = dispatchDesc.resources[resourceIndex++];
-      const nvvk::Image&       image = ResolveDispatchImage(resourceDesc.type, resourceDesc.indexInPool, denoiserInputs);
+      const rtpt::Image&       image = ResolveDispatchImage(resourceDesc.type, resourceDesc.indexInPool, denoiserInputs);
 
-      VkDescriptorImageInfo descriptorImageInfo{
+      VkDescriptorImageInfo descriptorImageInfo {
           .sampler     = VK_NULL_HANDLE,
           .imageView   = image.descriptor.imageView,
           .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
       };
+
       imageInfos.push_back(descriptorImageInfo);
 
       uint32_t binding = 0;
       VkDescriptorType descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+
+      // The binding bases match those used to build m_ResourceSetLayout.
       if(resourceRange.descriptorType == nrd::DescriptorType::TEXTURE)
       {
         binding = m_LibraryDesc->spirvBindingOffsets.textureOffset + m_InstanceDesc->resourcesBaseRegisterIndex + sampledBindingIndex++;
@@ -943,12 +961,11 @@ void NrdDenoiser::UpdateResourceSet(VkDescriptorSet                      resourc
       }
       else
       {
-        binding =
-            m_LibraryDesc->spirvBindingOffsets.storageTextureAndBufferOffset + m_InstanceDesc->resourcesBaseRegisterIndex + storageBindingIndex++;
+        binding = m_LibraryDesc->spirvBindingOffsets.storageTextureAndBufferOffset + m_InstanceDesc->resourcesBaseRegisterIndex + storageBindingIndex++;
         descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
       }
 
-      writes.push_back(VkWriteDescriptorSet{
+      writes.push_back(VkWriteDescriptorSet {
           .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet          = resourceSet,
           .dstBinding      = binding,
@@ -958,7 +975,8 @@ void NrdDenoiser::UpdateResourceSet(VkDescriptorSet                      resourc
       });
     }
   }
-  vkUpdateDescriptorSets(m_Allocator->getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+
+  vkUpdateDescriptorSets(m_Device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void NrdDenoiser::DispatchNrd(VkCommandBuffer cmd, FrameResources& frameResources, const DenoiserResources& denoiserInputs)
@@ -966,224 +984,48 @@ void NrdDenoiser::DispatchNrd(VkCommandBuffer cmd, FrameResources& frameResource
   const nrd::DispatchDesc* dispatchDescs    = nullptr;
   uint32_t                 dispatchDescsNum = 0;
   const nrd::Identifier    denoiserIdentifier = kDenoiserIdentifier;
-  // Kept out of assert() for the same reason as the settings calls above: under
-  // NDEBUG the call would disappear, dispatchDescsNum would stay 0, and the loop
-  // below would record nothing at all - leaving the output images at whatever they
-  // last held, which reads as a black image rather than as a failure.
-  const nrd::Result dispatchResult =
-      nrd::GetComputeDispatches(*m_Instance, &denoiserIdentifier, 1, dispatchDescs, dispatchDescsNum);
+
+  // Query dispatches
+  // Kept out of assert() for the same reason as the settings calls in PrepareFrame: under NDEBUG the call would disappear, dispatchDescsNum would stay 0, and the loop below would record nothing at all.
+  // That leaves the output images at whatever they last held, which reads as a black image rather than as a failure.
+
+  const nrd::Result dispatchResult = nrd::GetComputeDispatches(*m_Instance, &denoiserIdentifier, 1, dispatchDescs, dispatchDescsNum);
   assert(IsNrdSuccess(dispatchResult));
+
   if(!IsNrdSuccess(dispatchResult) || dispatchDescs == nullptr)
   {
     return;
   }
 
-  // NRD decides the compute-pass order for the active denoiser. Vulkan only
-  // records the described pipelines, descriptors, dynamic constants, and
-  // barriers.
+  // Record dispatches
+  // NRD decides the compute-pass order for the active denoiser. Vulkan only records the described pipelines, descriptors, dynamic constants, and barriers.
+
   for(uint32_t dispatchIndex = 0; dispatchIndex < dispatchDescsNum; ++dispatchIndex)
   {
     const nrd::DispatchDesc& dispatchDesc = dispatchDescs[dispatchIndex];
     VkDescriptorSet          resourceSet  = AllocateDescriptorSet(frameResources, m_ResourceSetLayout);
+
     UpdateResourceSet(resourceSet, dispatchDesc, denoiserInputs);
 
-    const uint32_t dynamicOffset =
-        UploadConstantData(frameResources, dispatchDesc.constantBufferData, dispatchDesc.constantBufferDataSize,
-                           dispatchDesc.constantBufferDataMatchesPreviousDispatch);
+    const uint32_t dynamicOffset = UploadConstantData(frameResources, dispatchDesc.constantBufferData, dispatchDesc.constantBufferDataSize, dispatchDesc.constantBufferDataMatchesPreviousDispatch);
 
-    const std::array<VkDescriptorSet, 2> descriptorSets{
+    const std::array<VkDescriptorSet, 2> descriptorSets {
         resourceSet,
         frameResources.frameSet,
     };
+
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_Pipelines[dispatchDesc.pipelineIndex]);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PipelineLayout, 0, static_cast<uint32_t>(descriptorSets.size()),
-                            descriptorSets.data(), 1, &dynamicOffset);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PipelineLayout, 0, static_cast<uint32_t>(descriptorSets.size()), descriptorSets.data(), 1, &dynamicOffset);
     vkCmdDispatch(cmd, dispatchDesc.gridWidth, dispatchDesc.gridHeight, 1);
+
+    // Each pass may read what the previous one wrote, so the writes are made visible before the next dispatch.
     InsertComputeBarrier(cmd);
   }
 }
 
-void NrdDenoiser::ComposeDenoisedResult(VkCommandBuffer cmd,
-                                                 FrameResources& frameResources,
-                                                 const DenoiserResources& denoiserInputs,
-                                                 VkImageView rawBeautyImageView,
-                                                 VkImageView outputImageView,
-                                                 DenoiserDebugView debugView,
-                                                 VkExtent2D      viewportSize)
+const rtpt::Image& NrdDenoiser::ResolveDispatchImage(nrd::ResourceType resourceType, uint16_t poolIndex, const DenoiserResources& denoiserInputs) const
 {
-  struct ComposePushConstants
-  {
-    uint32_t debugView = 0;
-    uint32_t useMaterialDemodulation = 0;
-  };
-
-  const VkDescriptorSet composeSet = AllocateDescriptorSet(frameResources, m_ComposeSetLayout);
-
-  const VkDescriptorImageInfo diffuseImageInfo{
-      .sampler     = VK_NULL_HANDLE,
-      .imageView   = m_DiffuseOutputImage.descriptor.imageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo specularImageInfo{
-      .sampler     = VK_NULL_HANDLE,
-      .imageView   = m_SpecularOutputImage.descriptor.imageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo rawBeautyImageInfo{
-      .sampler     = VK_NULL_HANDLE,
-      .imageView   = rawBeautyImageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo viewZImageInfo{
-      .sampler     = VK_NULL_HANDLE,
-      .imageView   = denoiserInputs.GetViewZImage().descriptor.imageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo normalRoughnessImageInfo{
-      .sampler     = VK_NULL_HANDLE,
-      .imageView   = denoiserInputs.GetNormalRoughnessImage().descriptor.imageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo baseColorMetalnessImageInfo{
-      .sampler     = VK_NULL_HANDLE,
-      .imageView   = denoiserInputs.GetBaseColorMetalnessImage().descriptor.imageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo motionVectorsImageInfo{
-      .sampler     = VK_NULL_HANDLE,
-      .imageView   = denoiserInputs.GetMotionVectorsImage().descriptor.imageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo noisyDiffuseImageInfo{
-      .sampler     = VK_NULL_HANDLE,
-      .imageView   = denoiserInputs.GetDiffuseRadianceHitDistanceImage().descriptor.imageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo noisySpecularImageInfo{
-      .sampler     = VK_NULL_HANDLE,
-      .imageView   = denoiserInputs.GetSpecularRadianceHitDistanceImage().descriptor.imageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo specularDemodulationFactorImageInfo{
-      .sampler     = VK_NULL_HANDLE,
-      .imageView   = denoiserInputs.GetSpecularDemodulationFactorImage().descriptor.imageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo outputStorageImageInfo{
-      .sampler     = VK_NULL_HANDLE,
-      .imageView   = outputImageView,
-      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const std::array<VkWriteDescriptorSet, 11> writes{{
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = composeSet,
-          .dstBinding      = 0,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo      = &diffuseImageInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = composeSet,
-          .dstBinding      = 1,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo      = &specularImageInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = composeSet,
-          .dstBinding      = 2,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo      = &rawBeautyImageInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = composeSet,
-          .dstBinding      = 3,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo      = &viewZImageInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = composeSet,
-          .dstBinding      = 4,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo      = &normalRoughnessImageInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = composeSet,
-          .dstBinding      = 5,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo      = &motionVectorsImageInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = composeSet,
-          .dstBinding      = 6,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo      = &noisyDiffuseImageInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = composeSet,
-          .dstBinding      = 7,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo      = &noisySpecularImageInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = composeSet,
-          .dstBinding      = 8,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo      = &baseColorMetalnessImageInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = composeSet,
-          .dstBinding      = 9,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-          .pImageInfo      = &specularDemodulationFactorImageInfo,
-      },
-      VkWriteDescriptorSet{
-          .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-          .dstSet          = composeSet,
-          .dstBinding      = 10,
-          .descriptorCount = 1,
-          .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-          .pImageInfo      = &outputStorageImageInfo,
-      },
-  }};
-  vkUpdateDescriptorSets(m_Allocator->getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-
-  const ComposePushConstants pushConstants{
-      .debugView = static_cast<uint32_t>(debugView),
-      .useMaterialDemodulation = m_EnableMaterialDemodulation ? 1u : 0u,
-  };
-
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_ComposePipeline);
-  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_ComposePipelineLayout, 0, 1, &composeSet, 0, nullptr);
-  vkCmdPushConstants(cmd, m_ComposePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComposePushConstants), &pushConstants);
-  vkCmdDispatch(cmd, (viewportSize.width + kComposeGroupSize - 1) / kComposeGroupSize,
-                (viewportSize.height + kComposeGroupSize - 1) / kComposeGroupSize, 1);
-
-  InsertComputeBarrier(cmd);
-}
-
-const nvvk::Image& NrdDenoiser::ResolveDispatchImage(nrd::ResourceType                 resourceType,
-                                                              uint16_t                          poolIndex,
-                                                              const DenoiserResources& denoiserInputs) const
-{
+  // Only the resource types REBLUR_DIFFUSE_SPECULAR requests with the inputs this integration provides are mapped. Anything else is an integration error.
   switch(resourceType)
   {
     case nrd::ResourceType::IN_MV:
@@ -1207,19 +1049,24 @@ const nvvk::Image& NrdDenoiser::ResolveDispatchImage(nrd::ResourceType          
       assert(poolIndex < m_PermanentPoolImages.size());
       return m_PermanentPoolImages[poolIndex];
     default:
+      // Release builds fall back to the diffuse output image rather than returning an invalid reference.
       assert(false && "Unsupported NRD resource type in path-tracer integration");
       return m_DiffuseOutputImage;
   }
 }
 
-void NrdDenoiser::TransitionImageToGeneral(VkCommandBuffer cmd, nvvk::Image& image, VkPipelineStageFlags2 dstStageMask) const
+void NrdDenoiser::TransitionImageToGeneral(VkCommandBuffer cmd, rtpt::Image& image, VkPipelineStageFlags2 dstStageMask) const
 {
+  // Images already tracked as GENERAL need no barrier.
   if(image.image == VK_NULL_HANDLE || image.descriptor.imageLayout == VK_IMAGE_LAYOUT_GENERAL)
   {
     return;
   }
 
-  const VkImageMemoryBarrier2 imageBarrier{
+  // Transition
+  // The source stage and access are NONE, so no earlier work on the image is synchronized against. Images normally reach this point freshly allocated in UNDEFINED, whose contents are discarded anyway.
+
+  const VkImageMemoryBarrier2 imageBarrier {
       .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
       .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
       .srcAccessMask = VK_ACCESS_2_NONE,
@@ -1228,50 +1075,48 @@ void NrdDenoiser::TransitionImageToGeneral(VkCommandBuffer cmd, nvvk::Image& ima
       .oldLayout     = image.descriptor.imageLayout,
       .newLayout     = VK_IMAGE_LAYOUT_GENERAL,
       .image         = image.image,
-      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1},
+      .subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 },
   };
-  const VkDependencyInfo dependencyInfo{
+
+  const VkDependencyInfo dependencyInfo {
       .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
       .imageMemoryBarrierCount = 1,
       .pImageMemoryBarriers    = &imageBarrier,
   };
+
   vkCmdPipelineBarrier2(cmd, &dependencyInfo);
+
+  // Recording the new layout lets later calls skip the barrier.
   image.descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 }
 
 void NrdDenoiser::InsertComputeBarrier(VkCommandBuffer cmd) const
 {
-  const VkMemoryBarrier2 memoryBarrier{
+  // Compute-to-compute memory barrier
+  // Declares that storage writes from the previous compute dispatch are read by the next one, so the ordering between passes is explicit.
+
+  const VkMemoryBarrier2 memoryBarrier {
       .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
       .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
       .srcAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
       .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
       .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
   };
-  const VkDependencyInfo dependencyInfo{
+
+  const VkDependencyInfo dependencyInfo {
       .sType              = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
       .memoryBarrierCount = 1,
       .pMemoryBarriers    = &memoryBarrier,
   };
-  vkCmdPipelineBarrier2(cmd, &dependencyInfo);
-}
 
-VkDescriptorType NrdDenoiser::ToVkDescriptorType(nrd::DescriptorType descriptorType)
-{
-  switch(descriptorType)
-  {
-    case nrd::DescriptorType::TEXTURE:
-      return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    case nrd::DescriptorType::STORAGE_TEXTURE:
-      return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    default:
-      assert(false && "Unsupported NRD descriptor type");
-      return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-  }
+  vkCmdPipelineBarrier2(cmd, &dependencyInfo);
 }
 
 VkFormat NrdDenoiser::ToVkFormat(nrd::Format format)
 {
+  // Format mapping
+  // NRD names packed formats in R-to-A order while Vulkan names them from the most significant bits, so the packed cases appear reversed, e.g. R10_G10_B10_A2 is A2B10G10R10.
+
   switch(format)
   {
     case nrd::Format::R8_UNORM:
@@ -1370,7 +1215,8 @@ VkFormat NrdDenoiser::ToVkFormat(nrd::Format format)
 
 void NrdDenoiser::CopyMatrix(glm::mat4 matrix, float (&destination)[16])
 {
+  // glm and NRD both store matrices column-major, so a straight copy preserves the layout.
   std::memcpy(destination, glm::value_ptr(matrix), sizeof(destination));
 }
 
-}  // namespace nvsamples
+}  // namespace rtpt

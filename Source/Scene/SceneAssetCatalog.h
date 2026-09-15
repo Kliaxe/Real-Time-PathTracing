@@ -7,38 +7,48 @@
 
 #include "SceneTypes.h"
 
-namespace nvsamples
+namespace rtpt
 {
 
-// Generic discovered asset entry used by scene/HDRI UI combos.
+// AssetEntry
+// One discovered file under a content directory, shown in the scene and HDRI UI combos.
+
 struct AssetEntry
 {
-  std::string           label;
+  // Display text: the content-relative path with forward slashes.
+  std::string label;
+
+  // Path relative to the content directory it was found in, so it resolves against any content root.
   std::filesystem::path relativePath;
 };
 
+// SceneAssetCatalogData
 // Fully resolved catalog data returned to runtime systems.
-// The rasterizer/runtime consumes this as immutable setup data after discovery.
+// The runtime consumes this as immutable setup data after discovery.
+
 struct SceneAssetCatalogData
 {
-  std::vector<AssetEntry>       modelAssets;
-  std::vector<AssetEntry>       hdriAssets;
-  std::vector<SceneDefinition>  sceneDefinitions;
-  size_t                        selectedSceneIndex = 0;
-  size_t                        selectedHdriIndex  = 0;
-  std::vector<std::string>      warnings;
+  // glTF and GLB files found under Models/, sorted by label.
+  std::vector<AssetEntry> modelAssets;
+
+  // HDR and EXR files found under HDRI/, sorted by label.
+  std::vector<AssetEntry> hdriAssets;
+
+  // Built-in scene presets from CreateSceneCatalog.
+  std::vector<SceneDefinition> sceneDefinitions;
+
+  // Index into sceneDefinitions of the scene to show first.
+  size_t selectedSceneIndex = 0;
+
+  // Index into hdriAssets of the environment to show first.
+  size_t selectedHdriIndex = 0;
+
+  // Human-readable problems found during discovery, such as scenes referencing missing models.
+  std::vector<std::string> warnings;
 };
 
 // Discovers runtime assets and scene presets in one place.
-// This keeps Main.cpp focused on orchestration/UI instead of file scanning logic.
-class SceneAssetCatalog
-{
-public:
-  SceneAssetCatalog() = default;
+// This keeps the application focused on orchestration and UI instead of file scanning logic.
+SceneAssetCatalogData DiscoverSceneAssets();
 
-  SceneAssetCatalogData Discover() const;
-};
-
-}  // namespace nvsamples
-
-
+}  // namespace rtpt

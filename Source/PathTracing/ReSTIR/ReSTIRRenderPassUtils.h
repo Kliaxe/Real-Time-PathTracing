@@ -1,94 +1,75 @@
 #pragma once
 
-#include <volk/volk.h>
+#include <span>
 
+#include <volk.h>
+
+#include "Framework/Vulkan/Diagnostics.h"
+#include "Framework/Vulkan/GpuResources.h"
+#include "Framework/Vulkan/ShaderBindingTable.h"
 #include "Shaders/ShaderIo.h"
-#include "nvvk/check_error.hpp"
-#include "nvvk/resources.hpp"
-#include "nvvk/sbt_generator.hpp"
 
-namespace nvvk
+namespace rtpt
 {
-class ResourceAllocator;
-}
 
-namespace nvsamples
-{
+// ReSTIRRayTracingPassState
+// One ray tracing pass of the ReSTIR PT renderer: its pipeline and the shader binding table built against it.
+// Kept together because the SBT is only meaningful for the pipeline it was created from, so they are created and destroyed as a pair.
 
 struct ReSTIRRayTracingPassState
 {
-  // A ray tracing pass is the pipeline plus its shader binding table.
-  VkPipeline                  pipeline = VK_NULL_HANDLE;
-  nvvk::SBTGenerator          sbtGenerator;
-  nvvk::Buffer                sbtBuffer;
-  nvvk::SBTGenerator::Regions sbtRegions{};
+  // Ray tracing pipeline with the shared raygen/miss/hit stage layout.
+  VkPipeline               pipeline = VK_NULL_HANDLE;
+
+  // Maps TraceRay indices to this pipeline's shader groups.
+  rtpt::ShaderBindingTable sbt;
 };
 
 inline bool IsReSTIRRayTracingPassReady(const ReSTIRRayTracingPassState& passState)
 {
-  // The SBT buffer is required by vkCmdTraceRaysKHR even when the pipeline exists.
-  return passState.pipeline != VK_NULL_HANDLE && passState.sbtBuffer.buffer != VK_NULL_HANDLE;
+  return passState.pipeline != VK_NULL_HANDLE && passState.sbt.Storage();
 }
 
-void CreateReSTIRRayTracingPass(nvvk::ResourceAllocator* allocator,
-                                  const VkPhysicalDeviceRayTracingPipelinePropertiesKHR& rtProperties,
-                                  VkPipelineLayout pipelineLayout,
-                                  const VkShaderModuleCreateInfo& shaderCode,
-                                  uint32_t maxPipelineRayRecursionDepth,
-                                  const char* debugName,
-                                  ReSTIRRayTracingPassState& passState);
+// Pass creation
+// Every ReSTIR PT ray tracing pass uses the same stage names and group layout, so only the SPIR-V, recursion depth, and debug name vary.
 
-void DestroyReSTIRRayTracingPass(nvvk::ResourceAllocator* allocator, ReSTIRRayTracingPassState& passState);
+void CreateReSTIRRayTracingPass(rtpt::ResourceAllocator& resources, const rtpt::Diagnostics* diagnostics, const VkPhysicalDeviceRayTracingPipelinePropertiesKHR& rtProperties, VkPipelineLayout pipelineLayout, std::span<const uint32_t> spirv, uint32_t maxPipelineRayRecursionDepth, const char* debugName, ReSTIRRayTracingPassState& passState);
 
-VkPipeline CreateReSTIRComputePipeline(nvvk::ResourceAllocator* allocator,
-                                         VkPipelineLayout pipelineLayout,
-                                         const VkShaderModuleCreateInfo& shaderCode,
-                                         const char* debugName);
+void DestroyReSTIRRayTracingPass(VkDevice device, ReSTIRRayTracingPassState& passState);
 
-void TransitionReSTIRStorageImages(VkCommandBuffer cmd, nvvk::Image& accumulationImage, VkImage outputImage,
-                                     VkPipelineStageFlags2 destinationStages);
+VkPipeline CreateReSTIRComputePipeline(VkDevice device, const rtpt::Diagnostics* diagnostics, VkPipelineLayout pipelineLayout, std::span<const uint32_t> spirv, const char* debugName);
 
-// Makes one storage image writable by the next pass. Separate from the pair above
-// because the denoiser guide buffers are optional: they are transitioned only in
-// the frames whose resolve mode will actually feed NRD.
-void TransitionStorageImageForWrite(VkCommandBuffer cmd, nvvk::Image& image, VkPipelineStageFlags2 dstStageMask);
+// Image transitions
+// Updates the accumulation image's recorded descriptor layout to GENERAL, so later descriptor writes and transitions start from the layout the command buffer actually leaves it in.
+// Single storage images go through TransitionStorageImageForWrite in Framework/Vulkan/Barriers.h.
+
+// Moves the accumulation image and the external output image to GENERAL in one barrier batch.
+void TransitionReSTIRStorageImages(VkCommandBuffer cmd, rtpt::Image& accumulationImage, VkImage outputImage, VkPipelineStageFlags2 destinationStages);
+
+// Pass recording
+// Bind, push constants, and launch. Every pass binds descriptor set 0 of the shared pipeline layout, so a pass differs only in pipeline and launch size.
 
 template <typename TPushConstant>
-void TraceReSTIRRayTracingPass(VkCommandBuffer cmd,
-                                 const ReSTIRRayTracingPassState& passState,
-                                 VkPipelineLayout pipelineLayout,
-                                 VkDescriptorSet descriptorSet,
-                                 VkShaderStageFlags pushConstantStages,
-                                 const TPushConstant& pushConstant,
-                                 VkExtent2D viewportSize)
+void TraceReSTIRRayTracingPass(VkCommandBuffer cmd, const ReSTIRRayTracingPassState& passState, VkPipelineLayout pipelineLayout, VkDescriptorSet descriptorSet, VkShaderStageFlags pushConstantStages, const TPushConstant& pushConstant, VkExtent2D viewportSize)
 {
-  // Ray tracing passes share one descriptor set and differ only by pipeline/SBT.
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, passState.pipeline);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
   vkCmdPushConstants(cmd, pipelineLayout, pushConstantStages, 0, sizeof(TPushConstant), &pushConstant);
-  vkCmdTraceRaysKHR(cmd, &passState.sbtRegions.raygen, &passState.sbtRegions.miss, &passState.sbtRegions.hit, &passState.sbtRegions.callable,
-                    viewportSize.width, viewportSize.height, 1);
+
+  // One ray generation invocation per viewport pixel.
+  const rtpt::ShaderBindingTableRegions& regions = passState.sbt.Regions();
+  vkCmdTraceRaysKHR(cmd, &regions.raygen, &regions.miss, &regions.hit, &regions.callable, viewportSize.width, viewportSize.height, 1);
 }
 
 template <typename TPushConstant>
-void DispatchReSTIRComputePass(VkCommandBuffer cmd,
-                                 VkPipeline pipeline,
-                                 VkPipelineLayout pipelineLayout,
-                                 VkDescriptorSet descriptorSet,
-                                 VkShaderStageFlags pushConstantStages,
-                                 const TPushConstant& pushConstant,
-                                 VkExtent2D viewportSize,
-                                 uint32_t groupSize)
+void DispatchReSTIRComputePass(VkCommandBuffer cmd, VkPipeline pipeline, VkPipelineLayout pipelineLayout, VkDescriptorSet descriptorSet, VkShaderStageFlags pushConstantStages, const TPushConstant& pushConstant, VkExtent2D viewportSize, uint32_t groupSize)
 {
-  // Compute passes use the same descriptor contract as the ray tracing passes.
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
   vkCmdPushConstants(cmd, pipelineLayout, pushConstantStages, 0, sizeof(TPushConstant), &pushConstant);
 
-  const uint32_t groupCountX = (viewportSize.width + groupSize - 1u) / groupSize;
-  const uint32_t groupCountY = (viewportSize.height + groupSize - 1u) / groupSize;
-  // Shaders early-out pixels outside the viewport when the dispatch rounds up.
-  vkCmdDispatch(cmd, groupCountX, groupCountY, 1);
+  // Round the group count up so the edge pixels are covered; groupSize must match the shader's [numthreads].
+  vkCmdDispatch(cmd, (viewportSize.width + groupSize - 1u) / groupSize, (viewportSize.height + groupSize - 1u) / groupSize, 1);
 }
 
-}  // namespace nvsamples
+}  // namespace rtpt
