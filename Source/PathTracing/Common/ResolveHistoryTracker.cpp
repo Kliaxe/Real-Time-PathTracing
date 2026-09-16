@@ -13,6 +13,7 @@ ResolveHistoryTracker::FrameState ResolveHistoryTracker::BeginFrame(const FrameI
   FrameState frameState {};
 
   frameState.viewportSize          = input.viewportSize;
+  frameState.resolveMode           = input.resolveMode;
   frameState.accumulationSignature = MakeAccumulationSignature(input);
   frameState.denoiserSignature     = MakeDenoiserSignature(input);
   frameState.accumulateEnabled     = IsAccumulationResolveMode(input.resolveMode);
@@ -115,6 +116,7 @@ ResolveHistoryTracker::DenoiserSignature ResolveHistoryTracker::MakeDenoiserSign
   signature.useSky                  = input.sceneInfo->useSky;
   signature.useHdrEnv               = input.sceneInfo->useHdrEnv;
   signature.environmentTextureIndex = input.sceneInfo->environmentTextureIndex;
+  signature.resolveMode             = input.resolveMode;
   signature.backgroundColor         = input.sceneInfo->backgroundColor;
   signature.skySimpleParam          = input.sceneInfo->skySimpleParam;
   signature.topLevelAsAddress       = input.topLevelAsAddress;

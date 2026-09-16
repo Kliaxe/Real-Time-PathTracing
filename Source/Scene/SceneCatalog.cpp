@@ -378,17 +378,6 @@ SceneDefinition ScatteredLightsScene()
   return scene;
 }
 
-// The reduced Sponza, scaled down and raised slightly.
-SceneDefinition SponzaStudioScene()
-{
-  SceneDefinition scene {};
-
-  scene.label = "Sponza Studio";
-  scene.models.push_back(ModelEntry("Sponza Reduced", "Models/Sponza/SponzaReduced.gltf", ComposeTransform(glm::vec3(0.0f, 0.46f, 0.0f), glm::vec3(0.0f), glm::vec3(0.45f))));
-
-  return scene;
-}
-
 }  // namespace
 
 std::vector<SceneDefinition> CreateSceneCatalog()
@@ -404,7 +393,6 @@ std::vector<SceneDefinition> CreateSceneCatalog()
   scenes.push_back(CornellScene("Cornell Box", false));
   scenes.push_back(CornellScene("Cornell Many Lights", true));
   scenes.push_back(DisocclusionScene());
-  scenes.push_back(SponzaStudioScene());
   scenes.push_back(SingleModelScene("Fireplace", "Models/Fireplace/Fireplace.gltf"));
   scenes.push_back(SingleModelScene("Mill", "Models/Mill/Mill.gltf"));
   scenes.push_back(SingleModelScene("Sponza", "Models/Sponza/Sponza.gltf"));

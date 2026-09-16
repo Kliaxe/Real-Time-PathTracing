@@ -14,11 +14,11 @@ namespace rtpt
 // Section numbers in the labels are deliberate: they tie a slider directly to the text that justifies it.
 // The reasoning behind each control is a hover explanation rather than text under it, so the panel stays short enough to see every section at once.
 
-bool DrawReSTIRPTCommonControls(ReSTIRPTCommonSettings& settings)
+bool DrawReSTIRPTCommonControls(ReSTIRPTCommonSettings& settings, bool rayReconstructionAvailable, const std::string& rayReconstructionUnavailableReason)
 {
   bool changed = false;
 
-  changed |= DrawResolveModeControl(settings.resolveMode);
+  changed |= DrawResolveModeControl(settings.resolveMode, rayReconstructionAvailable, rayReconstructionUnavailableReason);
 
   int resamplingMode = static_cast<int>(settings.resamplingMode);
   const char* resamplingModes[] = { "None", "Temporal", "Spatial", "Temporal + Spatial" };

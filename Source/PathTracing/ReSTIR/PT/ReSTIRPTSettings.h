@@ -18,7 +18,7 @@ namespace rtpt
 
 struct ReSTIRPTCommonSettings
 {
-  // Resolve mode decides whether the output is raw, accumulated, or denoised.
+  // Resolve mode decides whether the output is raw, accumulated, or denoised, and by which denoiser.
   RenderResolveMode         resolveMode    = RenderResolveMode::eOff;
   // Resampling mode controls which reuse passes are recorded.
   ReSTIRPTResamplingMode    resamplingMode = ReSTIRPTResamplingMode::eTemporalAndSpatial;
@@ -30,6 +30,8 @@ struct ReSTIRPTCommonSettings
   // Initial sampling draws ONE BSDF lobe at the primary hit, so each frame only one of the two hit distances exists and the other is zero, which is what NRD asks for and what it reconstructs from neighbours.
   // The reference tracer uses the same reconstruction mode because it samples only one primary lobe too.
   DenoiserSettings          denoiserSettings { .hitDistanceReconstructionMode = HitDistanceReconstructionMode::eArea5x5 };
+  // DLSS Ray Reconstruction settings, used while the resolve mode denoises with it.
+  RayReconstructionSettings rayReconstructionSettings {};
   // Section 6.2.2, "Stream Compaction for Random Replay". 0 = off, non-zero = on. Compacts the spatial pre-pass into a work list of the (pixel, slot) pairs that need a shift and traces it indirectly, instead of launching every (pixel, slot).
   // The paper: "We parallelize over pixel-neighbor pairs, applying stream compaction to discard pairs that do not require replay. This reduces warp divergence and the number of active warps, yielding a substantial speedup." That is this pass. ON, because this is what the paper prescribes and it is worth about 2x.
   // It was off by default for a long time because it diverged - energy growing frame over frame until the image was infinite. The cause was NOT this pass. It was Section 5's alpha (the decorrelation gamma), which at the time was tuned to 0.5 instead of the paper's 0.1 (now the default), and which let high-energy samples spread through reuse unchecked; this pass is simply the most sensitive thing downstream of that. With the paper's alpha, six camera poses on Bunny Metallic that previously diverged at 1200 frames are all clean.

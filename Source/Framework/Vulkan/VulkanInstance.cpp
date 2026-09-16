@@ -47,8 +47,17 @@ void VulkanInstance::Initialize(const VulkanInstanceCreateInfo& createInfo)
 
   // Loader
   // volk must load the Vulkan loader before any Vulkan call. The loader must support 1.3, and the instance then targets exactly 1.3 even when a newer version is available.
+  // A custom entry point replaces the system loader lookup; every later volk table is then filled through it.
 
-  CheckVk(volkInitialize(), "volkInitialize");
+  if(createInfo.loaderEntryPoint != nullptr)
+  {
+    volkInitializeCustom(createInfo.loaderEntryPoint);
+  }
+  else
+  {
+    CheckVk(volkInitialize(), "volkInitialize");
+  }
+
   CheckVk(vkEnumerateInstanceVersion(&m_ApiVersion), "vkEnumerateInstanceVersion");
 
   if(m_ApiVersion < VK_API_VERSION_1_3)

@@ -13,6 +13,7 @@
 #include <imgui_internal.h>
 
 #include "Camera/CameraUi.h"
+#include "Denoising/RayReconstructionDenoiser.h"
 #include "Framework/Platform/Paths.h"
 #include "Framework/Platform/Log.h"
 #include "Framework/Vulkan/Barriers.h"
@@ -150,11 +151,15 @@ void Application::Initialize()
     constexpr bool validation = true;
 #endif
 
+    // Streamline has to exist before the instance: its interposer becomes the loader entry point, so the instance and device it creates carry what DLSS needs. Without it the entry point is null and volk loads the system loader as usual.
+    m_Streamline.Initialize({ .pluginDirectory = rtpt::ExecutableDirectory(), .presentsFrames = !m_Options.headless });
+
     m_Instance.Initialize({
         .applicationName           = "RealTimePathTracing",
         .requiredExtensions        = m_Options.headless ? std::span<const char* const> {} : m_Window.RequiredVulkanInstanceExtensions(),
         .validation                = validation,
         .synchronizationValidation = m_Options.synchronizationValidation,
+        .loaderEntryPoint          = m_Streamline.GetVulkanEntryPoint(),
     });
 
     if(!m_Options.headless)
@@ -167,6 +172,10 @@ void Application::Initialize()
     }
 
     m_Device.Initialize(m_Instance.Handle(), m_Surface.Handle());
+
+    // Ray Reconstruction support depends on the GPU the device was created on, so it is only known now.
+    m_Streamline.CheckRayReconstructionSupport(m_Device.PhysicalDevice());
+
     m_Execution.Initialize(m_Device.Handle(), m_Device.RenderQueue(), m_Device.Queues().renderFamily, kFrameSlotCount);
     m_Resources.Initialize(m_Instance.Handle(), m_Device.PhysicalDevice(), m_Device.Handle(), m_Instance.ApiVersion(), m_Execution);
     m_Uploads.Initialize(m_Resources, m_Execution);
@@ -296,6 +305,10 @@ void Application::Shutdown() noexcept
   release([&] { m_Swapchain.Destroy(); });
   release([&] { m_Resources.Destroy(); });
   release([&] { m_Execution.Destroy(); });
+
+  // Streamline shuts down after the swapchain, whose destruction it intercepts, and before the device its resources live on.
+  release([&] { m_Streamline.Shutdown(); });
+
   release([&] { m_Device.Destroy(); });
   release([&] { m_Surface.Destroy(); });
   release([&] { m_Instance.Destroy(); });
@@ -315,8 +328,8 @@ void Application::InitializeRendererSystems()
 
   m_SceneRuntime      = std::make_unique<SceneRuntime>(SceneRuntime::CreateInfo { .device = &m_Device, .resources = &m_Resources, .uploads = &m_Uploads, .execution = &m_Execution });
   m_Raster            = std::make_unique<RasterRenderer>(RasterRenderer::CreateInfo { .device = &m_Device, .maxTextureDescriptors = kMaxTextureDescriptors, .colorFormat = m_Targets.HdrFormat(), .depthFormat = m_Targets.DepthFormat() });
-  m_PathTracer        = std::make_unique<PathTracer>(PathTracer::CreateInfo { .device = &m_Device, .resources = &m_Resources, .diagnostics = &m_Instance.Debug(), .blueNoise = &m_BlueNoise, .frameSlotCount = kFrameSlotCount, .maxTextureDescriptors = kMaxTextureDescriptors });
-  m_ReSTIRPT          = std::make_unique<ReSTIRPTRenderer>(ReSTIRPTRenderer::CreateInfo { .device = &m_Device, .resources = &m_Resources, .diagnostics = &m_Instance.Debug(), .blueNoise = &m_BlueNoise, .frameSlotCount = kFrameSlotCount, .maxTextureDescriptors = kMaxTextureDescriptors });
+  m_PathTracer        = std::make_unique<PathTracer>(PathTracer::CreateInfo { .device = &m_Device, .resources = &m_Resources, .diagnostics = &m_Instance.Debug(), .blueNoise = &m_BlueNoise, .frameSlotCount = kFrameSlotCount, .maxTextureDescriptors = kMaxTextureDescriptors, .streamline = &m_Streamline });
+  m_ReSTIRPT          = std::make_unique<ReSTIRPTRenderer>(ReSTIRPTRenderer::CreateInfo { .device = &m_Device, .resources = &m_Resources, .diagnostics = &m_Instance.Debug(), .blueNoise = &m_BlueNoise, .frameSlotCount = kFrameSlotCount, .maxTextureDescriptors = kMaxTextureDescriptors, .streamline = &m_Streamline });
 
   m_PathTracer->Initialize();
   m_ReSTIRPT->Initialize();
@@ -372,10 +385,20 @@ void Application::ApplyStartupOptions()
   m_RenderMode = m_Options.renderMode;
 
   // Both path tracers take the requested resolve mode, so switching renderers later keeps it. Without the option each keeps its own default.
+  // Ray Reconstruction falls back to NRD where it cannot run, so a capture script asking for it still produces a denoised image and says why it differs.
   if(m_Options.resolveMode)
   {
-    m_PathTracer->GetSettings().resolveMode      = *m_Options.resolveMode;
-    m_ReSTIRPT->GetSettings().common.resolveMode = *m_Options.resolveMode;
+    RenderResolveMode resolveMode = *m_Options.resolveMode;
+
+    if(IsRayReconstructionResolveMode(resolveMode) && !m_Streamline.IsRayReconstructionAvailable())
+    {
+      rtpt::Log(rtpt::LogLevel::Warning, fmt::format("--resolve-mode denoise-rr falls back to NRD: {}", m_Streamline.GetUnavailableReason()));
+
+      resolveMode = RenderResolveMode::eDenoiseNrd;
+    }
+
+    m_PathTracer->GetSettings().resolveMode      = resolveMode;
+    m_ReSTIRPT->GetSettings().common.resolveMode = resolveMode;
   }
 
   // The comparison mode exposes the same single-sample path estimator through
@@ -823,6 +846,11 @@ void Application::RenderScene(const rtpt::FrameContext& frame)
 
   // The material override is written every frame rather than when its control changes, so a scene reload - which rebuilds the scene uniform from scratch - cannot leave the UI and the renderers disagreeing.
   m_SceneRuntime->GetSceneInfo().metallicRoughnessOverride = rtpt::ResolveMetallicRoughnessOverride(m_MaterialOverride);
+
+  // Ray Reconstruction anti-aliases from samples spread inside each pixel, so only its frames move the camera sample off the pixel center. Every other mode keeps the center, which keeps accumulation and NRD comparable to earlier captures.
+  const bool jitterCamera = IsRayReconstructionResolveMode(ActiveResolveMode());
+
+  m_SceneRuntime->GetSceneInfo().pixelJitter = jitterCamera ? rtpt::ComputeRayReconstructionJitter(m_RayReconstructionJitterIndex++) : glm::vec2(0.0f);
 
   m_SceneRuntime->UpdateSceneBuffer(frame.commands, view, projection, m_Camera.State().eye, m_Targets.Extent());
 

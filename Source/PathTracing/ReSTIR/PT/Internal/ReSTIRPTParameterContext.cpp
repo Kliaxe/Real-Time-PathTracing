@@ -163,7 +163,7 @@ ReSTIRPTShiftParameters GetDefaultReSTIRPTShiftParams()
   //                             1.52% / 1.41%   against a +0.44% / +0.35% residual
   // Counts only, deliberately. Image error is not additively attributable to a refusal class: a refusal changes which candidate is selected and therefore how every later frame evolves, so "this class costs X%" cannot be read off these numbers, and isolating one by ablation perturbs the others.
   // The two escapee classes dominate and are geometric - they are what a shift with a wider valid domain would recover - which is the direction to look, not this constant.
-  // On the most geometrically complex scene measured, replay is not an improvement to reuse but the entire reason reuse works at all. Sponza Studio, stepping the ablation one technique at a time:
+  // On the most geometrically complex scene measured, replay is not an improvement to reuse but the entire reason reuse works at all. Sponza Reduced at 0.45 scale, stepping the ablation one technique at a time:
   //   1spp path traced      relative RMSE 0.2077
   //   + temporal reuse                    0.2077
   //   + spatial reuse                     0.2077   (and 19.6 ms, from 1.2)

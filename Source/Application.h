@@ -5,6 +5,7 @@
 
 #include "ApplicationOptions.h"
 #include "Camera/CameraController.h"
+#include "Denoising/StreamlineRuntime.h"
 #include "Framework/Platform/Window.h"
 #include "Framework/Presentation/UiRenderer.h"
 #include "Framework/Presentation/WindowTitle.h"
@@ -146,6 +147,9 @@ private:
   // GLFW window. Never initialized in headless runs.
   rtpt::Window              m_Window;
 
+  // Streamline session for DLSS Ray Reconstruction. Declared before the instance so its module outlives every Vulkan object: volk dispatches through the interposer it loads.
+  rtpt::StreamlineRuntime   m_Streamline;
+
   // Vulkan instance, with validation in debug builds.
   rtpt::VulkanInstance      m_Instance;
 
@@ -202,8 +206,11 @@ private:
   // Debug override of every material's metallic and roughness, edited in the Settings window and copied into the scene uniform each frame.
   rtpt::MaterialDebugOverride m_MaterialOverride;
 
-  // Renderer that writes the HDR target each frame.
-  RenderMode             m_RenderMode = RenderMode::eReSTIRPTEnhanced;
+  // Renderer that writes the HDR target each frame. Replaced by ApplicationOptions::renderMode at startup.
+  RenderMode             m_RenderMode = RenderMode::ePathTracing;
+
+  // Frames rendered with Ray Reconstruction jitter; indexes the jitter pattern so consecutive denoised frames never repeat a sample position within a phase cycle.
+  uint32_t               m_RayReconstructionJitterIndex = 0;
 
   // GPU scene data: geometry, textures, acceleration structures, and the per-frame scene buffer. Like the renderers below, it is heap-held so it exists only between InitializeRendererSystems and DestroyRendererSystems.
   std::unique_ptr<SceneRuntime>      m_SceneRuntime;

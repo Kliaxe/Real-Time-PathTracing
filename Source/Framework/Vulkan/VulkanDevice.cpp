@@ -126,6 +126,7 @@ void VulkanDevice::Initialize(VkInstance instance, VkSurfaceKHR surface)
 
   // Features
   // A fresh chain enables exactly the features QueryDeviceSupport required, rather than everything the device reported.
+  // privateData is the one exception: the renderer never uses it, but Streamline's DLSS plugins create private data slots on this device. Vulkan 1.3 makes it mandatory for every device, so enabling it cannot fail.
 
   DeviceFeatureChain enabled;
   enabled.Link(windowed);
@@ -143,6 +144,7 @@ void VulkanDevice::Initialize(VkInstance instance, VkSurfaceKHR surface)
   enabled.vulkan13.synchronization2                                = VK_TRUE;
   enabled.vulkan13.dynamicRendering                                = VK_TRUE;
   enabled.vulkan13.shaderDemoteToHelperInvocation                  = VK_TRUE;
+  enabled.vulkan13.privateData                                     = VK_TRUE;
   enabled.accelerationStructure.accelerationStructure              = VK_TRUE;
   enabled.rayTracingPipeline.rayTracingPipeline                    = VK_TRUE;
   enabled.rayTracingPipeline.rayTracingPipelineTraceRaysIndirect   = VK_TRUE;

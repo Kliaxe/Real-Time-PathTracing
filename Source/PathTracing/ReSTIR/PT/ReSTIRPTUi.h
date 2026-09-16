@@ -7,13 +7,14 @@
 // Every function returns true when a control changed, so the caller can invalidate accumulation and reuse history in one place.
 
 #include <cstdint>
+#include <string>
 
 #include "PathTracing/ReSTIR/PT/ReSTIRPTSettings.h"
 
 namespace rtpt
 {
 
-bool DrawReSTIRPTCommonControls(ReSTIRPTCommonSettings& settings);
+bool DrawReSTIRPTCommonControls(ReSTIRPTCommonSettings& settings, bool rayReconstructionAvailable, const std::string& rayReconstructionUnavailableReason);
 
 bool DrawReSTIRPTInitialSamplingSection(ReSTIRPTInitialSamplingParameters& settings, uint32_t bounceLimit);
 

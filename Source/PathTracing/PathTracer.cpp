@@ -34,7 +34,7 @@ PathTracer::PathTracer(const CreateInfo& createInfo)
     , m_BlueNoise(createInfo.blueNoise)
     , m_FrameSlotCount(createInfo.frameSlotCount)
     , m_MaxTextureDescriptors(createInfo.maxTextureDescriptors)
-    , m_History(ResolveHistory::CreateInfo { .device = createInfo.device, .resources = createInfo.resources, .diagnostics = createInfo.diagnostics, .frameSlotCount = createInfo.frameSlotCount })
+    , m_History(ResolveHistory::CreateInfo { .device = createInfo.device, .resources = createInfo.resources, .diagnostics = createInfo.diagnostics, .frameSlotCount = createInfo.frameSlotCount, .streamline = createInfo.streamline })
 {
 }
 
@@ -127,6 +127,16 @@ void PathTracer::InvalidateHistory()
   m_History.InvalidateHistory();
 }
 
+bool PathTracer::IsRayReconstructionAvailable() const
+{
+  return m_History.IsRayReconstructionAvailable();
+}
+
+const std::string& PathTracer::GetRayReconstructionUnavailableReason() const
+{
+  return m_History.GetRayReconstructionUnavailableReason();
+}
+
 rtpt::DescriptorPack& PathTracer::GetDescriptorPack()
 {
   return m_DescPack;
@@ -165,17 +175,29 @@ void PathTracer::Render(const RenderInput& input)
 
   // Trace and resolve
   // Push constants carry the small per-dispatch values; descriptors carry images, TLAS, and textures.
-  // NRD reads the accumulation image as its noisy beauty input and composes into the output target.
+  // The denoiser reads the accumulation image as its noisy beauty input and writes the output target.
 
   const shaderio::PathTracePushConstant pushConstant = BuildPushConstant(input, frameState);
 
   RecordPathTracePass(input, pushConstant);
 
-  // Only a frame that denoises runs NRD, so only that frame opens the denoiser scope.
+  // Only a frame that denoises runs a denoiser, so only that frame opens the denoiser scope.
   {
     const GpuProfiler::Zone denoiserZone(frameState.denoiseEnabled ? input.profiler : nullptr, input.cmd, FrameSlot { input.frameSlot }, "Path tracer/Denoiser");
 
-    m_History.Denoise(input.cmd, frameState, m_AccumulationImage.descriptor.imageView, input.output.view, m_Settings.denoiserDebugView);
+    const ResolveHistory::DenoiseInput denoiseInput {
+        .cmd                       = input.cmd,
+        .beautyImage               = &m_AccumulationImage,
+        .output                    = input.output,
+        .debugView                 = m_Settings.denoiserDebugView,
+        .sceneInfo                 = input.sceneInfo,
+        .sceneInfoAddress          = input.sceneResource->bSceneInfo.address,
+        .rayReconstructionSettings = &m_Settings.rayReconstructionSettings,
+        .greyLuminance             = input.denoiserGreyLuminance,
+        .frameSlot                 = input.frameSlot,
+    };
+
+    m_History.Denoise(frameState, denoiseInput);
   }
 
   m_History.FinishFrame(frameState);
@@ -247,6 +269,11 @@ shaderio::PathTracePushConstant PathTracer::BuildPushConstant(const RenderInput&
   if(frameState.denoiseEnabled)
   {
     pathTraceFlags |= shaderio::ePathTraceFlagWriteDenoiserSignals;
+  }
+
+  if(frameState.denoiseEnabled && IsRayReconstructionResolveMode(frameState.resolveMode))
+  {
+    pathTraceFlags |= shaderio::ePathTraceFlagRawSpecularHitDistance;
   }
 
   // Push constants

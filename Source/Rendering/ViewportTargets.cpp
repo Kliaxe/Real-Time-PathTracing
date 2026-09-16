@@ -9,6 +9,20 @@
 namespace rtpt
 {
 
+namespace
+{
+
+// Usage flags
+// HDR is a color attachment for the rasterizer, a storage image for the compute and ray tracing renderers, sampled by the tonemapper, and a transfer source for capture.
+// LDR is written as storage by the tonemapper, sampled by the UI, and copied for capture. Depth is only the rasterizer's depth attachment.
+// Shared by image creation and the views handed out, so the two cannot disagree.
+
+constexpr VkImageUsageFlags kHdrUsage   = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+constexpr VkImageUsageFlags kLdrUsage   = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+constexpr VkImageUsageFlags kDepthUsage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+
+}  // namespace
+
 ViewportTargets::~ViewportTargets()
 {
   Destroy();
@@ -65,9 +79,7 @@ bool ViewportTargets::Resize(VkExtent2D extent)
   }
 
   // Image descriptions
-  // HDR is a color attachment for the rasterizer, a storage image for the compute and ray tracing renderers, sampled by the tonemapper,
-  // and a transfer source for capture. LDR is written as storage by the tonemapper, sampled by the UI, and copied for capture.
-  // Depth is only the rasterizer's depth attachment.
+  // Usage comes from the constants at the top of the file.
 
   const VkImageCreateInfo hdrInfo {
       .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -78,7 +90,7 @@ bool ViewportTargets::Resize(VkExtent2D extent)
       .arrayLayers   = 1,
       .samples       = VK_SAMPLE_COUNT_1_BIT,
       .tiling        = VK_IMAGE_TILING_OPTIMAL,
-      .usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+      .usage         = kHdrUsage,
       .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
   };
@@ -99,7 +111,7 @@ bool ViewportTargets::Resize(VkExtent2D extent)
       .arrayLayers   = 1,
       .samples       = VK_SAMPLE_COUNT_1_BIT,
       .tiling        = VK_IMAGE_TILING_OPTIMAL,
-      .usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+      .usage         = kDepthUsage,
       .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
   };
@@ -113,7 +125,7 @@ bool ViewportTargets::Resize(VkExtent2D extent)
       .arrayLayers   = 1,
       .samples       = VK_SAMPLE_COUNT_1_BIT,
       .tiling        = VK_IMAGE_TILING_OPTIMAL,
-      .usage         = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+      .usage         = kLdrUsage,
       .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
   };
@@ -166,17 +178,17 @@ bool ViewportTargets::Resize(VkExtent2D extent)
 
 RenderTargetView ViewportTargets::Hdr() const noexcept
 {
-  return { .image = m_Hdr.image, .view = m_Hdr.descriptor.imageView, .format = m_Hdr.format, .extent = m_Extent };
+  return { .image = m_Hdr.image, .view = m_Hdr.descriptor.imageView, .format = m_Hdr.format, .extent = m_Extent, .usage = kHdrUsage };
 }
 
 RenderTargetView ViewportTargets::Depth() const noexcept
 {
-  return { .image = m_Depth.image, .view = m_Depth.descriptor.imageView, .format = m_Depth.format, .extent = m_Extent };
+  return { .image = m_Depth.image, .view = m_Depth.descriptor.imageView, .format = m_Depth.format, .extent = m_Extent, .usage = kDepthUsage };
 }
 
 RenderTargetView ViewportTargets::Ldr() const noexcept
 {
-  return { .image = m_Ldr.image, .view = m_Ldr.descriptor.imageView, .format = m_Ldr.format, .extent = m_Extent };
+  return { .image = m_Ldr.image, .view = m_Ldr.descriptor.imageView, .format = m_Ldr.format, .extent = m_Extent, .usage = kLdrUsage };
 }
 
 VkFormat ViewportTargets::SelectDepthFormat() const

@@ -8,6 +8,7 @@
 #include "ShaderIncludes/DenoiserInputs.hlsli"
 #include "ShaderIo.h"
 #include "ShaderIncludes/ReSTIR/PTGlobals.hlsli"
+#include "ShaderIncludes/Camera.hlsli"
 #include "ShaderIncludes/ReSTIR/Common.hlsli"
 #include "ReSTIR/PTReservoir.hlsli"
 #include "ReSTIR/PTReservoirStorage.hlsli"
@@ -84,7 +85,7 @@ void WriteDenoiserSignals(int2 pixel, ReSTIRPTSurface surface, float3 radiance, 
 
   // Guide buffers
 
-  motionVectorsImage[pixel]              = float4(ComputePTDenoiserMotionVector((float2)pixel + 0.5, surface.worldPosition, sceneInfo), 0.0);
+  motionVectorsImage[pixel]              = float4(ComputePTDenoiserMotionVector(GetPixelSamplePosition((uint2)pixel, sceneInfo), surface.worldPosition, sceneInfo), 0.0);
   normalRoughnessImage[pixel]            = NRD_FrontEnd_PackNormalAndRoughness(surface.shadingNormal, surface.roughness, 0.0);
   baseColorMetalnessImage[pixel]         = float4(saturate(surface.albedo), saturate(surface.metallic));
   viewZImage[pixel]                      = viewZ;
@@ -110,8 +111,16 @@ void WriteDenoiserSignals(int2 pixel, ReSTIRPTSurface surface, float3 radiance, 
   const float diffuseNormHitDistance  = denoiserGuide.x > 0.0 ? REBLUR_FrontEnd_GetNormHitDist(denoiserGuide.x, viewZ, pushConst.reblurHitDistanceParams, 1.0) : 0.0;
   const float specularNormHitDistance = denoiserGuide.y > 0.0 ? REBLUR_FrontEnd_GetNormHitDist(denoiserGuide.y, viewZ, pushConst.reblurHitDistanceParams, surface.roughness) : 0.0;
 
+  float4 specularSignal = REBLUR_FrontEnd_PackRadianceAndNormHitDist(specularRadiance, specularNormHitDistance, true);
+
+  // DLSS Ray Reconstruction reprojects reflections with the hit distance in world units, and REBLUR's normalization saturates exactly the long distances a mirror needs, so it gets the raw value.
+  if((pushConst.flags & uint(ReSTIRPTFlags::eReSTIRPTFlagRawSpecularHitDistance)) != 0u)
+  {
+    specularSignal.a = denoiserGuide.y;
+  }
+
   diffuseRadianceHitDistanceImage[pixel]  = REBLUR_FrontEnd_PackRadianceAndNormHitDist(diffuseRadiance, diffuseNormHitDistance, true);
-  specularRadianceHitDistanceImage[pixel] = REBLUR_FrontEnd_PackRadianceAndNormHitDist(specularRadiance, specularNormHitDistance, true);
+  specularRadianceHitDistanceImage[pixel] = specularSignal;
 }
 
 [shader("compute")]

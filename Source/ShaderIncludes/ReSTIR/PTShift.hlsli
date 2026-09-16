@@ -656,7 +656,7 @@ PTShiftResult ShiftPathToSurface(ReSTIRPTReservoir reservoir, SurfaceData destin
   // Result
   // A Jacobian far from one means the shift moved the path into a wildly different density, and such a sample carries a correspondingly wild contribution weight into reuse, where it is copied to neighbours. Refusing such a shift would be unbiased: a refused shift is a null candidate whose confidence still counts in the MIS weights.
   // There is no upper bound on the Jacobian here, deliberately. A symmetric sanity bound (refuse unless 1/k <= J <= k) was implemented and measured at k = 5 and 20: it does NOT stop the paired-reuse runaway. Area Light still reaches 2.98e33 by 1200 frames with k = 20, and Bunny Metallic diverges at every k tried.
-  // A clamp suppresses the carrier without touching the correlated-confidence assumption that actually lets it replicate, and it would add bias of its own. Section 4's footprint criterion is the intended conditioning; see PAPER_ALIGNMENT.md.
+  // A clamp suppresses the carrier without touching the correlated-confidence assumption that actually lets it replicate, and it would add bias of its own. Section 4's footprint criterion is the intended conditioning.
 
   PTShiftResult result;
 

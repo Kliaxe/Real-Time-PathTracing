@@ -8,12 +8,16 @@ namespace rtpt
 // RenderResolveMode
 // Controls how a noisy path-traced frame is resolved into the displayed image.
 // Shared by the reference path tracer and ReSTIR PT so both renderers expose the same choice.
+// The two denoisers are separate modes rather than a denoiser setting, because they consume different inputs and keep separate histories: switching between them is a restart either way.
 
 enum class RenderResolveMode : uint32_t
 {
   eOff = 0,
   eAccumulate,
-  eDenoise,
+  // NRD REBLUR on the demodulated diffuse and specular signals, composed back into the HDR target.
+  eDenoiseNrd,
+  // DLSS Ray Reconstruction on the full noisy radiance and guide buffers, written straight to the HDR target. Needs Streamline and an NVIDIA RTX GPU.
+  eDenoiseRayReconstruction,
 };
 
 // DenoiserDebugView
@@ -89,6 +93,37 @@ struct DenoiserSettings
   HitDistanceReconstructionMode hitDistanceReconstructionMode = HitDistanceReconstructionMode::eOff;
 };
 
+// RayReconstructionPreset
+// Which DLSS Ray Reconstruction model runs. StreamlineRuntime maps these to Streamline's preset values, so the numbering here is free.
+
+enum class RayReconstructionPreset : uint32_t
+{
+  // Whatever the installed DLSS library considers current; it can change when the DLL is updated.
+  eDefault = 0,
+  // Transformer model D.
+  eD,
+  // Transformer model E, RTXPT's choice.
+  eE,
+};
+
+// RayReconstructionSettings
+// User-tunable DLSS Ray Reconstruction settings shared by every renderer that denoises. The resolution mode is fixed to DLAA: the renderers always render at the output resolution.
+
+struct RayReconstructionSettings
+{
+  // Model to run. Default follows the DLSS library rather than pinning one.
+  RayReconstructionPreset preset = RayReconstructionPreset::eDefault;
+  // Radiance clamp on the noisy color before Ray Reconstruction, as a multiple of the luminance the tonemapper maps to middle grey, applied to the brightest channel so hue is kept. Zero disables it.
+  // RTXPT's DLSSRRBrightnessClampK, including its 4096 default: far looser than the NRD clamp, because Ray Reconstruction sees undemodulated radiance and handles outliers itself - the clamp only catches the rare sample bright enough to survive the model as a blotch.
+  float                   radianceClampK = 4096.0f;
+};
+
+// Brightest-channel ceiling the Ray Reconstruction input pass clamps noisy radiance to, or zero when the clamp is disabled. Follows exposure like ComputeDenoiserRadianceClamp.
+inline float ComputeRayReconstructionRadianceClamp(const RayReconstructionSettings& settings, float greyLuminance)
+{
+  return settings.radianceClampK > 0.0f ? greyLuminance * settings.radianceClampK : 0.0f;
+}
+
 // Luminance ceiling the shaders clamp demodulated radiance to before writing NRD's inputs, or zero when the clamp is disabled.
 // greyLuminance is the scene luminance the tonemapper maps to middle grey, so the clamp follows exposure the way RTXPT's does: a darker exposure lets brighter radiance through.
 inline float ComputeDenoiserRadianceClamp(const DenoiserSettings& settings, float greyLuminance)
@@ -108,9 +143,20 @@ inline bool IsAccumulationResolveMode(RenderResolveMode mode)
   return mode == RenderResolveMode::eAccumulate;
 }
 
+// True for both denoisers: the renderer writes guide buffers and denoiser signals, and the denoiser owns the output.
 inline bool IsDenoiseResolveMode(RenderResolveMode mode)
 {
-  return mode == RenderResolveMode::eDenoise;
+  return mode == RenderResolveMode::eDenoiseNrd || mode == RenderResolveMode::eDenoiseRayReconstruction;
+}
+
+inline bool IsNrdResolveMode(RenderResolveMode mode)
+{
+  return mode == RenderResolveMode::eDenoiseNrd;
+}
+
+inline bool IsRayReconstructionResolveMode(RenderResolveMode mode)
+{
+  return mode == RenderResolveMode::eDenoiseRayReconstruction;
 }
 
 }  // namespace rtpt

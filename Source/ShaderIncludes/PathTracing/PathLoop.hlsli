@@ -89,13 +89,13 @@ PathState BeginPath(uint2 launchID, GltfSceneInfo sceneInfo)
   return path;
 }
 
-// Camera ray through the pixel center.
+// Camera ray through this frame's sample position in the pixel: the center, unless DLSS Ray Reconstruction has jittered it.
 RayDesc MakeCameraRay(uint2 launchID, GltfSceneInfo sceneInfo)
 {
   RayDesc ray;
 
   ray.Origin    = sceneInfo.cameraPosition;
-  ray.Direction = ReconstructWorldDirectionFromPixel((float2)launchID + 0.5, sceneInfo);
+  ray.Direction = ReconstructWorldDirectionFromPixel(GetPixelSamplePosition(launchID, sceneInfo), sceneInfo);
   ray.TMin      = 0.001;
   ray.TMax      = kRayTMax;
 

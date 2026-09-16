@@ -133,7 +133,7 @@ ApplicationOptionsParseResult ParseApplicationOptions(int argc, char** argv)
       // Matching against GetResolveModeName makes every accepted spelling round-trip through the name function.
       std::optional<RenderResolveMode> resolveMode;
 
-      for(const RenderResolveMode candidate : { RenderResolveMode::eOff, RenderResolveMode::eAccumulate, RenderResolveMode::eDenoise })
+      for(const RenderResolveMode candidate : { RenderResolveMode::eOff, RenderResolveMode::eAccumulate, RenderResolveMode::eDenoiseNrd, RenderResolveMode::eDenoiseRayReconstruction })
       {
         if(value == GetResolveModeName(candidate))
         {
@@ -143,7 +143,7 @@ ApplicationOptionsParseResult ParseApplicationOptions(int argc, char** argv)
 
       if(!resolveMode)
       {
-        result.error = "--resolve-mode must be off, accumulate, or denoise";
+        result.error = "--resolve-mode must be off, accumulate, denoise, or denoise-rr";
         return result;
       }
 
@@ -291,7 +291,7 @@ ApplicationOptionsParseResult ParseApplicationOptions(int argc, char** argv)
   // These rules depend on the whole command line, so they run after every argument has been seen.
   // Capturing and the profile report only happen at the end of a headless run, which is why a capture prefix or profile output without --headless is rejected.
 
-  if(result.options.restirReference && (result.options.renderMode != RenderMode::eReSTIRPTEnhanced || result.options.resolveMode == RenderResolveMode::eDenoise))
+  if(result.options.restirReference && (result.options.renderMode != RenderMode::eReSTIRPTEnhanced || IsDenoiseResolveMode(result.options.resolveMode.value_or(RenderResolveMode::eOff))))
   {
     result.error = "--restir-reference requires --renderer restir-pt and --resolve-mode off or accumulate";
     return result;
@@ -324,8 +324,8 @@ std::string GetApplicationUsage(const char* executableName)
          "  --width <pixels>           Viewport width; requires --height\n"
          "  --height <pixels>          Viewport height; requires --width\n"
          "  --scene-index <index>      Scene catalog index\n"
-         "  --renderer <name>          raster, path-tracer, or restir-pt\n"
-         "  --resolve-mode <mode>      off, accumulate, or denoise\n"
+         "  --renderer <name>          raster, path-tracer (default), or restir-pt\n"
+         "  --resolve-mode <mode>      off (default), accumulate, denoise (NRD), or denoise-rr (DLSS Ray Reconstruction)\n"
          "  --restir-reference         Compare identical paths without ReSTIR selection or reuse\n"
          "  --capture-prefix <path>    Write .linear.hdr, .final.png, and .json\n"
          "  --profile-output <path>    Write per-pass GPU timings as JSON; requires --headless\n"
@@ -356,8 +356,10 @@ const char* GetResolveModeName(RenderResolveMode resolveMode)
       return "off";
     case RenderResolveMode::eAccumulate:
       return "accumulate";
-    case RenderResolveMode::eDenoise:
+    case RenderResolveMode::eDenoiseNrd:
       return "denoise";
+    case RenderResolveMode::eDenoiseRayReconstruction:
+      return "denoise-rr";
   }
 
   return "unknown";

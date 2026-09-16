@@ -81,7 +81,7 @@ void WriteDenoiserGuideBuffers(uint2 pixelPosition, GltfSceneInfo sceneInfo, Pat
   if(path.hasPrimarySurface != 0u)
   {
     const float  viewZ  = mul(float4(path.primaryWorldPosition, 1.0), sceneInfo.viewMatrix).z;
-    const float3 motion = ComputeDenoiserMotionVector((float2)pixelPosition + 0.5, path.primaryWorldPosition, sceneInfo);
+    const float3 motion = ComputeDenoiserMotionVector(GetPixelSamplePosition(pixelPosition, sceneInfo), path.primaryWorldPosition, sceneInfo);
 
     motionVectorsImage[(int2)pixelPosition]      = float4(motion, 0.0);
     normalRoughnessImage[(int2)pixelPosition]    = PackNrdNormalRoughness(path.primaryShadingNormal, path.primaryRoughness);
@@ -128,8 +128,16 @@ void WriteDenoiserNoisySignals(uint2 pixelPosition, PathState path)
   const float3 diffuseRadiance  = ClampDenoiserRadiance(max(path.diffuseDenoiserRadiance, (float3)0.0) / diffuseDemodulationFactor, pushConst.denoiserRadianceClamp);
   const float3 specularRadiance = ClampDenoiserRadiance(max(path.specularDenoiserRadiance, (float3)0.0) / specularDemodulationFactor, pushConst.denoiserRadianceClamp);
 
+  float4 specularSignal = PackReblurRadianceHitDistance(specularRadiance, specularHitDistance, primaryViewZ, path.primaryRoughness, false);
+
+  // DLSS Ray Reconstruction reprojects reflections with the hit distance in world units, and REBLUR's normalization saturates exactly the long distances a mirror needs, so it gets the raw value.
+  if((pushConst.flags & uint(PathTraceFlags::ePathTraceFlagRawSpecularHitDistance)) != 0u)
+  {
+    specularSignal.a = specularHitDistance;
+  }
+
   diffuseRadianceHitDistanceImage[imagePosition]  = PackReblurRadianceHitDistance(diffuseRadiance, diffuseHitDistance, primaryViewZ, path.primaryRoughness, true);
-  specularRadianceHitDistanceImage[imagePosition] = PackReblurRadianceHitDistance(specularRadiance, specularHitDistance, primaryViewZ, path.primaryRoughness, false);
+  specularRadianceHitDistanceImage[imagePosition] = specularSignal;
 }
 
 [shader("raygeneration")]

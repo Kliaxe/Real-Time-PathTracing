@@ -358,6 +358,13 @@ struct GltfSceneInfo
   // It lives in the scene uniform rather than a push constant because the rasterizer and both path tracers must show the same material to be comparable.
   float2 metallicRoughnessOverride;
 
+  // Sub-pixel offset of this frame's camera samples, in pixels: a pixel's primary ray leaves through (pixel + 0.5 - pixelJitter). Zero unless DLSS Ray Reconstruction is denoising.
+  // Ray Reconstruction anti-aliases by accumulating samples taken at different positions inside each pixel, and the sign follows its convention: a positive offset shifts the rendered image right and down.
+  float2 pixelJitter;
+
+  // Explicit padding to keep the shared layout stable.
+  float2 _padJitter;
+
   // GPU address of instances.
   RTPT_SCENE_ADDRESS(GltfInstance) instances;
 

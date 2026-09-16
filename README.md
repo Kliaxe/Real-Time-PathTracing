@@ -6,6 +6,14 @@ Real-Time PathTracing is a personal Vulkan renderer for real-time path tracing, 
 
 It started as a master's project focused on real-time path tracing with ReSTIR direct illumination, and continues as an evolving personal rendering project now built around ReSTIR PT Enhanced (Lin, Kettunen & Wyman, I3D 2026).
 
+## Features
+
+- ReSTIR PT Enhanced path resampling, alongside a reference path tracer
+- DLSS Ray Reconstruction and NVIDIA NRD denoising
+- Disney-style BSDF with diffuse, metallic, glass, and clearcoat lobes
+- HDRI environment and emissive light importance sampling
+- Per-pass GPU profiler and headless capture comparisons
+
 ## Tested Setup
 
 The owned Vulkan runtime has been tested on Windows with:
@@ -41,7 +49,7 @@ winget install --id Ninja-build.Ninja --exact --scope user
 
 The bootstrap script creates a stable LLVM MinGW path used by the CMake presets, so CMake Tools does not depend on the VS Code process inheriting WinGet's versioned `PATH`. Rerun it after updating LLVM MinGW.
 
-The first configure downloads pinned Vulkan-Headers, Volk, VMA, GLFW, GLM, Dear ImGui, fmt, tinygltf, stb, DXC, and NVIDIA NRD revisions. Compilation does not use headers from the machine Vulkan SDK. The content assets are managed through Git LFS, so run this after cloning if the assets are missing:
+The first configure downloads pinned Vulkan-Headers, Volk, VMA, GLFW, GLM, Dear ImGui, fmt, tinygltf, stb, DXC, and NVIDIA NRD revisions, and on Windows the NVIDIA Streamline SDK (see [DLSS Ray Reconstruction](#dlss-ray-reconstruction)). Compilation does not use headers from the machine Vulkan SDK. The content assets are managed through Git LFS, so run this after cloning if the assets are missing:
 
 ```powershell
 git lfs pull
@@ -102,6 +110,18 @@ To open the renderer:
 ```
 
 The application UI exposes the scene selection, render mode, ReSTIR PT settings, path tracing settings, and denoising options used during the project.
+
+## DLSS Ray Reconstruction
+
+Both path tracers can denoise with either NVIDIA NRD or DLSS Ray Reconstruction, chosen in the **Resolve** dropdown (`--resolve-mode denoise` or `--resolve-mode denoise-rr` on the command line). Ray Reconstruction runs at native resolution (DLAA) and needs Windows and an NVIDIA RTX GPU; elsewhere the option stays disabled with the reason on hover, and `denoise-rr` falls back to NRD.
+
+It is reached through [NVIDIA Streamline](https://github.com/NVIDIA-RTX/Streamline) v2.14.1. The NGX SDK underneath only ships MSVC static libraries, which an LLVM MinGW build cannot link, while Streamline is a set of DLLs with a C API that it can load at runtime. Configure downloads the pinned Streamline release (about 276 MB, once per build directory) and the build copies only the four runtime DLLs next to the executable: the development DLLs for Debug, the NVIDIA-signed production DLLs otherwise, whose signature is checked before loading.
+
+Streamline's source is MIT licensed, but `nvngx_dlssd.dll`, the DLSS model itself, is covered by the NVIDIA RTX SDKs license, which is copied next to the DLLs as `nvngx_dlss.license.txt`. None of these binaries are committed to this repository. To build without Streamline:
+
+```powershell
+cmake --preset x64-Release -D REAL_TIME_PATH_TRACING_WITH_STREAMLINE=OFF
+```
 
 ## Repository Layout
 

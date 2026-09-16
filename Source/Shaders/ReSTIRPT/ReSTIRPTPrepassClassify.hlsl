@@ -14,7 +14,7 @@
 //   Cornell Box      40.92 -> 21.72 ms   1.9x
 //   Disoccl. Pillars 30.67 -> 15.88 ms   1.9x
 //   Scattered Lights 48.08 -> 25.14 ms   1.9x
-//   Sponza Studio    13.14 ->  3.42 ms   3.8x
+//   Sponza Reduced   13.14 ->  3.42 ms   3.8x   (at 0.45 scale)
 // The scene with real geometric and depth complexity gains twice what the closed boxes do, which is the expected shape: divergence is what this removes, and a Cornell box has far less of it to remove than a Sponza does. Measuring this only on the small scenes would have understated it by half.
 // Most of the speedup survives without the sort, because it never came from the ordering: the pass this replaces looped all three slots inside ONE invocation, so a warp cost the SUM over slots of that slot's slowest lane, not three times one lane.
 // Parallelizing over pairs is what Section 6.2.2 actually asks for, and it also stops the canonical reservoir and surface being reloaded once per active slot.

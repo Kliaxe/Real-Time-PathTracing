@@ -26,4 +26,11 @@ float3 ReconstructWorldDirectionFromPixel(float2 pixelCoordinate, GltfSceneInfo 
   return ReconstructWorldDirectionFromNdc(uv * 2.0f - 1.0f, sceneInfo);
 }
 
+// Where inside a pixel this frame's camera sample is taken: the pixel center, moved by the frame's jitter.
+// Every primary ray and every motion vector goes through this one position, so a jittered sample reprojects from exactly where it was traced.
+float2 GetPixelSamplePosition(uint2 pixel, GltfSceneInfo sceneInfo)
+{
+  return (float2)pixel + 0.5f - sceneInfo.pixelJitter;
+}
+
 #endif  // RTPT_CAMERA_HLSLI

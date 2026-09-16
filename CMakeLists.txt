@@ -151,6 +151,37 @@ if(DEFINED nrd_SOURCE_DIR)
 endif()
 
 # ----------------------------------------------------------------------------------------------------------------------
+# Dependencies (Streamline)
+# - DLSS Ray Reconstruction is reached through NVIDIA Streamline. The NGX SDK itself only ships MSVC static libraries,
+#   which an LLVM MinGW build cannot link; Streamline is a set of DLLs with a plain extern "C" API, so it can be.
+# - Streamline's source is MIT, but the DLSS model (nvngx_dlssd.dll) is under the NVIDIA RTX SDKs license. Nothing is
+#   committed: the pinned release is downloaded here, and only the runtime DLLs and their license texts are copied
+#   next to the executable.
+# - Optional and Windows-only, because Streamline has no Linux build. Without it the renderer falls back to NRD.
+#
+
+option(REAL_TIME_PATH_TRACING_WITH_STREAMLINE "Download NVIDIA Streamline and enable DLSS Ray Reconstruction" ${WIN32})
+
+if(REAL_TIME_PATH_TRACING_WITH_STREAMLINE)
+    if(NOT WIN32)
+        message(FATAL_ERROR "REAL_TIME_PATH_TRACING_WITH_STREAMLINE requires Windows; Streamline has no Linux runtime.")
+    endif()
+
+    # SOURCE_SUBDIR points at a folder without a CMakeLists.txt, so the SDK is only downloaded and never configured.
+    FetchContent_Declare(
+        streamline
+        URL      https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.1/streamline-sdk-v2.14.1.zip
+        URL_HASH SHA256=92c4d954631a1710da86ca3fa8d5034f2b9503838c95fc4ae977ae149319781b
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        SOURCE_SUBDIR  _no_cmake
+    )
+
+    FetchContent_MakeAvailable(streamline)
+
+    set(REAL_TIME_PATH_TRACING_STREAMLINE_SOURCE_DIR "${streamline_SOURCE_DIR}" CACHE INTERNAL "Resolved Streamline SDK directory")
+endif()
+
+# ----------------------------------------------------------------------------------------------------------------------
 # Real-Time PathTracing helpers (shader compilation, runtime copying, etc.)
 #
 

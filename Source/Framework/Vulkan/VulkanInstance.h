@@ -21,6 +21,9 @@ struct VulkanInstanceCreateInfo
   bool                   validation = false;
   // Adds synchronization validation on top of validation. Requires validation.
   bool                   synchronizationValidation = false;
+  // Loader entry point volk dispatches through instead of the system Vulkan loader. Null loads vulkan-1 as usual.
+  // A layer that must see instance and device creation, such as the Streamline interposer, supplies its own vkGetInstanceProcAddr here; it forwards everything it does not intercept to the real loader.
+  PFN_vkGetInstanceProcAddr loaderEntryPoint = nullptr;
 };
 
 // VulkanInstance

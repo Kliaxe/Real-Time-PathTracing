@@ -8,6 +8,8 @@
 // Each control carries a hover explanation, because none of these are values a reader can infer from the label alone.
 
 #include <cstdint>
+#include <iterator>
+#include <string>
 
 #include <imgui.h>
 
@@ -18,22 +20,45 @@
 namespace rtpt
 {
 
-inline bool DrawResolveModeControl(RenderResolveMode& resolveMode, const char* label = "Resolve")
+inline bool DrawResolveModeControl(RenderResolveMode& resolveMode, bool rayReconstructionAvailable, const std::string& rayReconstructionUnavailableReason, const char* label = "Resolve")
 {
-  // Item order must match the RenderResolveMode enumerators, because the combo index is cast straight back to the enum.
-  int mode = static_cast<int>(resolveMode);
-  const char* resolveModes[] = { "Off", "Accumulate", "Denoise" };
+  // Items
+  // Order must match the RenderResolveMode enumerators, because the selected index is cast straight back to the enum.
+  // A hand-built combo rather than ImGui::Combo, so Ray Reconstruction can stay listed but disabled on hardware that cannot run it, with the reason on hover.
 
-  const bool changed = ImGui::Combo(label, &mode, resolveModes, IM_ARRAYSIZE(resolveModes));
+  constexpr const char* resolveModes[] = { "Off", "Accumulate", "Denoise - NRD", "Denoise - Ray Reconstruction" };
 
-  DrawTooltip("What happens to the noisy frame the renderer just produced.\n\nOff shows it raw, which is the honest view of how much noise a single frame carries.\n\nAccumulate averages every frame since the camera last moved, and converges to the ground truth. Use it to compare renderers.\n\nDenoise runs NRD REBLUR on this frame using its history, which is the real-time path: it stays responsive while the camera moves, at the cost of some detail.");
+  const int current = static_cast<int>(resolveMode);
+  int       selected = current;
 
-  if(!changed)
+  if(ImGui::BeginCombo(label, resolveModes[current]))
+  {
+    for(int index = 0; index < static_cast<int>(std::size(resolveModes)); ++index)
+    {
+      const bool unavailable = static_cast<RenderResolveMode>(index) == RenderResolveMode::eDenoiseRayReconstruction && !rayReconstructionAvailable;
+
+      if(ImGui::Selectable(resolveModes[index], index == current, unavailable ? ImGuiSelectableFlags_Disabled : ImGuiSelectableFlags_None))
+      {
+        selected = index;
+      }
+
+      if(unavailable)
+      {
+        DrawTooltip(("Unavailable: " + rayReconstructionUnavailableReason).c_str());
+      }
+    }
+
+    ImGui::EndCombo();
+  }
+
+  DrawTooltip("What happens to the noisy frame the renderer just produced.\n\nOff shows it raw, which is the honest view of how much noise a single frame carries.\n\nAccumulate averages every frame since the camera last moved, and converges to the ground truth. Use it to compare renderers.\n\nDenoise - NRD runs NVIDIA's REBLUR filter on the diffuse and specular signals with their history: the portable real-time path, responsive while the camera moves at the cost of some detail.\n\nDenoise - Ray Reconstruction runs DLSS Ray Reconstruction, a neural denoiser that also anti-aliases, on the full noisy frame. It keeps more detail and handles reflections better, but needs an NVIDIA RTX GPU, and it jitters the camera a fraction of a pixel every frame.");
+
+  if(selected == current)
   {
     return false;
   }
 
-  resolveMode = static_cast<RenderResolveMode>(mode);
+  resolveMode = static_cast<RenderResolveMode>(selected);
   return true;
 }
 
@@ -155,6 +180,44 @@ inline bool DrawDenoiserSettingsSection(const char* treeLabel, DenoiserSettings&
   return changed;
 }
 
+inline bool DrawRayReconstructionSettingsSection(const char* treeLabel, RayReconstructionSettings& settings)
+{
+  const bool open = ImGui::TreeNodeEx(treeLabel);
+
+  DrawTooltip("DLSS Ray Reconstruction parameters. It runs at native resolution (DLAA): the renderer never renders smaller and upscales.");
+
+  if(!open)
+  {
+    return false;
+  }
+
+  bool changed = false;
+
+  // Model
+  // Item order must match the RayReconstructionPreset enumerators, because the combo index is cast straight back to the enum.
+
+  int preset = static_cast<int>(settings.preset);
+
+  constexpr const char* presets[] = { "Default", "Preset D", "Preset E" };
+
+  if(ImGui::Combo("Model", &preset, presets, static_cast<int>(std::size(presets))))
+  {
+    settings.preset = static_cast<RayReconstructionPreset>(preset);
+    changed         = true;
+  }
+
+  DrawTooltip("Which trained network denoises. Default follows the DLSS library shipped next to the executable, so it can change when that DLL is updated.\n\nD and E pin one of the transformer models instead; E is what NVIDIA's RTXPT sample uses. Compare them on the scene at hand. Switching restarts the denoiser's history.");
+
+  // Clamp
+
+  changed |= ImGui::SliderFloat("Radiance Clamp K", &settings.radianceClampK, 0.0f, 8192.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+
+  DrawTooltip("Caps the brightest colour channel of the noisy frame at K times the luminance the tonemapper shows as middle grey, before Ray Reconstruction sees it. The hue of a clamped sample is kept.\n\nFar looser than the NRD clamp: Ray Reconstruction handles ordinary fireflies itself, and this only stops a sample bright enough to survive the network as a blotch. It removes energy from very bright highlights. 0 disables it; RTXPT uses 4096.");
+
+  ImGui::TreePop();
+  return changed;
+}
+
 inline bool DrawBounceLimitControl(const char* label, uint32_t& settingValue, uint32_t bounceLimit)
 {
   // The slider range stops at the renderer's bounce limit, so the UI cannot request a longer path than the renderer allows.
@@ -183,9 +246,15 @@ inline void DrawResolveStatus(RenderResolveMode resolveMode, uint32_t accumulate
     return;
   }
 
-  if(IsDenoiseResolveMode(resolveMode))
+  if(IsNrdResolveMode(resolveMode))
   {
-    ImGui::TextUnformatted("Resolve Mode: Denoise");
+    ImGui::TextUnformatted("Resolve Mode: Denoise - NRD");
+    return;
+  }
+
+  if(IsRayReconstructionResolveMode(resolveMode))
+  {
+    ImGui::TextUnformatted("Resolve Mode: Denoise - Ray Reconstruction");
     return;
   }
 

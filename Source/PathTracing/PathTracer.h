@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include <vulkan/vulkan_core.h>
 
@@ -47,6 +48,8 @@ public:
     uint32_t                 frameSlotCount        = 0;
     // Size of the bindless texture arrays in the descriptor layout.
     uint32_t                 maxTextureDescriptors = 0;
+    // Optional. Streamline session DLSS Ray Reconstruction runs through; null leaves it unavailable.
+    rtpt::StreamlineRuntime* streamline            = nullptr;
   };
 
   // RenderInput
@@ -68,7 +71,7 @@ public:
     uint32_t                            frameSlot = 0;
     // Time since the previous frame in milliseconds, handed to NRD. Zero lets NRD measure real frame time itself.
     float                               frameTimeMilliseconds = 0.0f;
-    // Scene luminance the tonemapper maps to middle grey. The radiance clamp before NRD is a multiple of it.
+    // Scene luminance the tonemapper maps to middle grey. The radiance clamps before both denoisers are multiples of it.
     float                               denoiserGreyLuminance = 1.0f;
     // Optional. Receives a timestamp scope around the trace and around NRD; null records no timing.
     rtpt::GpuProfiler*                  profiler = nullptr;
@@ -79,12 +82,14 @@ public:
 
   struct Settings
   {
-    // Resolve mode decides whether the noisy image is raw, accumulated, or denoised.
+    // Resolve mode decides whether the noisy image is raw, accumulated, or denoised, and by which denoiser.
     RenderResolveMode resolveMode       = RenderResolveMode::eOff;
     // Which NRD input or output is shown when resolving with the denoiser.
     DenoiserDebugView denoiserDebugView = DenoiserDebugView::eFinal;
     // NRD REBLUR settings, including the hit distance normalization the shader also uses.
     DenoiserSettings  denoiserSettings { .hitDistanceReconstructionMode = HitDistanceReconstructionMode::eArea5x5 };
+    // DLSS Ray Reconstruction settings, used while the resolve mode denoises with it.
+    RayReconstructionSettings rayReconstructionSettings {};
     // Clamped to GetBounceLimit() before reaching the shader. Three bounces is the interactive default: it carries the transport most scenes here are judged on, and the slider goes to the limit when more is wanted.
     uint32_t          maxBounces        = 3;
   };
@@ -100,6 +105,9 @@ public:
   uint32_t        GetAccumulatedFrameCount() const;
   uint32_t        GetBounceLimit() const;
   void            InvalidateHistory();
+
+  bool               IsRayReconstructionAvailable() const;
+  const std::string& GetRayReconstructionUnavailableReason() const;
 
   rtpt::DescriptorPack&       GetDescriptorPack();
   const rtpt::DescriptorPack& GetDescriptorPack() const;

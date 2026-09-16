@@ -19,6 +19,8 @@
 namespace rtpt
 {
 
+class StreamlineRuntime;
+
 // ReSTIRPTRendererCreateInfo
 // CPU-side construction parameters for the ReSTIR PT renderer.
 // These are stable lifetime dependencies supplied by Application; the renderer borrows them and must be destroyed before they are.
@@ -37,6 +39,8 @@ struct ReSTIRPTRendererCreateInfo
   uint32_t                 frameSlotCount        = 0;
   // Size of the bindless texture arrays in the descriptor layout.
   uint32_t                 maxTextureDescriptors = 0;
+  // Optional. Streamline session DLSS Ray Reconstruction runs through; null leaves it unavailable.
+  rtpt::StreamlineRuntime* streamline            = nullptr;
 };
 
 // ReSTIRPTRenderInput
@@ -59,7 +63,7 @@ struct ReSTIRPTRenderInput
   uint32_t                            frameSlot = 0;
   // Time since the previous frame in milliseconds, handed to NRD. Zero lets NRD measure real frame time itself.
   float                               frameTimeMilliseconds = 0.0f;
-  // Scene luminance the tonemapper maps to middle grey. The radiance clamp before NRD is a multiple of it.
+  // Scene luminance the tonemapper maps to middle grey. The radiance clamps before both denoisers are multiples of it.
   float                               denoiserGreyLuminance = 1.0f;
   // Optional. Receives one timestamp scope per pass that runs this frame; null records no timing.
   rtpt::GpuProfiler*                  profiler = nullptr;

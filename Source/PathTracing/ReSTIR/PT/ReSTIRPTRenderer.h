@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <volk.h>
@@ -51,6 +52,9 @@ public:
   VkDeviceSize GetReservoirMemoryUsage() const;
 
   void         InvalidateHistory();
+
+  bool               IsRayReconstructionAvailable() const;
+  const std::string& GetRayReconstructionUnavailableReason() const;
 
   rtpt::DescriptorPack&       GetDescriptorPack();
   const rtpt::DescriptorPack& GetDescriptorPack() const;

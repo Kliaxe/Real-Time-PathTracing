@@ -9,7 +9,7 @@
     {
       "id": "smoke_raster_bunny_dielectric",
       "groups": ["smoke"],
-      "scene_index": 9,
+      "scene_index": 8,
       "scene_label": "Bunny Dielectric",
       "renderer": "raster",
       "frames": 2,
@@ -48,17 +48,17 @@
       "frames": 128
     },
     {
-      "id": "sponza_studio_restir_pt",
+      "id": "sponza_reduced_restir_pt",
       "groups": ["baseline"],
-      "scene_index": 4,
-      "scene_label": "Sponza Studio",
+      "scene_index": 7,
+      "scene_label": "Sponza Reduced",
       "renderer": "restir-pt",
       "frames": 128
     },
     {
       "id": "bunny_dielectric_restir_pt",
       "groups": ["baseline"],
-      "scene_index": 9,
+      "scene_index": 8,
       "scene_label": "Bunny Dielectric",
       "renderer": "restir-pt",
       "frames": 128
@@ -66,7 +66,7 @@
     {
       "id": "bunny_metallic_restir_pt",
       "groups": ["baseline"],
-      "scene_index": 10,
+      "scene_index": 9,
       "scene_label": "Bunny Metallic",
       "renderer": "restir-pt",
       "frames": 128
@@ -74,7 +74,7 @@
     {
       "id": "bunny_glass_restir_pt",
       "groups": ["baseline"],
-      "scene_index": 11,
+      "scene_index": 10,
       "scene_label": "Bunny Glass",
       "renderer": "restir-pt",
       "frames": 128
@@ -82,7 +82,7 @@
     {
       "id": "bunny_clearcoat_restir_pt",
       "groups": ["baseline"],
-      "scene_index": 12,
+      "scene_index": 11,
       "scene_label": "Bunny Clearcoat",
       "renderer": "restir-pt",
       "frames": 128
@@ -90,7 +90,7 @@
     {
       "id": "scattered_lights_restir_pt",
       "groups": ["baseline"],
-      "scene_index": 17,
+      "scene_index": 16,
       "scene_label": "Scattered Lights",
       "renderer": "restir-pt",
       "frames": 128

@@ -64,6 +64,12 @@ target_sources(RealTimePathTracing PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/Denoising/NrdDenoiser.h"
     "${CMAKE_CURRENT_LIST_DIR}/Denoising/NrdDisocclusionMixPass.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/Denoising/NrdDisocclusionMixPass.h"
+    "${CMAKE_CURRENT_LIST_DIR}/Denoising/RayReconstructionDenoiser.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/Denoising/RayReconstructionDenoiser.h"
+    "${CMAKE_CURRENT_LIST_DIR}/Denoising/RayReconstructionInputPass.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/Denoising/RayReconstructionInputPass.h"
+    "${CMAKE_CURRENT_LIST_DIR}/Denoising/StreamlineRuntime.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/Denoising/StreamlineRuntime.h"
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/Common/ResolveHistory.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/Common/ResolveHistory.h"
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/Common/ResolveHistoryTracker.cpp"
@@ -172,6 +178,27 @@ rtpt_compile_hlsl(
         "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders"
         "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders/Include"
     DEPENDS
+        "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders/NRD.hlsli"
+        "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders/Include/NRDConfig.hlsli"
+)
+
+rtpt_compile_hlsl(
+    TARGET  RealTimePathTracing
+    SOURCE  "${CMAKE_CURRENT_LIST_DIR}/Shaders/RayReconstructionInputs.hlsl"
+    ENTRY   main
+    PROFILE cs_6_6
+    SYMBOL  RayReconstructionInputs_hlsl
+    INCLUDE_DIRS
+        "${CMAKE_CURRENT_LIST_DIR}"
+        "${CMAKE_CURRENT_LIST_DIR}/Shaders"
+        "${CMAKE_CURRENT_LIST_DIR}/ShaderIncludes"
+        "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders"
+        "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders/Include"
+    DEPENDS
+        "${CMAKE_CURRENT_LIST_DIR}/Common/IoGltf.h"
+        "${CMAKE_CURRENT_LIST_DIR}/Common/ShaderTypes.h"
+        "${CMAKE_CURRENT_LIST_DIR}/Shaders/ShaderIo.h"
+        "${CMAKE_CURRENT_LIST_DIR}/ShaderIncludes/Camera.hlsli"
         "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders/NRD.hlsli"
         "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders/Include/NRDConfig.hlsli"
 )
@@ -312,6 +339,37 @@ target_include_directories(RealTimePathTracing PRIVATE
     "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Include"
     "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Integration"
 )
+
+# Streamline
+# The interposer is loaded at runtime rather than linked, so the executable still starts where the DLLs are missing and simply reports Ray Reconstruction as unavailable.
+# Debug copies the development DLLs, which log verbosely and accept unsigned plugins; every other configuration copies the NVIDIA-signed production DLLs, whose signature StreamlineRuntime verifies before loading.
+# The license texts travel with the DLLs, so a copied Binaries folder still carries the terms those binaries are redistributed under.
+
+if(REAL_TIME_PATH_TRACING_WITH_STREAMLINE)
+    target_include_directories(RealTimePathTracing SYSTEM PRIVATE "${REAL_TIME_PATH_TRACING_STREAMLINE_SOURCE_DIR}/include")
+    target_compile_definitions(RealTimePathTracing PRIVATE RTPT_WITH_STREAMLINE=1 RTPT_STREAMLINE_PRODUCTION=$<IF:$<CONFIG:Debug>,0,1>)
+    target_link_libraries(RealTimePathTracing PRIVATE wintrust crypt32)
+
+    set(_streamline_binaries "${REAL_TIME_PATH_TRACING_STREAMLINE_SOURCE_DIR}/bin/x64/$<$<CONFIG:Debug>:development/>")
+
+    add_custom_command(TARGET RealTimePathTracing POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_streamline_binaries}sl.interposer.dll"
+            "${_streamline_binaries}sl.common.dll"
+            "${_streamline_binaries}sl.dlss_d.dll"
+            "${_streamline_binaries}nvngx_dlssd.dll"
+            "$<TARGET_FILE_DIR:RealTimePathTracing>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${REAL_TIME_PATH_TRACING_STREAMLINE_SOURCE_DIR}/bin/x64/nvngx_dlss.license.txt"
+            "$<TARGET_FILE_DIR:RealTimePathTracing>/nvngx_dlss.license.txt"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${REAL_TIME_PATH_TRACING_STREAMLINE_SOURCE_DIR}/license.txt"
+            "$<TARGET_FILE_DIR:RealTimePathTracing>/Streamline.license.txt"
+        VERBATIM
+    )
+else()
+    target_compile_definitions(RealTimePathTracing PRIVATE RTPT_WITH_STREAMLINE=0 RTPT_STREAMLINE_PRODUCTION=0)
+endif()
 
 if(BUILD_TESTING)
     add_executable(RtptImageDataTests

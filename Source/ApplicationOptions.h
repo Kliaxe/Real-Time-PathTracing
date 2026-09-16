@@ -46,10 +46,10 @@ struct ApplicationOptions
   // Scene catalog index that overrides the catalog's default scene. Validated against the catalog after discovery.
   std::optional<size_t>                 sceneIndex;
 
-  // Renderer active on the first frame.
-  RenderMode                            renderMode = RenderMode::eReSTIRPTEnhanced;
+  // Renderer active on the first frame. The reference path tracer, with both path tracers' resolve mode left at Off, so a first run shows the unfiltered estimator; ReSTIR and the denoisers are opt-in from the UI or the command line.
+  RenderMode                            renderMode = RenderMode::ePathTracing;
 
-  // Resolve mode applied to both path tracers at startup, so headless captures can exercise raw, accumulated, or NRD output. Empty leaves each renderer's own default.
+  // Resolve mode applied to both path tracers at startup, so headless captures can exercise raw, accumulated, or denoised output. Empty leaves each renderer's own default, which is Off.
   std::optional<RenderResolveMode>      resolveMode;
 
   // Bypasses ReSTIR candidate selection, reuse, and light tiles for paired reference-path validation.

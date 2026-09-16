@@ -39,7 +39,8 @@ int main()
   const std::pair<std::string_view, rtpt::RenderResolveMode> resolveSpellings[] {
     { "off", rtpt::RenderResolveMode::eOff },
     { "accumulate", rtpt::RenderResolveMode::eAccumulate },
-    { "denoise", rtpt::RenderResolveMode::eDenoise },
+    { "denoise", rtpt::RenderResolveMode::eDenoiseNrd },
+    { "denoise-rr", rtpt::RenderResolveMode::eDenoiseRayReconstruction },
   };
 
   for(const auto& [spelling, resolveMode] : resolveSpellings)
@@ -90,7 +91,7 @@ int main()
   // Reference comparison and denoising
   // The ReSTIR reference comparison needs raw or accumulated radiance, so an explicit denoise request is rejected while accumulate is accepted.
 
-  if(Parse({ "--renderer", "restir-pt", "--restir-reference", "--resolve-mode", "denoise" }).error.empty() || !Parse({ "--renderer", "restir-pt", "--restir-reference", "--resolve-mode", "accumulate" }).error.empty())
+  if(Parse({ "--renderer", "restir-pt", "--restir-reference", "--resolve-mode", "denoise" }).error.empty() || Parse({ "--renderer", "restir-pt", "--restir-reference", "--resolve-mode", "denoise-rr" }).error.empty() || !Parse({ "--renderer", "restir-pt", "--restir-reference", "--resolve-mode", "accumulate" }).error.empty())
   {
     std::cerr << "--restir-reference does not gate the resolve mode correctly\n";
     return 1;

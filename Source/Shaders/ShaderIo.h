@@ -61,6 +61,8 @@ enum PathTraceFlags
 {
   ePathTraceFlagAccumulate           = 0x1u,
   ePathTraceFlagWriteDenoiserSignals = 0x2u,
+  // Store the specular signal's hit distance in world units instead of REBLUR's normalized form. Set while DLSS Ray Reconstruction denoises, which reprojects reflections with it.
+  ePathTraceFlagRawSpecularHitDistance = 0x4u,
 };
 
 // PathTracePushConstant
@@ -88,6 +90,21 @@ struct PathTracePushConstant
 
   // Luminance cap on demodulated radiance before it is written for NRD; zero disables it. See ComputeDenoiserRadianceClamp.
   float          denoiserRadianceClamp;
+};
+
+// RayReconstructionInputsPushConstant
+// Per-dispatch constants for RayReconstructionInputs.hlsl, filled by RayReconstructionInputPass.
+
+struct RayReconstructionInputsPushConstant
+{
+  // Device address of the scene info buffer: camera matrices, jitter, and viewport size.
+  RTPT_BUFFER_POINTER(GltfSceneInfo) sceneInfoAddress;
+
+  // Brightest-channel ceiling for the noisy colour; zero disables it. See ComputeRayReconstructionRadianceClamp.
+  float          radianceClamp;
+
+  // Explicit padding to the 8-byte alignment of the address above.
+  float          _pad0;
 };
 
 // ReSTIRPTParameters
@@ -197,8 +214,10 @@ enum ReSTIRPTFlags
   // This is the correctness gate: with reuse disabled the two must converge to the same image, so the toggle makes the comparison direct.
   eReSTIRPTFlagReferenceRadiance = 0x2u,
   // Write the NRD guide buffers and split radiance signals from final shading.
-  // Off unless NRD will actually consume them: the writes are seven storage-image stores per pixel and buy nothing in Off or Accumulate mode.
+  // Off unless a denoiser will actually consume them: the writes are seven storage-image stores per pixel and buy nothing in Off or Accumulate mode.
   eReSTIRPTFlagWriteDenoiserSignals = 0x4u,
+  // Store the specular signal's hit distance in world units instead of REBLUR's normalized form (mirrors ePathTraceFlagRawSpecularHitDistance).
+  eReSTIRPTFlagRawSpecularHitDistance = 0x8u,
   // Section 6.2.2. Dispatch the spatial pre-pass over a sorted work list instead of one invocation per pixel.
   // Uniform across the dispatch, so the branch on it in the pre-pass costs nothing.
   eReSTIRPTFlagSortedPrepass = 0x10u,
@@ -318,6 +337,7 @@ struct ReSTIRPTPairedShift
 CHECK_STRUCT_ALIGNMENT(ReSTIRPTPairedShift)
 CHECK_STRUCT_ALIGNMENT(ReSTIRPTParameters)
 CHECK_STRUCT_ALIGNMENT(ReSTIRPTPushConstant)
+CHECK_STRUCT_ALIGNMENT(RayReconstructionInputsPushConstant)
 CHECK_STRUCT_ALIGNMENT(ReSTIRPTSurface)
 #ifdef __cplusplus
 #include <cstddef>

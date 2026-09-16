@@ -76,7 +76,7 @@ public:
 
   // DenoiserSignature
   // Answers the narrower question "can NRD's temporal history still be trusted?".
-  // Deliberately smaller than the accumulation signature: NRD reprojects with the motion vectors the renderer writes, so a camera move is not a reason to drop its history - only a change to what is being lit or to the buffer sizes is.
+  // Deliberately smaller than the accumulation signature: both denoisers reproject with the motion vectors the renderer writes, so a camera move is not a reason to drop their history - only a change of denoiser, of what is being lit, or of the buffer sizes is.
   // Compared with memcmp, so every byte must be deterministic: all padding is written out as named members, and the static_assert after the struct proves the compiler added none of its own.
 
   struct DenoiserSignature
@@ -85,8 +85,8 @@ public:
     int                           useSky                  = 0;
     int                           useHdrEnv               = 0;
     int                           environmentTextureIndex = -1;
-    // Explicit padding, so no implicit padding bytes reach the memcmp.
-    int                           _pad0                   = 0;
+    // Which resolve mode ran. NRD and Ray Reconstruction keep separate temporal histories, so switching between them must restart the one taking over. It also fills the four bytes before backgroundColor that would otherwise be implicit padding.
+    RenderResolveMode             resolveMode             = RenderResolveMode::eOff;
     // Constant background radiance used when no sky or HDR environment is active.
     glm::vec3                     backgroundColor {};
     // Explicit padding, so no implicit padding bytes reach the memcmp.
@@ -100,7 +100,7 @@ public:
   };
 
   // Same proof as for AccumulationSignature: the size equals the sum of the member sizes only without compiler-inserted padding.
-  static_assert(sizeof(DenoiserSignature) == sizeof(glm::vec3) + 5 * sizeof(int) + sizeof(shaderio::SkySimpleParameters) + sizeof(VkDeviceAddress) + sizeof(VkExtent2D), "DenoiserSignature must have no implicit padding");
+  static_assert(sizeof(DenoiserSignature) == sizeof(glm::vec3) + 4 * sizeof(int) + sizeof(RenderResolveMode) + sizeof(shaderio::SkySimpleParameters) + sizeof(VkDeviceAddress) + sizeof(VkExtent2D), "DenoiserSignature must have no implicit padding");
 
   // FrameState
   // Snapshot of the history decisions for one recorded frame.
@@ -110,9 +110,11 @@ public:
   {
     // Resolution this frame is rendered at.
     VkExtent2D            viewportSize {};
+    // Resolve mode this frame runs, which also says which denoiser owns the output when denoiseEnabled is set.
+    RenderResolveMode     resolveMode = RenderResolveMode::eOff;
     // Accumulation key for this frame, stored by FinishFrame for the next comparison.
     AccumulationSignature accumulationSignature {};
-    // NRD history key for this frame, stored by FinishFrame when denoising ran.
+    // Denoiser history key for this frame, stored by FinishFrame when denoising ran.
     DenoiserSignature     denoiserSignature {};
     // The shader blends this frame into the accumulation history.
     bool                  accumulateEnabled          = false;

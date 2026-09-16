@@ -55,7 +55,7 @@ bool DrawPathTracerControls(PathTracer& pathTracer)
 {
   PathTracer::Settings& settings = pathTracer.GetSettings();
 
-  bool changed = DrawResolveModeControl(settings.resolveMode);
+  bool changed = DrawResolveModeControl(settings.resolveMode, pathTracer.IsRayReconstructionAvailable(), pathTracer.GetRayReconstructionUnavailableReason());
 
   int bounces = static_cast<int>(settings.maxBounces);
 
@@ -68,11 +68,16 @@ bool DrawPathTracerControls(PathTracer& pathTracer)
 
   DrawTooltip("How many times a path may bounce before it is cut off. One bounce is direct lighting only; each further bounce adds a round of indirect light and costs roughly a ray per pixel. Keep it equal to the ReSTIR bounce limit when comparing the two renderers.");
 
-  // Denoiser controls only appear when the resolve mode uses the denoiser.
-  if(IsDenoiseResolveMode(settings.resolveMode))
+  // Denoiser controls only appear for the denoiser the resolve mode uses.
+  if(IsNrdResolveMode(settings.resolveMode))
   {
     changed |= DrawDenoiserDebugViewControl(settings.denoiserDebugView);
     changed |= DrawDenoiserSettingsSection("Denoiser Settings", settings.denoiserSettings);
+  }
+
+  if(IsRayReconstructionResolveMode(settings.resolveMode))
+  {
+    changed |= DrawRayReconstructionSettingsSection("Ray Reconstruction Settings", settings.rayReconstructionSettings);
   }
 
   DrawResolveStatus(settings.resolveMode, pathTracer.GetAccumulatedFrameCount());
@@ -87,7 +92,7 @@ bool DrawReSTIRPTControls(ReSTIRPTRenderer& restirPT)
   // Sections
   // The order follows the paper: sampling, shift, resampling, decorrelation, shading, NEE. The spatial radius cap matches what the shaders were written against.
 
-  bool changed = DrawReSTIRPTCommonControls(settings.common);
+  bool changed = DrawReSTIRPTCommonControls(settings.common, restirPT.IsRayReconstructionAvailable(), restirPT.GetRayReconstructionUnavailableReason());
 
   changed |= DrawReSTIRPTInitialSamplingSection(settings.initialSampling, restirPT.GetBounceLimit());
   changed |= DrawReSTIRPTShiftSection(settings.shift);
@@ -96,11 +101,16 @@ bool DrawReSTIRPTControls(ReSTIRPTRenderer& restirPT)
   changed |= DrawReSTIRPTShadingSection(settings.shading);
   changed |= DrawReSTIRPTNeeSection(settings.nee);
 
-  // Denoiser controls only appear when the resolve mode uses the denoiser. The label suffix keeps the tree node distinct from the reference path tracer's.
-  if(IsDenoiseResolveMode(settings.common.resolveMode))
+  // Denoiser controls only appear for the denoiser the resolve mode uses. The label suffixes keep the tree nodes distinct from the reference path tracer's.
+  if(IsNrdResolveMode(settings.common.resolveMode))
   {
     changed |= DrawDenoiserDebugViewControl(settings.common.denoiserDebugView);
     changed |= DrawDenoiserSettingsSection("Denoiser Settings##ReSTIR", settings.common.denoiserSettings);
+  }
+
+  if(IsRayReconstructionResolveMode(settings.common.resolveMode))
+  {
+    changed |= DrawRayReconstructionSettingsSection("Ray Reconstruction Settings##ReSTIR", settings.common.rayReconstructionSettings);
   }
 
   return changed;

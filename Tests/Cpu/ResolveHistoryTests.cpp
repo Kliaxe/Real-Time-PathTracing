@@ -139,7 +139,7 @@ bool TestCameraChangeRestartsOnlyWhileAccumulating()
   // Off and denoise modes
   // One warm-up frame first: the very first frame after construction restarts in every mode, because history starts out invalidated.
 
-  for(const RenderResolveMode resolveMode : { RenderResolveMode::eOff, RenderResolveMode::eDenoise })
+  for(const RenderResolveMode resolveMode : { RenderResolveMode::eOff, RenderResolveMode::eDenoiseNrd })
   {
     ResolveHistoryTracker tracker;
 
@@ -213,7 +213,7 @@ bool TestInvalidateHistoryRestartsBothOnce()
 
   ResolveHistoryTracker denoiseTracker;
 
-  const ResolveHistoryTracker::FrameInput denoiseInput = MakeInput(sceneInfo, RenderResolveMode::eDenoise);
+  const ResolveHistoryTracker::FrameInput denoiseInput = MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd);
 
   RunFrame(denoiseTracker, denoiseInput);
 
@@ -240,11 +240,11 @@ bool TestSkippedDenoiseDropsNrdHistory()
 
   const shaderio::GltfSceneInfo sceneInfo = MakeSceneInfo();
 
-  RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoise));
+  RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd));
 
-  const FrameRecord denoised = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoise));
+  const FrameRecord denoised = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd));
   const FrameRecord skipped  = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eOff));
-  const FrameRecord resumed  = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoise));
+  const FrameRecord resumed  = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd));
 
   passed &= Expect(denoised.state.denoiseEnabled && !denoised.finish.dropDenoiserHistory, "a denoise frame must keep NRD history");
   passed &= Expect(!skipped.state.denoiseEnabled && skipped.finish.dropDenoiserHistory, "a frame that does not denoise must drop NRD history");
@@ -262,14 +262,14 @@ bool TestUnavailableSignalsDisableDenoise()
 
   const shaderio::GltfSceneInfo sceneInfo = MakeSceneInfo();
 
-  RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoise));
+  RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd));
 
-  ResolveHistoryTracker::FrameInput unavailableInput = MakeInput(sceneInfo, RenderResolveMode::eDenoise);
+  ResolveHistoryTracker::FrameInput unavailableInput = MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd);
 
   unavailableInput.denoiserSignalsAvailable = false;
 
   const FrameRecord unavailable = RunFrame(tracker, unavailableInput);
-  const FrameRecord available   = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoise));
+  const FrameRecord available   = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd));
 
   passed &= Expect(!unavailable.state.denoiseEnabled, "unavailable denoiser signals must disable denoising in denoise mode");
   passed &= Expect(unavailable.finish.dropDenoiserHistory, "unavailable denoiser signals must drop NRD history");
@@ -287,21 +287,45 @@ bool TestDenoiserHistoryIgnoresCamera()
 
   shaderio::GltfSceneInfo sceneInfo = MakeSceneInfo();
 
-  RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoise));
-  RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoise));
+  RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd));
+  RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd));
 
   MoveCamera(sceneInfo, 0.5f);
 
-  const FrameRecord cameraMove = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoise));
+  const FrameRecord cameraMove = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd));
 
   sceneInfo.backgroundColor = glm::vec3(0.9f, 0.8f, 0.7f);
 
-  const FrameRecord environmentChange = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoise));
-  const FrameRecord unchanged         = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoise));
+  const FrameRecord environmentChange = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd));
+  const FrameRecord unchanged         = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd));
 
   passed &= Expect(!cameraMove.state.denoiserHistoryInvalidated, "a pure camera move must keep NRD history");
   passed &= Expect(environmentChange.state.denoiserHistoryInvalidated, "a denoiser signature change with the camera still must restart NRD history");
   passed &= Expect(!unchanged.state.denoiserHistoryInvalidated, "NRD history must continue once the environment is stable again");
+
+  return passed;
+}
+
+// NRD and Ray Reconstruction keep separate histories, so handing the output from one denoiser to the other must restart denoiser history, and staying on one must not.
+bool TestDenoiserSwitchRestartsHistory()
+{
+  bool passed = true;
+
+  ResolveHistoryTracker tracker;
+
+  const shaderio::GltfSceneInfo sceneInfo = MakeSceneInfo();
+
+  RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd));
+
+  const FrameRecord nrdContinues    = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd));
+  const FrameRecord switchToRr      = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseRayReconstruction));
+  const FrameRecord rrContinues     = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseRayReconstruction));
+  const FrameRecord switchBackToNrd = RunFrame(tracker, MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd));
+
+  passed &= Expect(!nrdContinues.state.denoiserHistoryInvalidated, "consecutive NRD frames must keep denoiser history");
+  passed &= Expect(switchToRr.state.denoiseEnabled && switchToRr.state.denoiserHistoryInvalidated, "switching to Ray Reconstruction must restart denoiser history");
+  passed &= Expect(!rrContinues.state.denoiserHistoryInvalidated, "consecutive Ray Reconstruction frames must keep denoiser history");
+  passed &= Expect(switchBackToNrd.state.denoiserHistoryInvalidated, "switching back to NRD must restart denoiser history");
 
   return passed;
 }
@@ -318,7 +342,7 @@ bool TestSignaturePaddingIsDeterministic()
 
   shaderio::GltfSceneInfo sceneInfo = MakeSceneInfo();
 
-  const ResolveHistoryTracker::FrameInput input = MakeInput(sceneInfo, RenderResolveMode::eDenoise);
+  const ResolveHistoryTracker::FrameInput input = MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd);
 
   // Signature construction
   // The prvalue each Make function returns initializes the object in the pre-filled storage directly, so its bytes are exactly what construction wrote.
@@ -364,7 +388,7 @@ bool TestSignaturePaddingIsDeterministic()
 
   MoveCamera(sceneInfo, 0.5f);
 
-  const ResolveHistoryTracker::FrameInput movedInput = MakeInput(sceneInfo, RenderResolveMode::eDenoise);
+  const ResolveHistoryTracker::FrameInput movedInput = MakeInput(sceneInfo, RenderResolveMode::eDenoiseNrd);
 
   passed &= Expect(!ResolveHistoryTracker::SignaturesMatch(*accumulationFromZeros, ResolveHistoryTracker::MakeAccumulationSignature(movedInput)), "a camera move must change the accumulation signature");
   passed &= Expect(ResolveHistoryTracker::SignaturesMatch(*denoiserFromZeros, ResolveHistoryTracker::MakeDenoiserSignature(movedInput)), "a camera move must not change the denoiser signature");
@@ -387,6 +411,7 @@ int main()
   passed &= TestSkippedDenoiseDropsNrdHistory();
   passed &= TestUnavailableSignalsDisableDenoise();
   passed &= TestDenoiserHistoryIgnoresCamera();
+  passed &= TestDenoiserSwitchRestartsHistory();
   passed &= TestSignaturePaddingIsDeterministic();
 
   return passed ? 0 : 1;

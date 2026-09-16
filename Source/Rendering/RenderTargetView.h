@@ -23,6 +23,9 @@ struct RenderTargetView
   // Image size in pixels.
   VkExtent2D  extent {};
 
+  // Usage flags the image was created with. Libraries that bind the image themselves, such as Streamline, need them to validate the binding.
+  VkImageUsageFlags usage = 0;
+
   // Usable only when every handle is set and the extent is non-empty.
   [[nodiscard]] explicit operator bool() const noexcept
   {

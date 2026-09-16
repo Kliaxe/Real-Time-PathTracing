@@ -17,7 +17,7 @@ from typing import Any
 
 RENDERERS = {"raster", "path-tracer", "restir-pt"}
 # Command-line spellings mapped to the RenderResolveMode value the renderer records as resolve_mode.
-RESOLVE_MODES = {"off": 0, "accumulate": 1, "denoise": 2}
+RESOLVE_MODES = {"off": 0, "accumulate": 1, "denoise": 2, "denoise-rr": 3}
 
 
 def parse_args() -> argparse.Namespace:

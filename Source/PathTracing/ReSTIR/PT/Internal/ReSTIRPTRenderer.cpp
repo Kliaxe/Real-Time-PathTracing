@@ -125,7 +125,7 @@ ReSTIRPTRenderer::ReSTIRPTRenderer(const CreateInfo& createInfo)
     , m_FrameSlotCount(createInfo.frameSlotCount)
     , m_MaxTextureDescriptors(createInfo.maxTextureDescriptors)
     , m_Resources(ReSTIRPTResources::CreateInfo { .resources = createInfo.resources, .diagnostics = createInfo.diagnostics })
-    , m_History(ResolveHistory::CreateInfo { .device = createInfo.device, .resources = createInfo.resources, .diagnostics = createInfo.diagnostics, .frameSlotCount = createInfo.frameSlotCount })
+    , m_History(ResolveHistory::CreateInfo { .device = createInfo.device, .resources = createInfo.resources, .diagnostics = createInfo.diagnostics, .frameSlotCount = createInfo.frameSlotCount, .streamline = createInfo.streamline })
 {
 }
 
@@ -252,6 +252,16 @@ void ReSTIRPTRenderer::InvalidateHistory()
   m_ParameterContext.reset();
 }
 
+bool ReSTIRPTRenderer::IsRayReconstructionAvailable() const
+{
+  return m_History.IsRayReconstructionAvailable();
+}
+
+const std::string& ReSTIRPTRenderer::GetRayReconstructionUnavailableReason() const
+{
+  return m_History.GetRayReconstructionUnavailableReason();
+}
+
 rtpt::DescriptorPack& ReSTIRPTRenderer::GetDescriptorPack()
 {
   return m_DescPack;
@@ -295,15 +305,27 @@ void ReSTIRPTRenderer::Render(const RenderInput& input)
 
   // Passes
   // The frame index only advances in FinishFrame, after the passes that used it are recorded.
-  // NRD reads the accumulation image as its noisy beauty input and composes into the output target.
+  // The denoiser reads the accumulation image as its noisy beauty input and writes the output target.
 
   RecordPasses(input, BuildPushConstant(input, frameState));
 
-  // Only a frame that denoises runs NRD, so only that frame opens the denoiser scope.
+  // Only a frame that denoises runs a denoiser, so only that frame opens the denoiser scope.
   {
     const GpuProfiler::Zone denoiserZone(frameState.denoiseEnabled ? input.profiler : nullptr, input.cmd, FrameSlot { input.frameSlot }, "ReSTIR PT/Denoiser");
 
-    m_History.Denoise(input.cmd, frameState, m_Resources.GetAccumulationImage().descriptor.imageView, input.output.view, m_Settings.common.denoiserDebugView);
+    const ResolveHistory::DenoiseInput denoiseInput {
+        .cmd                       = input.cmd,
+        .beautyImage               = &m_Resources.GetAccumulationImage(),
+        .output                    = input.output,
+        .debugView                 = m_Settings.common.denoiserDebugView,
+        .sceneInfo                 = input.sceneInfo,
+        .sceneInfoAddress          = input.sceneResource->bSceneInfo.address,
+        .rayReconstructionSettings = &m_Settings.common.rayReconstructionSettings,
+        .greyLuminance             = input.denoiserGreyLuminance,
+        .frameSlot                 = input.frameSlot,
+    };
+
+    m_History.Denoise(frameState, denoiseInput);
   }
 
   FinishFrame(frameState);
@@ -455,6 +477,11 @@ shaderio::ReSTIRPTPushConstant ReSTIRPTRenderer::BuildPushConstant(const RenderI
   if(frameState.denoiseEnabled)
   {
     flags |= shaderio::eReSTIRPTFlagWriteDenoiserSignals;
+  }
+
+  if(frameState.denoiseEnabled && IsRayReconstructionResolveMode(frameState.resolveMode))
+  {
+    flags |= shaderio::eReSTIRPTFlagRawSpecularHitDistance;
   }
 
   if(frameState.accumulateEnabled)
