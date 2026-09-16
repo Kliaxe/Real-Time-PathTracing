@@ -9,6 +9,7 @@
 #include "PathTracing/Common/ResolveMode.h"
 #include "DenoiserResources.h"
 #include "NrdComposePass.h"
+#include "NrdDisocclusionMixPass.h"
 #include "Framework/Vulkan/Diagnostics.h"
 #include "Framework/Vulkan/GpuResources.h"
 #include "Shaders/ShaderIo.h"
@@ -191,6 +192,13 @@ private:
   // Latched from FrameInput; forwarded to the compose pass, which pushes it to its shader.
   bool                     m_EnableMaterialDemodulation = false;
 
+  // Latched from DenoiserSettings by ApplyDenoiserSettings, because CommonSettings is rebuilt from scratch every frame.
+  float                    m_DisocclusionThreshold          = 0.0f;
+  float                    m_DisocclusionThresholdAlternate = 0.0f;
+
+  // Whether NRD is told IN_DISOCCLUSION_THRESHOLD_MIX exists, and so whether Denoise writes it.
+  bool                     m_EnableDisocclusionThresholdMix = false;
+
   // Immutable sampler for nrd::Sampler::NEAREST_CLAMP.
   VkSampler m_NearestSampler = VK_NULL_HANDLE;
 
@@ -211,6 +219,9 @@ private:
 
   // Resolves the denoised outputs into the renderer's target after DispatchNrd; created and destroyed with the rest of the Vulkan state.
   NrdComposePass          m_ComposePass;
+
+  // Writes IN_DISOCCLUSION_THRESHOLD_MIX before DispatchNrd while the mix is enabled; created and destroyed with the rest of the Vulkan state.
+  NrdDisocclusionMixPass  m_DisocclusionMixPass;
 
   // One entry per frame slot.
   std::vector<FrameResources> m_FrameResources;

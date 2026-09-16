@@ -178,7 +178,7 @@ void UpdatePTReconnectionSearch(inout PathState path, SurfaceData surface, PathH
     }
     else
     {
-      qualifies = PassesLegacyReconnectionCriteria(path.ptRcSearch.prevRoughness, surface.roughness, connectionDistance, ptParams.shift.minRoughness, ptParams.shift.legacyMinDistance);
+      qualifies = PassesLegacyReconnectionCriteria(path.ptRcSearch.prevRoughness, SurfaceBsdfGroupRoughness(surface, sampledLobeKind), connectionDistance, ptParams.shift.minRoughness, ptParams.shift.legacyMinDistance);
     }
 
     if(qualifies)
@@ -213,7 +213,8 @@ void UpdatePTReconnectionSearch(inout PathState path, SurfaceData surface, PathH
   // Predecessor state
   // Tracked for the next vertex, which needs this vertex's criteria input and the density/lobe of the event leaving it. The shared state already carries the predecessor position, but none of the rest.
 
-  path.ptRcSearch.prevRoughness       = surface.roughness;
+  // Section 7.5's lobe-specific connectability: the roughness that matters at this vertex is the one of the group that sampled the path's way out of it, not the material's aggregate.
+  path.ptRcSearch.prevRoughness       = SurfaceBsdfGroupRoughness(surface, sampledLobeKind);
   path.ptRcSearch.prevLobeKind        = sampledLobeKind;
   path.ptRcSearch.prevGeometricNormal = surface.geometricNormal;
   path.ptRcSearch.prevSamplePdf       = vertexSamplePdf;

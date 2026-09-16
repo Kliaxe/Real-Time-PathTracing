@@ -62,6 +62,8 @@ target_sources(RealTimePathTracing PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/Denoising/NrdComposePass.h"
     "${CMAKE_CURRENT_LIST_DIR}/Denoising/NrdDenoiser.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/Denoising/NrdDenoiser.h"
+    "${CMAKE_CURRENT_LIST_DIR}/Denoising/NrdDisocclusionMixPass.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/Denoising/NrdDisocclusionMixPass.h"
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/Common/ResolveHistory.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/Common/ResolveHistory.h"
     "${CMAKE_CURRENT_LIST_DIR}/PathTracing/Common/ResolveHistoryTracker.cpp"
@@ -146,6 +148,23 @@ rtpt_compile_hlsl(
     ENTRY   main
     PROFILE cs_6_6
     SYMBOL  NrdCompose_hlsl
+    INCLUDE_DIRS
+        "${CMAKE_CURRENT_LIST_DIR}"
+        "${CMAKE_CURRENT_LIST_DIR}/Shaders"
+        "${CMAKE_CURRENT_LIST_DIR}/ShaderIncludes"
+        "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders"
+        "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders/Include"
+    DEPENDS
+        "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders/NRD.hlsli"
+        "${REAL_TIME_PATH_TRACING_NRD_SOURCE_DIR}/Shaders/Include/NRDConfig.hlsli"
+)
+
+rtpt_compile_hlsl(
+    TARGET  RealTimePathTracing
+    SOURCE  "${CMAKE_CURRENT_LIST_DIR}/Shaders/NrdDisocclusionMix.hlsl"
+    ENTRY   main
+    PROFILE cs_6_6
+    SYMBOL  NrdDisocclusionMix_hlsl
     INCLUDE_DIRS
         "${CMAKE_CURRENT_LIST_DIR}"
         "${CMAKE_CURRENT_LIST_DIR}/Shaders"

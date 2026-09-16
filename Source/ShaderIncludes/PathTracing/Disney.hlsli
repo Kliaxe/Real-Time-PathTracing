@@ -744,6 +744,25 @@ float3 EvaluateSurfaceBsdfGroup(SurfaceData surface, float3 viewDir, float3 ligh
   return contribution;
 }
 
+// Roughness of one proposal group, which is what a reconnection criterion has to test.
+// ReSTIR PT Section 7.5 makes this the whole point of separating lobes: a material's groups can be far apart - a smooth clearcoat over a rough base is the standard example - so judging a reconnection by the material's single roughness value mistreats whichever group was not the one sampled.
+// The broad group reports fully rough. It is sampled from a cosine hemisphere, so its density cannot concentrate when the incoming direction is redirected, which is exactly the property the threshold is asking about.
+float SurfaceBsdfGroupRoughness(SurfaceData surface, uint lobeKind)
+{
+  // Lobe kinds match EvaluateSurfaceBsdfGroup: 0 broad, 1 glossy reflection, 2 glass, anything else clearcoat.
+  if(lobeKind == 0u)
+  {
+    return 1.0;
+  }
+
+  if(lobeKind == 1u || lobeKind == 2u)
+  {
+    return surface.roughness;
+  }
+
+  return surface.clearcoatRoughness;
+}
+
 // Explicit direct lighting estimates only the broad cosine-proposal BSDF group. Glossy / transmission groups are owned by continuation rays.
 float3 EvaluateDirectLightBsdf(SurfaceData surface, float3 viewDir, float3 lightDir, out float pdf)
 {

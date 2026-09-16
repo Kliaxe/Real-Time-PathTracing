@@ -8,6 +8,7 @@
 #include "ShaderIncludes/Camera.hlsli"
 #include "ShaderIo.h"
 #include "NRD.hlsli"
+#include "ShaderIncludes/DenoiserInputs.hlsli"
 #include "ShaderIncludes/PathTracing/Globals.hlsli"
 
 #include "ShaderIncludes/PathTracing/Common.hlsli"
@@ -123,8 +124,12 @@ void WriteDenoiserNoisySignals(uint2 pixelPosition, PathState path)
 
   specularDemodulationFactorImage[imagePosition] = float4(specularDemodulationFactor, 1.0);
 
-  diffuseRadianceHitDistanceImage[imagePosition]  = PackReblurRadianceHitDistance(max(path.diffuseDenoiserRadiance, (float3)0.0) / diffuseDemodulationFactor, diffuseHitDistance, primaryViewZ, path.primaryRoughness, true);
-  specularRadianceHitDistanceImage[imagePosition] = PackReblurRadianceHitDistance(max(path.specularDenoiserRadiance, (float3)0.0) / specularDemodulationFactor, specularHitDistance, primaryViewZ, path.primaryRoughness, false);
+  // Demodulated, then clamped, in RTXPT's order: the clamp limits what NRD accumulates, so it acts on the signal NRD actually sees.
+  const float3 diffuseRadiance  = ClampDenoiserRadiance(max(path.diffuseDenoiserRadiance, (float3)0.0) / diffuseDemodulationFactor, pushConst.denoiserRadianceClamp);
+  const float3 specularRadiance = ClampDenoiserRadiance(max(path.specularDenoiserRadiance, (float3)0.0) / specularDemodulationFactor, pushConst.denoiserRadianceClamp);
+
+  diffuseRadianceHitDistanceImage[imagePosition]  = PackReblurRadianceHitDistance(diffuseRadiance, diffuseHitDistance, primaryViewZ, path.primaryRoughness, true);
+  specularRadianceHitDistanceImage[imagePosition] = PackReblurRadianceHitDistance(specularRadiance, specularHitDistance, primaryViewZ, path.primaryRoughness, false);
 }
 
 [shader("raygeneration")]

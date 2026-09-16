@@ -78,7 +78,8 @@ struct ReSTIRPTReconnectionSearch
   // Throughput of the path *after* the BSDF sample at the reconnection vertex. Dividing a candidate's integrand by this recovers the radiance arriving from the suffix, which is the quantity the shift actually reuses.
   float3 suffixThroughput;
 
-  // Roughness at the preceding vertex, kept so the criteria can be evaluated against a pair of surfaces rather than a single one.
+  // Roughness of the proposal group that sampled the path out of the preceding vertex, kept so the criteria can be evaluated against a pair of surfaces rather than a single one.
+  // The group's roughness rather than the material's, per Section 7.5: a composite material has no single roughness, and the threshold is asking about the lobe the path actually took.
   float prevRoughness;
 
   // Proposal group sampled at the preceding vertex, captured as the path leaves it. Equation 2's base denominator needs the density and lobe of the event that produced the connection segment, and neither is recoverable once the path has moved on.

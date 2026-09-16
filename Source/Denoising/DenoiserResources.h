@@ -57,6 +57,9 @@ public:
   const rtpt::Image& GetSpecularDemodulationFactorImage() const;
   rtpt::Image&       GetSpecularDemodulationFactorImage();
 
+  const rtpt::Image& GetDisocclusionThresholdMixImage() const;
+  rtpt::Image&       GetDisocclusionThresholdMixImage();
+
 private:
 
   void CreateOrResizeViewportResources(VkExtent2D viewportSize);
@@ -94,6 +97,9 @@ private:
 
   // Per-pixel specular factor the shaders divided out, kept so the compose pass can multiply it back in.
   rtpt::Image              m_SpecularDemodulationFactorImage;
+
+  // IN_DISOCCLUSION_THRESHOLD_MIX: how far each pixel's disocclusion threshold moves toward the alternate. Unlike the images above it is not written by the renderer but by NrdDisocclusionMixPass, from the guides.
+  rtpt::Image              m_DisocclusionThresholdMixImage;
 };
 
 }  // namespace rtpt

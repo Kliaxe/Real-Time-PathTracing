@@ -105,6 +105,15 @@ inline bool DrawDenoiserSettingsSection(const char* treeLabel, DenoiserSettings&
   changed |= ImGui::SliderFloat("Disocclusion Threshold", &settings.disocclusionThreshold, 0.001f, 0.20f, "%.3f");
   DrawTooltip("How far reprojected depth may disagree before history is thrown away, as a fraction of view depth. Too low re-noises every silhouette; too high drags stale lighting across edges as a ghost.");
 
+  changed |= ImGui::Checkbox("Disocclusion Threshold Mix", &settings.enableDisocclusionThresholdMix);
+  DrawTooltip("Loosens the threshold above, per pixel, toward the alternate below wherever surface normals change quickly between neighbouring pixels - creases, curved silhouettes, edges against the background. Depth disagrees there for reasons other than a real disocclusion, so the strict threshold discards history it should keep.\n\nRTXPT's approach. It only applies it to surfaces seen through mirrors and glass; this renderer applies it to every surface.");
+
+  ImGui::BeginDisabled(!settings.enableDisocclusionThresholdMix);
+  changed |= ImGui::SliderFloat("Alternate Disocclusion Threshold", &settings.disocclusionThresholdAlternate, 0.001f, 0.50f, "%.3f");
+  ImGui::EndDisabled();
+
+  DrawTooltip("The threshold a fully relaxed pixel uses. Higher keeps history at edges through camera motion and ghosts more there.");
+
   changed |= ImGui::SliderFloat("Max Blur Radius", &settings.maxBlurRadius, 0.0f, 60.0f, "%.1f");
   DrawTooltip("Upper bound on the spatial filter, in pixels. It is what a pixel with almost no history falls back on, so it sets how smeared a disoccluded region looks.");
 
@@ -138,6 +147,9 @@ inline bool DrawDenoiserSettingsSection(const char* treeLabel, DenoiserSettings&
   }
 
   DrawTooltip("Clamps isolated bright pixels before they are accumulated. A single unlucky sample can otherwise smear into a bright blob that survives for the whole history length.");
+
+  changed |= ImGui::SliderFloat("Radiance Clamp K", &settings.radianceClampK, 0.0f, 32.0f, "%.1f");
+  DrawTooltip("Caps the brightness of the noisy signal before NRD sees it, at K x 16 times the luminance the tonemapper shows as middle grey, and never above 255. Unlike Anti-Firefly, which judges a pixel against its neighbours, this is an absolute ceiling, so it also catches fireflies that land in clusters.\n\nIt removes energy, so very bright highlights darken slightly. It follows exposure: lowering exposure raises the cap. 0 disables it; RTXPT uses 8.");
 
   ImGui::TreePop();
   return changed;

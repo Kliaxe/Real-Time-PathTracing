@@ -139,6 +139,26 @@ void ApplyReplayRouletteDensity(inout float3 throughput, uint resultingDepth)
   throughput /= continueProbability;
 }
 
+// Whether the offset path would itself have chosen this pair as its reconnection vertex, evaluated with the same criteria initial sampling used on the base path.
+// ReSTIR PT Section 7.4 requires this: the base path selects the FIRST vertex that qualifies, so a shift is only invertible if the offset path agrees on which vertex that is. "When building y, if we find it disagrees on the earliest possible reconnection vertex, the shift must return undefined as it would not be invertible."
+// The criteria are evaluated entirely in the destination domain - its primary hit sets the footprint scale - because that is the path whose reconnection choice is in question.
+bool OffsetPathQualifiesForReconnection(SurfaceData previousSurface, uint previousLobeKind, float previousSamplePdf, SurfaceData vertexSurface, uint vertexLobeKind, float vertexSamplePdf, SurfaceData destinationSurface)
+{
+  const GltfSceneInfo sceneInfo          = pushConst.sceneInfoAddress.Get();
+  const float         previousRoughness  = SurfaceBsdfGroupRoughness(previousSurface, previousLobeKind);
+
+  if(ptParams.shift.reconnectionCriteria != RESTIR_PT_RECONNECTION_CRITERIA_FOOTPRINT)
+  {
+    const float connectionDistance = length(vertexSurface.worldPosition - previousSurface.worldPosition);
+
+    return PassesLegacyReconnectionCriteria(previousRoughness, SurfaceBsdfGroupRoughness(vertexSurface, vertexLobeKind), connectionDistance, ptParams.shift.minRoughness, ptParams.shift.legacyMinDistance);
+  }
+
+  const bool skipInverseFootprint = (vertexLobeKind == 0u) || SafeMax3(vertexSurface.emission) > 0.0;
+
+  return previousRoughness >= ptParams.shift.minRoughness && PassesFootprintReconnectionCriteria(previousSamplePdf, vertexSamplePdf, previousSurface.worldPosition, previousSurface.geometricNormal, vertexSurface.worldPosition, vertexSurface.geometricNormal, destinationSurface.worldPosition, destinationSurface.geometricNormal, sceneInfo.cameraPosition, ptParams.shift.footprintThreshold, skipInverseFootprint);
+}
+
 // Shifts a path that carries no reconnection anchor, by replaying it to its end.
 // A path only reaches here when no vertex qualified for reconnection: in practice the short ones, where the contribution happens at or just past the primary hit and there is no interior vertex to anchor on. Without this they cannot be reused at all, which is why they dominate the remaining shift failures.
 // The mapping is the identity in primary sample space: every vertex is regenerated from the same per-vertex random stream the base path drew from, so no coordinate is remapped and the Jacobian is exactly 1. What differs is the surfaces those coordinates land on, which is precisely the reuse being performed.
@@ -381,6 +401,10 @@ PTShiftResult ShiftPathToSurface(ReSTIRPTReservoir reservoir, SurfaceData destin
 
   const uint reconnectionLength = (reservoir.pathFlags & RESTIR_PT_PATH_FLAGS_RC_LENGTH_MASK) >> RESTIR_PT_PATH_FLAGS_RC_LENGTH_SHIFT;
 
+  // An NEE endpoint's anchor is forced to the light vertex (Section 6.2.3) in preference to any interior vertex that qualified, so the criteria never chose it and both domains reach the same anchor by the same rule.
+  // The agreement tests below therefore do not apply to these paths: refusing one because the replayed prefix happens to qualify somewhere would reject a shift that is already a bijection.
+  const bool isNeeEndpoint = (reservoir.pathFlags & RESTIR_PT_PATH_FLAGS_NEE_ENDPOINT) != 0u;
+
   // Prefix walk
   // Vertex 0 is the destination primary hit, which the caller already has; each iteration regenerates one more vertex toward the reconnection vertex's predecessor.
   // Russian roulette is never sampled here (Section 6.2.4): killing a path the base path survived would fail the shift for reasons unrelated to the surfaces involved. Only its density is applied, by ApplyReplayRouletteDensity.
@@ -388,6 +412,14 @@ PTShiftResult ShiftPathToSurface(ReSTIRPTReservoir reservoir, SurfaceData destin
   SurfaceData currentSurface = destinationSurface;
   float3      currentViewDir = destinationViewDir;
   float3      throughput     = (float3)1.0;
+
+  // Predecessor state
+  // Carried for the same reason initial sampling carries it: the reconnection criteria compare a pair of vertices, and the pair is only complete once the second one has been sampled.
+
+  SurfaceData previousSurface   = destinationSurface;
+  uint        previousLobeKind  = 0u;
+  float       previousSamplePdf = 0.0;
+  bool        hasPredecessor    = false;
 
   for(uint vertexDepth = 0; vertexDepth + 1 < reconnectionLength; ++vertexDepth)
   {
@@ -411,6 +443,23 @@ PTShiftResult ShiftPathToSurface(ReSTIRPTReservoir reservoir, SurfaceData destin
     }
 
     ApplyReplayRouletteDensity(throughput, vertexDepth + 1u);
+
+    // Reconnection agreement
+    // The base path anchored on the first vertex that satisfied the criteria. If the replayed path satisfies them earlier, its own anchor would be a different vertex, so this shift is not the inverse of anything and Section 7.4 requires refusing it rather than evaluating it.
+
+    float vertexSamplePdf = 0.0;
+
+    EvaluateSurfaceBsdfGroup(currentSurface, currentViewDir, bounceDir, sampledLobeKind, vertexSamplePdf);
+
+    if(!isNeeEndpoint && hasPredecessor && OffsetPathQualifiesForReconnection(previousSurface, previousLobeKind, previousSamplePdf, currentSurface, sampledLobeKind, vertexSamplePdf, destinationSurface))
+    {
+      return FailedPTShift(uint(ReSTIRPTShiftOutcome::eReSTIRPTShiftOutcomeReconnectionDisagreement));
+    }
+
+    previousSurface   = currentSurface;
+    previousLobeKind  = sampledLobeKind;
+    previousSamplePdf = vertexSamplePdf;
+    hasPredecessor    = true;
 
     const float3        originNormal = SelectOffsetNormal(currentSurface.geometricNormal, bounceDir);
     const PTVertexQuery next         = TracePTVertex(OffsetRay(currentSurface.worldPosition, originNormal), bounceDir);
@@ -561,12 +610,24 @@ PTShiftResult ShiftPathToSurface(ReSTIRPTReservoir reservoir, SurfaceData destin
     return FailedPTShift(uint(ReSTIRPTShiftOutcome::eReSTIRPTShiftOutcomePrevLobeUnsupported));
   }
 
+  // The last prefix vertex is a candidate like every other, and it is only testable here: the direction leaving it in this domain is the connection itself, which did not exist while the prefix was being walked.
+  if(hasPredecessor && OffsetPathQualifiesForReconnection(previousSurface, previousLobeKind, previousSamplePdf, currentSurface, prevLobeKind, prefixPdf, destinationSurface))
+  {
+    return FailedPTShift(uint(ReSTIRPTShiftOutcome::eReSTIRPTShiftOutcomeReconnectionDisagreement));
+  }
+
   float        rcPdf  = 0.0;
   const float3 rcBsdf = EvaluateSurfaceBsdfGroup(rcQuery.surface, -connectionDir, reservoir.rcVertexWi, rcLobeKind, rcPdf);
 
   if(!(rcPdf > 0.0) || SafeMax3(rcBsdf) <= 0.0)
   {
     return FailedPTShift(uint(ReSTIRPTShiftOutcome::eReSTIRPTShiftOutcomeRcLobeUnsupported));
+  }
+
+  // The other half of the agreement: having qualified nowhere earlier, the offset path must qualify HERE, or it would have postponed its reconnection past this vertex and disagreed with the base path again.
+  if(!OffsetPathQualifiesForReconnection(currentSurface, prevLobeKind, prefixPdf, rcQuery.surface, rcLobeKind, rcPdf, destinationSurface))
+  {
+    return FailedPTShift(uint(ReSTIRPTShiftOutcome::eReSTIRPTShiftOutcomeReconnectionDisagreement));
   }
 
   // Throughput through the connection

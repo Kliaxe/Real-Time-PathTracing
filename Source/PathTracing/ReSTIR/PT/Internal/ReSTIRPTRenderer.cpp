@@ -482,6 +482,7 @@ shaderio::ReSTIRPTPushConstant ReSTIRPTRenderer::BuildPushConstant(const RenderI
       .maxBounces              = m_Settings.initialSampling.maxBounces,
       .flags                   = flags,
       .reblurHitDistanceParams = { m_Settings.common.denoiserSettings.hitDistanceA, m_Settings.common.denoiserSettings.hitDistanceB, m_Settings.common.denoiserSettings.hitDistanceC },
+      .denoiserRadianceClamp   = ComputeDenoiserRadianceClamp(m_Settings.common.denoiserSettings, input.denoiserGreyLuminance),
   };
 }
 

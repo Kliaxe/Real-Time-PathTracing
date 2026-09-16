@@ -68,6 +68,8 @@ public:
     uint32_t                            frameSlot = 0;
     // Time since the previous frame in milliseconds, handed to NRD. Zero lets NRD measure real frame time itself.
     float                               frameTimeMilliseconds = 0.0f;
+    // Scene luminance the tonemapper maps to middle grey. The radiance clamp before NRD is a multiple of it.
+    float                               denoiserGreyLuminance = 1.0f;
     // Optional. Receives a timestamp scope around the trace and around NRD; null records no timing.
     rtpt::GpuProfiler*                  profiler = nullptr;
   };

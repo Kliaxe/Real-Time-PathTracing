@@ -5,6 +5,7 @@
 
 #include <Common/ShaderTypes.h>
 #include "NRD.hlsli"
+#include "ShaderIncludes/DenoiserInputs.hlsli"
 #include "ShaderIo.h"
 #include "ShaderIncludes/ReSTIR/PTGlobals.hlsli"
 #include "ShaderIncludes/ReSTIR/Common.hlsli"
@@ -99,8 +100,9 @@ void WriteDenoiserSignals(int2 pixel, ReSTIRPTSurface surface, float3 radiance, 
   const float specularShare  = denoiserGuide.z >= 0.0 ? denoiserGuide.z : materialShare;
 
   const float3 clampedRadiance  = max(radiance, (float3)0.0);
-  const float3 diffuseRadiance  = clampedRadiance * (1.0 - specularShare) / diffuseFactor;
-  const float3 specularRadiance = clampedRadiance * specularShare / specularFactor;
+  // Demodulated, then clamped, in RTXPT's order: the clamp limits what NRD accumulates, so it acts on the signal NRD actually sees.
+  const float3 diffuseRadiance  = ClampDenoiserRadiance(clampedRadiance * (1.0 - specularShare) / diffuseFactor, pushConst.denoiserRadianceClamp);
+  const float3 specularRadiance = ClampDenoiserRadiance(clampedRadiance * specularShare / specularFactor, pushConst.denoiserRadianceClamp);
 
   // Hit distances
   // Zeros are passed through as zeros. NRD reserves a zero normalized hit distance for "this lobe was not sampled here" and reconstructs it from neighbours, but REBLUR_FrontEnd_GetNormHitDist clamps its result away from zero (it assumes the lobe WAS sampled), so the skipped case has to bypass it rather than be fed through it.

@@ -85,6 +85,9 @@ struct PathTracePushConstant
 
   // REBLUR hit distance normalization (A, B, C). Supplied by the renderer from DenoiserSettings so the shader and nrd::ReblurSettings cannot disagree.
   float3         reblurHitDistanceParams;
+
+  // Luminance cap on demodulated radiance before it is written for NRD; zero disables it. See ComputeDenoiserRadianceClamp.
+  float          denoiserRadianceClamp;
 };
 
 // ReSTIRPTParameters
@@ -223,6 +226,9 @@ struct ReSTIRPTPushConstant
 
   // REBLUR hit distance normalization (A, B, C). Supplied by the renderer from DenoiserSettings so the shader and nrd::ReblurSettings cannot disagree.
   float3         reblurHitDistanceParams;
+
+  // Luminance cap on demodulated radiance before it is written for NRD; zero disables it. See ComputeDenoiserRadianceClamp.
+  float          denoiserRadianceClamp;
 };
 
 // ReSTIRPTShiftOutcome
@@ -239,14 +245,15 @@ enum ReSTIRPTShiftOutcome
   eReSTIRPTShiftOutcomePrevLobeUnsupported = 6u,  // Preserved lobe has no support at the predecessor.
   eReSTIRPTShiftOutcomeRcLobeUnsupported = 7u,  // Preserved lobe has no support at the reconnection vertex.
   eReSTIRPTShiftOutcomeBadDenominator    = 8u,  // Jacobian denominator non-positive or non-finite.
+  eReSTIRPTShiftOutcomeReconnectionDisagreement = 9u,  // The offset path would not have chosen this reconnection vertex, so the shift is not invertible.
   // Temporal-specific rejections, recorded before a shift is even attempted.
   // Kept distinct so a low reuse rate can be attributed: reprojecting off-screen and failing the surface test call for completely different fixes.
-  eReSTIRPTShiftOutcomeNoHistory          = 9u,   // Frame zero, or no surface at this pixel.
-  eReSTIRPTShiftOutcomeReprojectionFailed = 10u,  // Behind the previous camera or outside its frustum.
-  eReSTIRPTShiftOutcomeHistoryOutOfBounds = 11u,  // Reprojected outside the viewport.
-  eReSTIRPTShiftOutcomeSurfaceMismatch    = 12u,  // History exists but describes different geometry.
-  eReSTIRPTShiftOutcomeHistoryEmpty       = 13u,  // Reprojected onto a pixel holding no valid sample.
-  eReSTIRPTShiftOutcomeSuccess            = 14u,
+  eReSTIRPTShiftOutcomeNoHistory          = 10u,  // Frame zero, or no surface at this pixel.
+  eReSTIRPTShiftOutcomeReprojectionFailed = 11u,  // Behind the previous camera or outside its frustum.
+  eReSTIRPTShiftOutcomeHistoryOutOfBounds = 12u,  // Reprojected outside the viewport.
+  eReSTIRPTShiftOutcomeSurfaceMismatch    = 13u,  // History exists but describes different geometry.
+  eReSTIRPTShiftOutcomeHistoryEmpty       = 14u,  // Reprojected onto a pixel holding no valid sample.
+  eReSTIRPTShiftOutcomeSuccess            = 15u,
 };
 
 // ReSTIRPTSurface

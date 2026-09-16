@@ -832,13 +832,16 @@ void Application::RenderScene(const rtpt::FrameContext& frame)
 
   const float frameTimeMilliseconds = m_Options.headless ? kHeadlessFrameTimeMilliseconds : 0.0f;
 
+  // The luminance the tonemapper maps to middle grey, which the radiance clamp before NRD is relative to, as in RTXPT. White balance is ignored: it rotates chroma far more than it moves luminance.
+  const float denoiserGreyLuminance = m_TonemapperSettings.active != 0 ? 0.18f / std::max(m_TonemapperSettings.exposure, 1.0e-4f) : 1.0f;
+
   if(m_RenderMode == RenderMode::ePathTracing)
   {
-    m_PathTracer->Render({ .cmd = frame.commands, .sceneResource = &m_SceneRuntime->GetSceneResource(), .sceneInfo = &m_SceneRuntime->GetSceneInfo(), .topLevelAS = &m_SceneRuntime->GetTopLevelAccelerationStructure(), .output = m_Targets.Hdr(), .frameSlot = frame.slot.index, .frameTimeMilliseconds = frameTimeMilliseconds, .profiler = ActiveProfiler() });
+    m_PathTracer->Render({ .cmd = frame.commands, .sceneResource = &m_SceneRuntime->GetSceneResource(), .sceneInfo = &m_SceneRuntime->GetSceneInfo(), .topLevelAS = &m_SceneRuntime->GetTopLevelAccelerationStructure(), .output = m_Targets.Hdr(), .frameSlot = frame.slot.index, .frameTimeMilliseconds = frameTimeMilliseconds, .denoiserGreyLuminance = denoiserGreyLuminance, .profiler = ActiveProfiler() });
   }
   else if(m_RenderMode == RenderMode::eReSTIRPTEnhanced)
   {
-    m_ReSTIRPT->Render({ .cmd = frame.commands, .sceneResource = &m_SceneRuntime->GetSceneResource(), .sceneInfo = &m_SceneRuntime->GetSceneInfo(), .topLevelAS = &m_SceneRuntime->GetTopLevelAccelerationStructure(), .output = m_Targets.Hdr(), .frameSlot = frame.slot.index, .frameTimeMilliseconds = frameTimeMilliseconds, .profiler = ActiveProfiler() });
+    m_ReSTIRPT->Render({ .cmd = frame.commands, .sceneResource = &m_SceneRuntime->GetSceneResource(), .sceneInfo = &m_SceneRuntime->GetSceneInfo(), .topLevelAS = &m_SceneRuntime->GetTopLevelAccelerationStructure(), .output = m_Targets.Hdr(), .frameSlot = frame.slot.index, .frameTimeMilliseconds = frameTimeMilliseconds, .denoiserGreyLuminance = denoiserGreyLuminance, .profiler = ActiveProfiler() });
   }
   else
   {

@@ -19,6 +19,7 @@ constexpr VkFormat kBaseColorMetalnessFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat kViewZFormat = VK_FORMAT_R32_SFLOAT;
 constexpr VkFormat kRadianceHitDistFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat kSpecularDemodulationFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+constexpr VkFormat kDisocclusionThresholdMixFormat = VK_FORMAT_R16_SFLOAT;
 }
 
 DenoiserResources::DenoiserResources(const CreateInfo& createInfo)
@@ -120,6 +121,16 @@ rtpt::Image& DenoiserResources::GetSpecularDemodulationFactorImage()
   return m_SpecularDemodulationFactorImage;
 }
 
+const rtpt::Image& DenoiserResources::GetDisocclusionThresholdMixImage() const
+{
+  return m_DisocclusionThresholdMixImage;
+}
+
+rtpt::Image& DenoiserResources::GetDisocclusionThresholdMixImage()
+{
+  return m_DisocclusionThresholdMixImage;
+}
+
 void DenoiserResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
 {
   // A zero extent cannot back an image, so the current images are kept. Application never renders while minimized and never resizes the viewport to zero, so this is only a defensive guard.
@@ -144,6 +155,7 @@ void DenoiserResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
   rtpt::Image diffuse = CreateStorageImage(viewportSize, kRadianceHitDistFormat, "PathTraceDiffuseRadianceHitDistanceImage");
   rtpt::Image specular = CreateStorageImage(viewportSize, kRadianceHitDistFormat, "PathTraceSpecularRadianceHitDistanceImage");
   rtpt::Image demodulation = CreateStorageImage(viewportSize, kSpecularDemodulationFormat, "PathTraceSpecularDemodulationFactorImage");
+  rtpt::Image disocclusionMix = CreateStorageImage(viewportSize, kDisocclusionThresholdMixFormat, "PathTraceDisocclusionThresholdMixImage");
 
   // Swap in
   // Move-assignment releases each old image as its replacement lands.
@@ -155,6 +167,7 @@ void DenoiserResources::CreateOrResizeViewportResources(VkExtent2D viewportSize)
   m_DiffuseRadianceHitDistanceImage = std::move(diffuse);
   m_SpecularRadianceHitDistanceImage = std::move(specular);
   m_SpecularDemodulationFactorImage = std::move(demodulation);
+  m_DisocclusionThresholdMixImage = std::move(disocclusionMix);
   m_ViewportSize = viewportSize;
 }
 
@@ -167,6 +180,7 @@ void DenoiserResources::DestroyViewportResources()
   m_DiffuseRadianceHitDistanceImage.Reset();
   m_SpecularRadianceHitDistanceImage.Reset();
   m_SpecularDemodulationFactorImage.Reset();
+  m_DisocclusionThresholdMixImage.Reset();
 }
 
 rtpt::Image DenoiserResources::CreateStorageImage(VkExtent2D viewportSize, VkFormat format, const char* debugName) const

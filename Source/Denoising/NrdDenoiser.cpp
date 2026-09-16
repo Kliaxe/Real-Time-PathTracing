@@ -45,6 +45,7 @@ NrdDenoiser::NrdDenoiser(const CreateInfo& createInfo)
     , m_Diagnostics(createInfo.diagnostics)
     , m_FrameSlotCount(createInfo.frameSlotCount)
     , m_ComposePass(NrdComposePass::CreateInfo { .device = createInfo.device, .frameSlotCount = createInfo.frameSlotCount })
+    , m_DisocclusionMixPass(NrdDisocclusionMixPass::CreateInfo { .device = createInfo.device, .frameSlotCount = createInfo.frameSlotCount })
 {
 }
 
@@ -90,9 +91,8 @@ void NrdDenoiser::Initialize()
 
   m_ConstantBufferAlignment = std::max(1u, static_cast<uint32_t>(properties.properties.limits.minUniformBufferOffsetAlignment));
 
-  // Defaults until a renderer supplies DenoiserSettings; the values match the DenoiserSettings defaults.
-  m_ReblurSettings.maxAccumulatedFrameNum      = 30;
-  m_ReblurSettings.maxFastAccumulatedFrameNum  = 6;
+  // Defaults until a renderer supplies DenoiserSettings, taken from the DenoiserSettings defaults so the two cannot drift.
+  ApplyDenoiserSettings(DenoiserSettings {});
 
   CreateVulkanState();
 }
@@ -126,7 +126,7 @@ void NrdDenoiser::Destroy()
 
 bool NrdDenoiser::IsReady() const
 {
-  return m_Instance != nullptr && m_PipelineLayout != VK_NULL_HANDLE && !m_Pipelines.empty() && m_ComposePass.IsReady();
+  return m_Instance != nullptr && m_PipelineLayout != VK_NULL_HANDLE && !m_Pipelines.empty() && m_ComposePass.IsReady() && m_DisocclusionMixPass.IsReady();
 }
 
 void NrdDenoiser::InvalidateHistory()
@@ -202,6 +202,13 @@ void NrdDenoiser::ApplyDenoiserSettings(const DenoiserSettings& settings)
   m_ReblurSettings.enableAntiFirefly           = settings.enableAntiFirefly;
   m_ReblurSettings.maxBlurRadius               = settings.maxBlurRadius;
 
+  // Disocclusion
+  // These live in CommonSettings, which UpdateCommonSettings rebuilds every frame, so they are latched here and applied there.
+
+  m_DisocclusionThreshold          = settings.disocclusionThreshold;
+  m_DisocclusionThresholdAlternate = settings.disocclusionThresholdAlternate;
+  m_EnableDisocclusionThresholdMix = settings.enableDisocclusionThresholdMix;
+
   // Hit distance normalization
   // Same three values the shaders normalize with; see DenoiserSettings.
 
@@ -246,6 +253,7 @@ void NrdDenoiser::Denoise(VkCommandBuffer cmd, const DenoiserResources& denoiser
   TransitionImageToGeneral(cmd, const_cast<rtpt::Image&>(denoiserInputs.GetViewZImage()), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
   TransitionImageToGeneral(cmd, const_cast<rtpt::Image&>(denoiserInputs.GetDiffuseRadianceHitDistanceImage()), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
   TransitionImageToGeneral(cmd, const_cast<rtpt::Image&>(denoiserInputs.GetSpecularRadianceHitDistanceImage()), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
+  TransitionImageToGeneral(cmd, const_cast<rtpt::Image&>(denoiserInputs.GetDisocclusionThresholdMixImage()), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
   TransitionImageToGeneral(cmd, m_DiffuseOutputImage, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
   TransitionImageToGeneral(cmd, m_SpecularOutputImage, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
@@ -266,6 +274,17 @@ void NrdDenoiser::Denoise(VkCommandBuffer cmd, const DenoiserResources& denoiser
 
   BeginFrame(frameResources);
   UpdateFrameSet(frameResources);
+
+  // Disocclusion threshold mix
+  // Written before NRD reads it, and only while NRD was told it exists; otherwise NRD never binds the image. The barrier publishes the write to NRD's first dispatch.
+
+  if(m_EnableDisocclusionThresholdMix)
+  {
+    m_DisocclusionMixPass.Record(cmd, NrdDisocclusionMixPass::RecordInput { .denoiserInputs = &denoiserInputs, .viewportSize = viewportSize, .frameSlot = m_CurrentFrameSlot });
+
+    InsertComputeBarrier(cmd);
+  }
+
   DispatchNrd(cmd, frameResources, denoiserInputs);
 
   // Compose
@@ -309,6 +328,7 @@ void NrdDenoiser::CreateVulkanState()
   CreatePipelineLayout();
   CreatePipelines();
   m_ComposePass.Initialize();
+  m_DisocclusionMixPass.Initialize();
   CreateFrameResources();
 }
 
@@ -335,6 +355,7 @@ void NrdDenoiser::DestroyVulkanState()
 
   // The compose pass owns its pipeline, layouts, and sets, and releases them in the same place the compose pipeline used to go.
   m_ComposePass.Destroy();
+  m_DisocclusionMixPass.Destroy();
 
   // Destroying VK_NULL_HANDLE is a no-op, so this is safe after a partial or failed Initialize.
 
@@ -790,15 +811,15 @@ void NrdDenoiser::UpdateCommonSettings(const FrameInput& input)
   m_CommonSettings.denoisingRange       = 500000.0f;
 
   // This is NRD's local history rejection threshold. Higher values keep more reprojected history through camera motion, but can also make trails easier to see.
-  m_CommonSettings.disocclusionThreshold = input.settings != nullptr ? input.settings->disocclusionThreshold : DenoiserSettings {}.disocclusionThreshold;
-
-  m_CommonSettings.disocclusionThresholdAlternate = 0.05f;
+  // With the mix available, NRD blends each pixel's threshold toward the alternate by IN_DISOCCLUSION_THRESHOLD_MIX, which NrdDisocclusionMixPass writes in Denoise.
+  m_CommonSettings.disocclusionThreshold          = m_DisocclusionThreshold;
+  m_CommonSettings.disocclusionThresholdAlternate = m_DisocclusionThresholdAlternate;
   m_CommonSettings.splitScreen          = 0.0f;
   m_CommonSettings.frameIndex           = m_FrameIndex;
   m_CommonSettings.accumulationMode = m_HistoryInvalidated ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
   m_CommonSettings.isMotionVectorInWorldSpace        = false;
   m_CommonSettings.isHistoryConfidenceAvailable      = false;
-  m_CommonSettings.isDisocclusionThresholdMixAvailable = false;
+  m_CommonSettings.isDisocclusionThresholdMixAvailable = m_EnableDisocclusionThresholdMix;
   m_CommonSettings.enableValidation                  = false;
 
   // NRD turns this into a frame-rate scale, max(33.3 ms / delta, 1), that REBLUR's temporal accumulation and anti-lag use to decide how strongly history is kept.
@@ -1038,6 +1059,8 @@ const rtpt::Image& NrdDenoiser::ResolveDispatchImage(nrd::ResourceType resourceT
       return denoiserInputs.GetDiffuseRadianceHitDistanceImage();
     case nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST:
       return denoiserInputs.GetSpecularRadianceHitDistanceImage();
+    case nrd::ResourceType::IN_DISOCCLUSION_THRESHOLD_MIX:
+      return denoiserInputs.GetDisocclusionThresholdMixImage();
     case nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST:
       return m_DiffuseOutputImage;
     case nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST:

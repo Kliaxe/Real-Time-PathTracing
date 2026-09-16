@@ -260,6 +260,7 @@ shaderio::PathTracePushConstant PathTracer::BuildPushConstant(const RenderInput&
       .maxBounces              = maxBounces,
       .flags                   = pathTraceFlags,
       .reblurHitDistanceParams = { m_Settings.denoiserSettings.hitDistanceA, m_Settings.denoiserSettings.hitDistanceB, m_Settings.denoiserSettings.hitDistanceC },
+      .denoiserRadianceClamp   = ComputeDenoiserRadianceClamp(m_Settings.denoiserSettings, input.denoiserGreyLuminance),
   };
 }
 
