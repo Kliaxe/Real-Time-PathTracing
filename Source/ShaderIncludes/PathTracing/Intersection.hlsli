@@ -101,7 +101,7 @@ float4 ResolveBaseColor(GltfMetallicRoughness material, float2 texCoord)
   return baseColor;
 }
 
-// The raw glTF buffer is already on the GPU, so hit shaders fetch attributes directly through the uploaded byte layout.
+// The raw glTF buffer is already on the GPU, so the surface loader fetches attributes directly through the uploaded byte layout.
 template<typename T> T getAttribute(uint64_t dataBufferAddress, BufferView bufferView, uint attributeIndex)
 {
   return LoadAttribute<T>(dataBufferAddress, bufferView, attributeIndex);
@@ -119,8 +119,8 @@ template<typename T> T getTriangleAttribute(uint64_t dataBufferAddress, BufferVi
   return LoadTriangleAttribute<T>(dataBufferAddress, bufferView, attributeIndex, barycentrics);
 }
 
-// Builds the world-space tangent frame at a hit around an already face-forwarded shading normal.
-void BuildSurfaceBasis(GltfMesh mesh, uint3 indices, float3 barycentrics, float3 shadingNormal, out float3 tangent, out float3 bitangent)
+// Builds the world-space tangent frame at a hit around an already face-forwarded shading normal. objectToWorld is the hit instance's transform.
+void BuildSurfaceBasis(GltfMesh mesh, float4x3 objectToWorld, uint3 indices, float3 barycentrics, float3 shadingNormal, out float3 tangent, out float3 bitangent)
 {
   // If the asset has no tangent frame, build one procedurally so anisotropy / normal mapping still have a stable basis.
   if(mesh.triMesh.tangents.count == 0)
@@ -134,7 +134,7 @@ void BuildSurfaceBasis(GltfMesh mesh, uint3 indices, float3 barycentrics, float3
 
   const float4 tangentSample = getTriangleAttribute<float4>(mesh.gltfBuffer, mesh.triMesh.tangents, indices, barycentrics);
 
-  tangent                     = normalize(mul(float4(tangentSample.xyz, 0.0), ObjectToWorld4x3()));
+  tangent                     = normalize(mul(float4(tangentSample.xyz, 0.0), objectToWorld));
   tangent                     = tangent - shadingNormal * dot(shadingNormal, tangent);
 
   // Degenerate authored tangents are treated like missing tangents.
@@ -222,24 +222,30 @@ bool TraceVisibility(float3 worldPosition, float3 geometricNormal, float3 direct
 }
 
 // This is the main scene-data decode step that turns raw glTF buffers and textures into one resolved shading record.
-SurfaceData LoadSurfaceData(BuiltInTriangleIntersectionAttributes attr)
+// It reads only the hit record, the direction of the ray that found the hit, and scene buffers, never hit-shader intrinsics, so ray generation can resolve a hit its closest-hit shader merely recorded.
+SurfaceData LoadSurfaceDataFromHit(PathHitRecord hit, float3 rayDirection)
 {
   // Scene records
   // DXR reports only the second and third barycentric weights; the first is recovered from them.
 
-  const float3 barycentrics   = float3(1.0 - attr.barycentrics.x - attr.barycentrics.y, attr.barycentrics.x, attr.barycentrics.y);
-  const uint   instanceIndex  = InstanceIndex();
-  const uint   primitiveIndex = PrimitiveIndex();
+  const float3 barycentrics = float3(1.0 - hit.barycentrics.x - hit.barycentrics.y, hit.barycentrics.x, hit.barycentrics.y);
 
   const GltfSceneInfo         sceneInfo = pushConst.sceneInfoAddress.Get();
-  const GltfInstance          instance  = LoadDeviceArrayElement<GltfInstance>(sceneInfo.instances, instanceIndex);
+  const GltfInstance          instance  = LoadDeviceArrayElement<GltfInstance>(sceneInfo.instances, hit.instanceIndex);
   const GltfMesh              mesh      = LoadDeviceArrayElement<GltfMesh>(sceneInfo.meshes, instance.meshIndex);
   const GltfMetallicRoughness material  = LoadDeviceArrayElement<GltfMetallicRoughness>(sceneInfo.materials, instance.materialIndex);
+
+  // Instance transforms
+  // The instance record holds the matrix the TLAS instance was built from, so objectToWorld has exactly the values ObjectToWorld4x3() reports inside a hit shader.
+  // Normals transform by the inverse transpose. A hit shader would read it as WorldToObject4x3(), which the driver inverts; here the instance record carries that inverse, computed once per instance on the CPU by SetInstanceTransform.
+
+  const float4x3 objectToWorld = (float4x3)instance.transform;
+  const float3x3 normalToWorld = instance.normalTransform;
 
   // Vertex attributes
   // Meshes without normals fall back to the object-space face normal, and meshes without texture coordinates use (0, 0).
 
-  const uint3 indices = getTriangleIndices(mesh.gltfBuffer, mesh.triMesh, primitiveIndex);
+  const uint3 indices = getTriangleIndices(mesh.gltfBuffer, mesh.triMesh, hit.primitiveIndex);
 
   const float3 position0 = getAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.positions, indices.x);
   const float3 position1 = getAttribute<float3>(mesh.gltfBuffer, mesh.triMesh.positions, indices.y);
@@ -251,18 +257,17 @@ SurfaceData LoadSurfaceData(BuiltInTriangleIntersectionAttributes attr)
 
   // World-space frame
   // The geometric normal comes from world-space vertices, and front-facing is judged from its winding against the ray.
-  // Normals transform by the inverse transpose, which is what multiplying by WorldToObject from the left does.
 
-  const float3 worldPosition  = mul(float4(position, 1.0), ObjectToWorld4x3()).xyz;
-  const float3 worldPosition0 = mul(float4(position0, 1.0), ObjectToWorld4x3()).xyz;
-  const float3 worldPosition1 = mul(float4(position1, 1.0), ObjectToWorld4x3()).xyz;
-  const float3 worldPosition2 = mul(float4(position2, 1.0), ObjectToWorld4x3()).xyz;
+  const float3 worldPosition  = mul(float4(position, 1.0), objectToWorld).xyz;
+  const float3 worldPosition0 = mul(float4(position0, 1.0), objectToWorld).xyz;
+  const float3 worldPosition1 = mul(float4(position1, 1.0), objectToWorld).xyz;
+  const float3 worldPosition2 = mul(float4(position2, 1.0), objectToWorld).xyz;
 
   const float3 rawGeometricNormal = normalize(cross(worldPosition1 - worldPosition0, worldPosition2 - worldPosition0));
-  const uint   isFrontFace        = dot(rawGeometricNormal, WorldRayDirection()) < 0.0 ? 1u : 0u;
+  const uint   isFrontFace        = dot(rawGeometricNormal, rayDirection) < 0.0 ? 1u : 0u;
 
   float3 geometricNormal = rawGeometricNormal;
-  float3 shadingNormal   = normalize(mul(WorldToObject4x3(), normal).xyz);
+  float3 shadingNormal   = normalize(mul(normalToWorld, normal));
 
   // Keep the shading frame on the same hemisphere as the geometric frame to avoid negative-energy shading artifacts.
   if(dot(shadingNormal, geometricNormal) < 0.0)
@@ -271,7 +276,7 @@ SurfaceData LoadSurfaceData(BuiltInTriangleIntersectionAttributes attr)
   }
 
   // Face-forward both normals against the incoming ray so the rest of the tracer can assume an outward-facing frame.
-  if(dot(geometricNormal, WorldRayDirection()) > 0.0)
+  if(dot(geometricNormal, rayDirection) > 0.0)
   {
     geometricNormal = -geometricNormal;
     shadingNormal   = -shadingNormal;
@@ -280,7 +285,7 @@ SurfaceData LoadSurfaceData(BuiltInTriangleIntersectionAttributes attr)
   float3 tangent;
   float3 bitangent;
 
-  BuildSurfaceBasis(mesh, indices, barycentrics, shadingNormal, tangent, bitangent);
+  BuildSurfaceBasis(mesh, objectToWorld, indices, barycentrics, shadingNormal, tangent, bitangent);
 
   // Normal mapping
   // Normal mapping only runs when a tangent frame exists, because this path expects tangent-space normals.
@@ -308,7 +313,7 @@ SurfaceData LoadSurfaceData(BuiltInTriangleIntersectionAttributes attr)
 
   const float4 baseColor = ResolveBaseColor(material, texCoord);
 
-  const float2 metallicRoughness  = ResolveMetallicRoughness(material, texCoord);
+  const float2 metallicRoughness  = ApplyMetallicRoughnessOverride(ResolveMetallicRoughness(material, texCoord), sceneInfo.metallicRoughnessOverride);
   const float  specular           = clamp(ResolveTextureChannel(material.specularTextureIndex, texCoord, 3, material.specularFactor), 0.0, 1.0);
   const float  specularTint       = clamp(ResolveTintMagnitude(material.specularColorTextureIndex, texCoord, material.specularTint), 0.0, 1.0);
   const float  transmission       = clamp(ResolveTextureChannel(material.transmissionTextureIndex, texCoord, 0, material.transmissionFactor), 0.0, 1.0);
@@ -350,6 +355,20 @@ SurfaceData LoadSurfaceData(BuiltInTriangleIntersectionAttributes attr)
   return surface;
 }
 
+// Fills a hit record from the intrinsics of the closest hit being shaded, so only a hit shader can call it.
+PathHitRecord MakePathHitRecord(BuiltInTriangleIntersectionAttributes attr)
+{
+  PathHitRecord hit;
+
+  hit.instanceIndex  = InstanceIndex();
+  hit.primitiveIndex = PrimitiveIndex();
+  hit.barycentrics   = attr.barycentrics;
+  hit.hitDistance    = RayTCurrent();
+  hit.hasHit         = 1u;
+
+  return hit;
+}
+
 // Draws an environment light direction and its radiance. The sampling PDF is discarded because the caller re-evaluates it with EvaluateEnvironmentLightPdf.
 bool SampleEnvironmentLightDirection(GltfSceneInfo sceneInfo, float3 receiverNormal, inout PathSampleStream seed, out float3 lightDir, out float3 radiance)
 {
@@ -361,8 +380,8 @@ bool SampleEnvironmentLightDirection(GltfSceneInfo sceneInfo, float3 receiverNor
   return SampleEnvironmentBaseLight(sceneInfo, receiverNormal, seed, lightDir, radiance, baseLightPdf);
 }
 
-// One environment next-event-estimation sample at the current closest hit.
-void AccumulateEnvironmentDirectLight(inout PathPayload payload, SurfaceData surface, GltfSceneInfo sceneInfo, float3 viewDir)
+// One environment next-event-estimation sample at a path vertex.
+void AccumulateEnvironmentDirectLight(inout PathState path, SurfaceData surface, GltfSceneInfo sceneInfo, float3 viewDir)
 {
   // Eligibility
   // Explicit environment lighting estimates only the broad cosine-proposal BSDF group on opaque surfaces.
@@ -388,7 +407,7 @@ void AccumulateEnvironmentDirectLight(inout PathPayload payload, SurfaceData sur
   float3 lightDir    = (float3)0.0;
   float3 radiance    = (float3)0.0;
 
-  if(!SampleEnvironmentLightDirection(sceneInfo, receiverNormal, payload.seed, lightDir, radiance))
+  if(!SampleEnvironmentLightDirection(sceneInfo, receiverNormal, path.seed, lightDir, radiance))
   {
     return;
   }
@@ -418,10 +437,10 @@ void AccumulateEnvironmentDirectLight(inout PathPayload payload, SurfaceData sur
   // The environment is infinitely far, so the denoiser fallback distance is the far-hit constant.
 
   const float  misWeight    = MisMixWeight(lightPdf, bsdfPdf);
-  const float3 contribution = payload.throughput * radiance * bsdf * (misWeight / lightPdf);
+  const float3 contribution = path.throughput * radiance * bsdf * (misWeight / lightPdf);
 
-  AccumulatePathContribution(payload, contribution);
-  StoreDiffuseDenoiserHitDistanceIfMissing(payload, kDenoiserFarHitDistance);
+  AccumulatePathContribution(path, contribution);
+  StoreDiffuseDenoiserHitDistanceIfMissing(path, kDenoiserFarHitDistance);
 }
 
 #endif

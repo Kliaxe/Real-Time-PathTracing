@@ -23,6 +23,7 @@
 #include "ShaderIncludes/PathTracing/Lights.hlsli"
 #include "ReSTIR/PTReservoirStorage.hlsli"
 #include "ReSTIR/PTShift.hlsli"
+#include "ShaderIncludes/PathTracing/PathRayEntryPoints.hlsli"
 #include "ShaderIncludes/ReSTIR/PTSpatialCommon.hlsli"
 
 // Upper bound on neighbours per pixel, so the acceptance list can live in registers. The requested count is clamped to this.
@@ -48,13 +49,14 @@ void rgenMain()
   const ReSTIRPTSurface currentSurfaceRecord = currentSurfaceBuffer[pixelIndex];
 
   // Destination surface
-  // Forward shifts land on this pixel's primary hit, which needs a full material record; re-tracing the primary ray is how this pass obtains one.
+  // Forward shifts land on this pixel's primary hit, which needs a full material record; it is rebuilt from the hit identity initial sampling stored, so this pass no longer re-traces the primary ray.
 
-  const float3        primaryDirection = ReconstructWorldDirectionFromPixel((float2)launchID + 0.5, sceneInfo);
-  const PTVertexQuery primary          = TracePTVertex(sceneInfo.cameraPosition, primaryDirection);
-  const float3        primaryViewDir   = -primaryDirection;
+  SurfaceData primarySurface;
+  float3      primaryViewDir;
 
-  if(currentSurfaceRecord.valid != 0 && primary.hit && IsValidPTReservoir(canonical))
+  const bool primaryValid = LoadPTSurfaceAtStoredHit(currentSurfaceRecord, sceneInfo.cameraPosition, primarySurface, primaryViewDir);
+
+  if(primaryValid && IsValidPTReservoir(canonical))
   {
     // Acceptance pass
     // The accepted set and its confidence sum are fixed BEFORE any shift runs: the MIS weights divide by C_N, so letting a shift outcome change membership would make the technique set depend on the samples drawn, which carries no unbiasedness guarantee.
@@ -179,14 +181,15 @@ void rgenMain()
         }
         else
         {
-          forward = ShiftPathToSurface(neighbour, primary.surface, primaryViewDir);
+          forward = ShiftPathToSurface(neighbour, primarySurface, primaryViewDir);
 
           SurfaceData neighbourPrimarySurface;
           float3      neighbourPrimaryViewDir;
 
           inverse = FailedPTShift(uint(ReSTIRPTShiftOutcome::eReSTIRPTShiftOutcomeNoSource));
 
-          if(RecoverSurfaceAtStoredPoint(sceneInfo.cameraPosition, neighbourSurface, neighbourPrimarySurface, neighbourPrimaryViewDir))
+          // The neighbour's own primary hit, rebuilt from its stored identity rather than traced for, as this pixel's was.
+          if(LoadPTSurfaceAtStoredHit(neighbourSurface, sceneInfo.cameraPosition, neighbourPrimarySurface, neighbourPrimaryViewDir))
           {
             inverse = ShiftPathToSurface(canonical, neighbourPrimarySurface, neighbourPrimaryViewDir);
           }
@@ -280,47 +283,5 @@ void rgenMain()
   ptShadingWeightBuffer[pixelIndex] = shadingWeight;
 
   StorePTReservoir(canonical, ptParams.reservoirBufferParams, reservoirPosition, ptParams.bufferIndices.spatialResamplingOutputBufferIndex);
-}
-
-// Shift ray entry points
-// TracePTVertex expects a closest hit that fills PTShiftPayload, a miss that clears it, and the any-hit pair for alpha masking; the shadow entries serve visibility tests during the shift.
-
-[shader("miss")]
-void rmissMain(inout PTShiftPayload payload)
-{
-  payload.hit = 0u;
-}
-
-[shader("miss")]
-void shadowMissMain(inout ShadowPayload payload)
-{
-  payload.visible = 1;
-}
-
-[shader("anyhit")]
-void rahitMain(inout PTShiftPayload payload, in BuiltInTriangleIntersectionAttributes attr)
-{
-  if(IsMaskedSurfaceHit(attr))
-  {
-    IgnoreHit();
-  }
-}
-
-[shader("anyhit")]
-void shadowAnyHitMain(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr)
-{
-  if(IsMaskedSurfaceHit(attr))
-  {
-    IgnoreHit();
-  }
-}
-
-[shader("closesthit")]
-void rchitMain(inout PTShiftPayload payload, in BuiltInTriangleIntersectionAttributes attr)
-{
-  payload.surface        = LoadSurfaceData(attr);
-  payload.hit            = 1u;
-  payload.instanceId     = InstanceIndex();
-  payload.primitiveIndex = PrimitiveIndex();
 }
 

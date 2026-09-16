@@ -15,6 +15,10 @@ namespace rtpt
 // Loads a .gltf or .glb file from disk. Throws on a parse failure or an unsupported extension.
 tinygltf::Model LoadGltfResources(const std::filesystem::path& filename);
 
+// Places an instance, deriving its normal transform from the transform it is given.
+// Every writer of an instance transform goes through this, because the two fields are uploaded together and shaders trust them to describe the same placement.
+void SetInstanceTransform(shaderio::GltfInstance& instance, const glm::mat4& transform);
+
 // Uploads the model's first binary buffer and appends one scene mesh per supported triangle primitive.
 // materialOffset maps the model's material indices into the scene material array; fallbackMaterialIndex serves primitives without a valid material.
 // When importInstance is true, the node hierarchy is also flattened into world-space instances.

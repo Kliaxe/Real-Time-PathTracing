@@ -18,47 +18,6 @@ int2 SampleNeighbourOffset(inout uint seed, float radius)
   return int2(round(float2(cos(angle), sin(angle)) * (radiusFraction * radius)));
 }
 
-// Recovers a full material record at a stored surface point.
-// The stored ReSTIRPTSurface is deliberately reduced and cannot drive a BSDF, so the point is re-traced from the camera.
-// The result is a genuine closest-hit surface, identical in fidelity to a freshly traced primary hit, which is what makes it safe for a shift to land on.
-bool RecoverSurfaceAtStoredPoint(float3 cameraPosition, ReSTIRPTSurface stored, out SurfaceData surface, out float3 viewDir)
-{
-  surface = (SurfaceData)0;
-  viewDir = float3(0.0, 1.0, 0.0);
-
-  if(stored.valid == 0)
-  {
-    return false;
-  }
-
-  const float3 toSurface = stored.worldPosition - cameraPosition;
-  const float  distance  = length(toSurface);
-
-  if(distance <= 1.0e-6)
-  {
-    return false;
-  }
-
-  const float3        direction = toSurface / distance;
-  const PTVertexQuery query     = TracePTVertex(cameraPosition, direction);
-
-  if(!query.hit)
-  {
-    return false;
-  }
-
-  // The stored point must still be the first thing the ray meets, or this is a different surface that merely lies along the same direction.
-  if(length(query.surface.worldPosition - stored.worldPosition) > 0.01 * distance)
-  {
-    return false;
-  }
-
-  surface = query.surface;
-  viewDir = -direction;
-
-  return true;
-}
-
 ReSTIRPTPairedShift MakePTPairedShift(PTShiftResult result)
 {
   ReSTIRPTPairedShift record;

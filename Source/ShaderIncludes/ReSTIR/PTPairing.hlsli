@@ -3,7 +3,7 @@
 
 // Pairing helpers
 // Pairing and paired-shift-record helpers with no ray tracing dependency.
-// Split out of PTSpatialCommon.hlsli so the Section 6.2.2 compute passes can use them: that header also declares RecoverSurfaceAtStoredPoint, whose TraceRay is not valid outside a ray tracing stage, and those passes need the pairing decisions without the tracing.
+// Split out of PTSpatialCommon.hlsli so the Section 6.2.2 compute passes can use them: that header builds on the shift machinery, whose TraceRay is not valid outside a ray tracing stage, and those passes need the pairing decisions without the tracing.
 // Everything here must stay pure for that reason. A helper that needs to trace belongs next door, not in this file.
 
 #include <Common/ShaderTypes.h>

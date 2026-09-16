@@ -52,9 +52,6 @@ struct RasterPushConstant
 
   // Device address of the scene info buffer.
   RTPT_BUFFER_POINTER(GltfSceneInfo) sceneInfoAddress;
-
-  // Debug override for metallic (x) and roughness (y); a negative component keeps the material value.
-  float2         metallicRoughnessOverride;
 };
 
 // PathTraceFlags
@@ -80,7 +77,7 @@ struct PathTracePushConstant
   // Frames already in the accumulation image; 0 when accumulation is off.
   uint           accumulatedFrames;
 
-  // Bounce limit, already clamped to the device and pipeline recursion limits.
+  // Bounce limit, already clamped to the renderer's fixed maximum.
   uint           maxBounces;
 
   // PathTraceFlags bits.
@@ -254,8 +251,8 @@ enum ReSTIRPTShiftOutcome
 
 // ReSTIRPTSurface
 // Per-pixel surface record written by initial sampling and read by later passes, so they never have to re-trace the primary ray or re-resolve the material.
-// Deliberately reduced: reuse replays and reconnects paths rather than re-evaluating shading, so this carries only geometry plus the terms that drive the shift's surface-similarity and reconnection tests.
-// Anything a shift needs beyond that comes from re-tracing the point, not from this record.
+// The shading terms are deliberately reduced: reuse replays and reconnects paths rather than re-evaluating shading, so only the terms that drive the shift's surface-similarity and reconnection tests are kept.
+// A shift that needs the full material record rebuilds it from the hit identity stored here, which costs the same scene reads a closest hit would do and no ray at all.
 
 struct ReSTIRPTSurface
 {
@@ -282,6 +279,14 @@ struct ReSTIRPTSurface
 
   // 1 when the primary ray hit a surface; misses write an all-zero record.
   uint   valid;
+
+  // Scene instance of the primary hit, and the triangle within its mesh.
+  uint   instanceIndex;
+  uint   primitiveIndex;
+
+  // DXR barycentrics of the primary hit: the weights of the triangle's second and third vertices.
+  // With the two indices above they name the hit exactly, which is what lets a later pass rebuild the full material record through LoadSurfaceDataFromHit instead of tracing a ray back at the point.
+  float2 barycentrics;
 };
 
 // ReSTIRPTPairedShift

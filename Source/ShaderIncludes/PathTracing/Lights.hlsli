@@ -100,8 +100,8 @@ bool CanSampleEmissiveDirectLight(SurfaceData surface, GltfSceneInfo sceneInfo)
   return surface.transmission <= 0.001 && sceneInfo.emissiveTriangleCount > 0;
 }
 
-// One emissive next-event-estimation sample at the current closest hit.
-void AccumulateEmissiveDirectLight(inout PathPayload payload, SurfaceData surface, GltfSceneInfo sceneInfo, float3 viewDir)
+// One emissive next-event-estimation sample at a path vertex. instanceIndex and primitiveIndex name the vertex's own triangle.
+void AccumulateEmissiveDirectLight(inout PathState path, SurfaceData surface, uint instanceIndex, uint primitiveIndex, GltfSceneInfo sceneInfo, float3 viewDir)
 {
   // Light selection
 
@@ -110,11 +110,11 @@ void AccumulateEmissiveDirectLight(inout PathPayload payload, SurfaceData surfac
     return;
   }
 
-  const uint sampleIndex            = BinarySearchCdf(sceneInfo.emissiveTriangleCdf, sceneInfo.emissiveTriangleCount, NextRandom(payload.seed));
+  const uint sampleIndex            = BinarySearchCdf(sceneInfo.emissiveTriangleCdf, sceneInfo.emissiveTriangleCount, NextRandom(path.seed));
   const EmissiveTriangleLight light = LoadDeviceArrayElement<EmissiveTriangleLight>(sceneInfo.emissiveTriangles, sampleIndex);
 
   // Prevent a surface from explicitly re-sampling itself as a direct light.
-  if(light.instanceIndex == InstanceIndex() && light.primitiveIndex == PrimitiveIndex())
+  if(light.instanceIndex == instanceIndex && light.primitiveIndex == primitiveIndex)
   {
     return;
   }
@@ -122,8 +122,8 @@ void AccumulateEmissiveDirectLight(inout PathPayload payload, SurfaceData surfac
   // Point on the light
   // Uniform barycentric triangle sampling inside the chosen emissive primitive: the square root warps the unit square so area density is constant.
 
-  const float sqrtXi0 = sqrt(NextRandom(payload.seed));
-  const float xi1     = NextRandom(payload.seed);
+  const float sqrtXi0 = sqrt(NextRandom(path.seed));
+  const float xi1     = NextRandom(path.seed);
   const float3 bary   = float3(1.0 - sqrtXi0, sqrtXi0 * (1.0 - xi1), sqrtXi0 * xi1);
 
   const float3 sampledPosition = light.position0 * bary.x + light.position1 * bary.y + light.position2 * bary.z;
@@ -192,14 +192,14 @@ void AccumulateEmissiveDirectLight(inout PathPayload payload, SurfaceData surfac
   }
 
   const float misWeight     = MisMixWeight(lightPdf, bsdfPdf);
-  const float3 contribution = payload.throughput * radiance * bsdf * (misWeight / lightPdf);
+  const float3 contribution = path.throughput * radiance * bsdf * (misWeight / lightPdf);
 
   // Publishes the light vertex before the contribution is accumulated, so a resampler can adopt it as a reconnection anchor.
   // Short paths, above all direct lighting at the primary hit, have no interior vertex to reconnect at, and without this they cannot be shifted at all.
-  PATH_TRACING_ON_NEE_EMISSIVE(payload, sampleIndex, bary, radiance, lightPdf, distance);
+  PATH_TRACING_ON_NEE_EMISSIVE(path, sampleIndex, bary, radiance, lightPdf, distance);
 
-  AccumulatePathContribution(payload, contribution);
-  StoreDiffuseDenoiserHitDistanceIfMissing(payload, distance);
+  AccumulatePathContribution(path, contribution);
+  StoreDiffuseDenoiserHitDistanceIfMissing(path, distance);
 }
 
 #endif

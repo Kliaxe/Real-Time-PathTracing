@@ -9,6 +9,7 @@
 #include "PathTracing/Common/ResolveMode.h"
 #include "Framework/Vulkan/Descriptors.h"
 #include "Framework/Vulkan/Diagnostics.h"
+#include "Framework/Vulkan/GpuProfiler.h"
 #include "Framework/Vulkan/GpuResources.h"
 #include "Framework/Vulkan/ShaderBindingTable.h"
 #include "Framework/Vulkan/VulkanDevice.h"
@@ -67,6 +68,8 @@ public:
     uint32_t                            frameSlot = 0;
     // Time since the previous frame in milliseconds, handed to NRD. Zero lets NRD measure real frame time itself.
     float                               frameTimeMilliseconds = 0.0f;
+    // Optional. Receives a timestamp scope around the trace and around NRD; null records no timing.
+    rtpt::GpuProfiler*                  profiler = nullptr;
   };
 
   // Settings
@@ -80,8 +83,8 @@ public:
     DenoiserDebugView denoiserDebugView = DenoiserDebugView::eFinal;
     // NRD REBLUR settings, including the hit distance normalization the shader also uses.
     DenoiserSettings  denoiserSettings { .hitDistanceReconstructionMode = HitDistanceReconstructionMode::eArea5x5 };
-    // Clamped against Vulkan ray recursion support before reaching the shader.
-    uint32_t          maxBounces        = 8;
+    // Clamped to GetBounceLimit() before reaching the shader. Three bounces is the interactive default: it carries the transport most scenes here are judged on, and the slider goes to the limit when more is wanted.
+    uint32_t          maxBounces        = 3;
   };
 
   explicit PathTracer(const CreateInfo& createInfo);
@@ -93,7 +96,7 @@ public:
   Settings&       GetSettings();
   const Settings& GetSettings() const;
   uint32_t        GetAccumulatedFrameCount() const;
-  uint32_t        GetPipelineBounceLimit() const;
+  uint32_t        GetBounceLimit() const;
   void            InvalidateHistory();
 
   rtpt::DescriptorPack&       GetDescriptorPack();
@@ -143,10 +146,6 @@ private:
 
   // Advances every rendered frame to decorrelate random samples, even when accumulation is off.
   uint32_t                 m_RngFrameNumber        = 0;
-  // Device limit comes from Vulkan; pipeline limit is the depth this renderer requested.
-  uint32_t                 m_DeviceBounceLimit     = 0;
-  // Bounces the ray tracing pipeline was created for. Never above m_DeviceBounceLimit.
-  uint32_t                 m_PipelineBounceLimit   = 0;
   // User-facing settings, read at the start of every frame.
   Settings                 m_Settings {};
 
@@ -164,7 +163,7 @@ private:
   rtpt::Image                 m_AccumulationImage;
   // Accumulation counter, history signatures, and the NRD denoiser with the guide and signal images the ray generation shader writes.
   ResolveHistory              m_History;
-  // Device ray tracing limits. Recursion depth bounds the bounce limits, and the SBT is built against these properties.
+  // Device ray tracing limits. The pipeline's recursion depth is checked against them, and the SBT is built against them.
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_RtProperties { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR };
 };
 

@@ -4,7 +4,7 @@
 // Hybrid shift mapping
 // Maps a path sampled in one pixel's domain into another's (paper Section 2.3): replay the prefix from the base path's random numbers, then reconnect geometrically at the stored reconnection vertex and reuse the suffix radiance recorded there.
 // Equation 2's Jacobian is the ratio of the reconnection densities in the two domains.
-// Included by every pass that reuses paths. The including shader must already have pulled in PTGlobals, PTReservoir, and the shared path tracing headers, and must declare the ray tracing entry points that TracePTVertex depends on: a closest hit filling PTShiftPayload, a miss clearing it, and the any-hit pair for alpha masking.
+// Included by every pass that reuses paths. The including shader must already have pulled in PTGlobals, PTReservoir, and the shared path tracing headers, and must include PathRayEntryPoints.hlsli: TracePTVertex traces the same path rays the estimator does, through the same hit and miss shaders.
 
 // Independent integer streams for reservoir selection and neighbor selection.
 uint PTVertexSeed(uint initialSeed, uint vertexDepth, uint purpose)
@@ -27,29 +27,10 @@ struct PTVertexQuery
   uint primitiveIndex;
 };
 
-// PTShiftPayload
-// Payload carrying a full surface back from closest hit. Separate from PTVertexQuery because a ray payload stores the hit flag as a uint.
-
-struct PTShiftPayload
-{
-  // Full material record at the hit, filled by closest hit.
-  SurfaceData surface;
-  // Nonzero when closest hit ran; the miss shader clears it.
-  uint hit;
-  // InstanceIndex() of the hit.
-  uint instanceId;
-  // PrimitiveIndex() of the hit.
-  uint primitiveIndex;
-};
-
+// Traces one ray and resolves the surface it found.
+// The ray carries the same 24-byte PathHitRecord the estimator's rays do, and the surface is built here in ray generation rather than in closest hit: a payload carrying a whole SurfaceData was 184 bytes copied into and out of every replayed bounce.
 PTVertexQuery TracePTVertex(float3 origin, float3 direction)
 {
-  PTShiftPayload payload;
-
-  payload.hit            = 0u;
-  payload.instanceId     = ReSTIRPTInvalidInstanceId;
-  payload.primitiveIndex = 0u;
-
   RayDesc ray;
 
   ray.Origin    = origin;
@@ -57,16 +38,56 @@ PTVertexQuery TracePTVertex(float3 origin, float3 direction)
   ray.TMin      = 0.001;
   ray.TMax      = kRayTMax;
 
-  TraceRay(topLevelAS, 0, 0xFF, 0, 0, 0, ray, payload);
+  PathHitRecord hit;
+
+  TraceRay(topLevelAS, 0, 0xFF, 0, 0, 0, ray, hit);
 
   PTVertexQuery query;
 
-  query.surface        = payload.surface;
-  query.hit            = payload.hit != 0u;
-  query.instanceId     = payload.instanceId;
-  query.primitiveIndex = payload.primitiveIndex;
+  query.hit            = hit.hasHit != 0u;
+  query.instanceId     = ReSTIRPTInvalidInstanceId;
+  query.primitiveIndex = 0u;
+
+  // A missed ray leaves the surface undefined, exactly as the payload did: every caller tests hit before reading it.
+  if(query.hit)
+  {
+    query.surface        = LoadSurfaceDataFromHit(hit, direction);
+    query.instanceId     = hit.instanceIndex;
+    query.primitiveIndex = hit.primitiveIndex;
+  }
 
   return query;
+}
+
+// Rebuilds the full material record at a primary hit some pass already stored, as the camera that saw it would have resolved it.
+// The stored record names the triangle and the point on it, so the surface comes straight from the scene buffers. Every reuse pass used to trace a ray back at the stored point for this instead: one per destination pixel, per history sample, and per neighbour.
+// The direction is the one that found the hit, because the loader face-forwards the frame against it, and the view direction the shift evaluates BSDFs with is its opposite.
+// No "did the ray still reach the stored point" guard is needed, unlike the trace this replaces: the loaded hit IS the stored one, so nothing nearer can stand in for it. That holds because geometry is static for the lifetime of a surface buffer, and a scene rebuild invalidates the buffers along with the history they describe.
+bool LoadPTSurfaceAtStoredHit(ReSTIRPTSurface stored, float3 cameraPosition, out SurfaceData surface, out float3 viewDir)
+{
+  surface = (SurfaceData)0;
+  viewDir = float3(0.0, 1.0, 0.0);
+
+  // A record whose primary ray escaped names no triangle.
+  if(stored.valid == 0)
+  {
+    return false;
+  }
+
+  PathHitRecord hit;
+
+  hit.instanceIndex  = stored.instanceIndex;
+  hit.primitiveIndex = stored.primitiveIndex;
+  hit.barycentrics   = stored.barycentrics;
+  hit.hitDistance    = stored.linearDepth;
+  hit.hasHit         = 1u;
+
+  const float3 direction = normalize(stored.worldPosition - cameraPosition);
+
+  surface = LoadSurfaceDataFromHit(hit, direction);
+  viewDir = -direction;
+
+  return true;
 }
 
 // PTShiftResult

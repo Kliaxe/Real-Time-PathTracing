@@ -1222,7 +1222,8 @@ int SceneUploader::Upload(const UploadInput& input, UploadState& state) const
     for(uint32_t i = 0; i < importedInstanceCount; ++i)
     {
       shaderio::GltfInstance& instance = state.sceneResource.instances[instanceStart + i];
-      instance.transform               = modelEntry.transform * instance.transform;
+
+      SetInstanceTransform(instance, modelEntry.transform * instance.transform);
     }
 
     // Overrides and lights

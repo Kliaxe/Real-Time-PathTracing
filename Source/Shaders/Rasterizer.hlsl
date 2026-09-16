@@ -167,15 +167,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     discard;
   }
 
-  // Debug override
-  // A component of metallicRoughnessOverride at or above zero replaces the material value; the UI default of -0.01 leaves the material alone.
-
-  float2 metallicRoughness = ResolveMetallicRoughness(material, input.textureCoordinate);
-
-  if(pushConstants.metallicRoughnessOverride.x >= 0.0f)
-    metallicRoughness.x = pushConstants.metallicRoughnessOverride.x;
-  if(pushConstants.metallicRoughnessOverride.y >= 0.0f)
-    metallicRoughness.y = pushConstants.metallicRoughnessOverride.y;
+  const float2 metallicRoughness = ApplyMetallicRoughnessOverride(ResolveMetallicRoughness(material, input.textureCoordinate), sceneInfo.metallicRoughnessOverride);
 
   // Shade
 

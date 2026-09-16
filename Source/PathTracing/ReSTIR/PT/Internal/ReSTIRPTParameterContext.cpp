@@ -80,10 +80,11 @@ ReSTIRPTInitialSamplingParameters GetDefaultReSTIRPTInitialSamplingParams()
 {
   // Paper configuration
   // The paper produces initial samples with 1spp path tracing (one path tree per pixel) and draws 32 NEE light candidates at the primary hit.
+  // The bounce limit is the one departure: three keeps initial sampling interactive and matches the reference path tracer's default, so the two renderers are compared at the same path length.
 
   ReSTIRPTInitialSamplingParameters parameters {};
 
-  parameters.maxBounces                       = 8;
+  parameters.maxBounces                       = 3;
   parameters.environmentMapImportanceSampling = 1;
   parameters.enableRussianRoulette            = 1;
 

@@ -150,5 +150,31 @@ int main()
     return 1;
   }
 
+  // Profile output
+  // The timing report is written at the end of a headless run, so like the capture prefix it is rejected without --headless, and a missing value is an error rather than an empty path.
+
+  if(Parse({ "--profile-output", "profile.json" }).error.empty() || Parse({ "--headless", "--profile-output" }).error.empty() || Parse({ "--headless", "--profile-output=" }).error.empty())
+  {
+    std::cerr << "--profile-output was accepted without --headless or without a value\n";
+    return 1;
+  }
+
+  const rtpt::ApplicationOptionsParseResult profile       = Parse({ "--headless", "--profile-output", "profiles/run.json" });
+  const rtpt::ApplicationOptionsParseResult joinedProfile = Parse({ "--headless", "--profile-output=profiles/run.json", "--capture-prefix", "captures/frame" });
+
+  if(!profile.error.empty() || profile.options.profileOutput != std::filesystem::path("profiles/run.json") || !joinedProfile.error.empty() || joinedProfile.options.profileOutput != std::filesystem::path("profiles/run.json") || !joinedProfile.options.capturePrefix.has_value())
+  {
+    std::cerr << "--profile-output with --headless did not set the output path\n";
+    return 1;
+  }
+
+  const rtpt::ApplicationOptionsParseResult withoutProfile = Parse({ "--headless" });
+
+  if(!withoutProfile.error.empty() || withoutProfile.options.profileOutput.has_value())
+  {
+    std::cerr << "omitting --profile-output still selected an output path\n";
+    return 1;
+  }
+
   return 0;
 }

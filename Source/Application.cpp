@@ -2,12 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <stdexcept>
 #include <utility>
 
 #include <GLFW/glfw3.h>
 #include <fmt/format.h>
-#include <glm/gtc/type_ptr.hpp>
+#include <glm/glm.hpp>
 #include <imgui.h>
 #include <imgui_internal.h>
 
@@ -19,6 +20,8 @@
 #include "PathTracing/PathTracerUi.h"
 #include "PostProcessing/TonemapperUi.h"
 #include "Rendering/FrameCapture.h"
+#include "Rendering/FrameTimingReport.h"
+#include "Rendering/FrameTimingUi.h"
 #include "Scene/SceneUi.h"
 
 #include "Generated/Shaders/Tonemap.hlsl.main.h"
@@ -45,7 +48,8 @@ constexpr float kHeadlessFrameTimeMilliseconds = 1000.0f / 60.0f;
 }  // namespace
 
 // Blue noise only receives pointers to systems that are initialized later; its own resources are created in InitializeRendererSystems.
-Application::Application(ApplicationOptions options) : m_Options(std::move(options)), m_BlueNoise({ .resources = &m_Resources, .uploads = &m_Uploads, .diagnostics = &m_Instance.Debug() })
+// Frame timing keeps every sample after warm-up in headless runs, which end with a report, and a rolling window in interactive runs, which the Profiler section shows.
+Application::Application(ApplicationOptions options) : m_Options(std::move(options)), m_FrameTiming(m_Options.headless ? FrameTimingStatistics::Settings { .warmupFrames = GetHeadlessWarmupFrameCount(m_Options.frameCount) } : FrameTimingStatistics::Settings { .windowFrames = kInteractiveTimingWindowFrames }), m_BlueNoise({ .resources = &m_Resources, .uploads = &m_Uploads, .diagnostics = &m_Instance.Debug() })
 {
 }
 
@@ -69,17 +73,28 @@ int Application::Run()
       }
     }
 
+    // The boundary after the last frame measures that frame's CPU time, which no later RenderFrame call would.
+    m_FrameTiming.AddCpuFrameBoundary(std::chrono::steady_clock::now());
+
     // Every submitted frame must finish before the targets are read back.
     m_Execution.Drain();
+
+    // Profile
+    // A slot's timestamps are only read when the slot is reused, so the last frame of every slot is still unread. After the drain all of them are complete.
+    // Reading the slots oldest first, starting after the last submitted one, keeps the statistics in frame order.
+
+    for(uint32_t offset = 1; offset <= kFrameSlotCount; ++offset)
+    {
+      CollectProfileResults(rtpt::FrameSlot { (m_LastFrameSlot.index + offset) % kFrameSlotCount });
+    }
+
+    if(m_Options.profileOutput) WriteProfileReport();
 
     if(m_Options.capturePrefix)
     {
       rtpt::CheckVk(vkQueueWaitIdle(m_Device.RenderQueue()), "vkQueueWaitIdle(before capture)");
 
-      // The rasterizer has no resolve step, so its captures report Off.
-      const RenderResolveMode resolveMode = m_RenderMode == RenderMode::ePathTracing ? m_PathTracer->GetSettings().resolveMode : m_RenderMode == RenderMode::eReSTIRPTEnhanced ? m_ReSTIRPT->GetSettings().common.resolveMode : RenderResolveMode::eOff;
-
-      WriteFrameCapture(m_Resources, m_Execution, m_Device.PhysicalDevice(), m_Targets, *m_Options.capturePrefix, m_Options, { .renderMode = m_RenderMode, .resolveMode = resolveMode, .sceneIndex = m_SelectedSceneIndex, .sceneLabel = m_SceneDefinitions[m_SelectedSceneIndex].label, .camera = m_Camera.State(), .tonemapper = m_TonemapperSettings });
+      WriteFrameCapture(m_Resources, m_Execution, m_Device.PhysicalDevice(), m_Targets, *m_Options.capturePrefix, m_Options, { .renderMode = m_RenderMode, .resolveMode = ActiveResolveMode(), .sceneIndex = m_SelectedSceneIndex, .sceneLabel = m_SceneDefinitions[m_SelectedSceneIndex].label, .camera = m_Camera.State(), .tonemapper = m_TonemapperSettings });
     }
   }
   else
@@ -156,6 +171,16 @@ void Application::Initialize()
     m_Resources.Initialize(m_Instance.Handle(), m_Device.PhysicalDevice(), m_Device.Handle(), m_Instance.ApiVersion(), m_Execution);
     m_Uploads.Initialize(m_Resources, m_Execution);
     m_Targets.Initialize(m_Resources, m_Device.PhysicalDevice());
+
+    // GPU profiler
+    // Timestamps are diagnostic only. A render queue that cannot record them leaves the profiler unready: renderers then receive a null profiler, so the recorded commands are the same as with profiling off.
+
+    const VkResult profilerResult = m_Profiler.Initialize(m_Device.PhysicalDevice(), m_Device.Handle(), m_Device.Queues().renderFamily, kFrameSlotCount, kMaxProfileScopesPerFrame);
+
+    if(profilerResult != VK_SUCCESS)
+    {
+      rtpt::Log(rtpt::LogLevel::Warning, fmt::format("GPU profiling is unavailable ({}); only CPU frame time will be measured", rtpt::VkResultName(profilerResult)));
+    }
 
     // Image samplers
     // The tonemapper keeps its linear sampler. The Display panel uses nearest filtering because its non-integer scale would otherwise modulate noise variance into a grid.
@@ -264,6 +289,7 @@ void Application::Shutdown() noexcept
 
   release([&] { m_Ui.Destroy(); });
   DestroyRendererSystems();
+  release([&] { m_Profiler.Destroy(); });
   release([&] { m_Targets.Destroy(); });
   release([&] { m_ViewportSampler.Reset(); });
   release([&] { m_LinearSampler.Reset(); });
@@ -644,11 +670,12 @@ void Application::DrawUi()
 
     invalidateHistory |= DrawSceneEnvironmentSection(m_SceneRuntime->GetSceneInfo());
 
+    invalidateHistory |= DrawSceneMaterialOverrideSection(m_MaterialOverride);
+
     DrawCameraSection(m_Camera);
     DrawTonemapperSection(m_TonemapperSettings);
 
-    // Only the rasterizer preview reads this override, so it does not touch path tracing history.
-    ImGui::DragFloat2("Metallic/Roughness", glm::value_ptr(m_MetallicRoughnessOverride), 0.01F, -0.01F, 1.0F);
+    DrawFrameTimingSection(m_FrameTiming, m_Profiler.IsReady());
   }
 
   ImGui::End();
@@ -658,6 +685,9 @@ void Application::DrawUi()
 
 bool Application::RenderFrame()
 {
+  // CPU frame time is the wall-clock time between successive calls, so the boundary is taken before any work, skipped frames included.
+  m_FrameTiming.AddCpuFrameBoundary(std::chrono::steady_clock::now());
+
   // Interactive frame setup
   // A window resize, or a swapchain that an earlier acquisition, presentation, or failed recreation marked for recreation, drains in-flight work, recreates the swapchain, and updates the UI image count and the viewport to match. Presentation only marks the swapchain, so the frame loop recreates it nowhere else.
   // If the swapchain is still not ready, the frame is skipped; the swapchain stays marked, so the recreation is retried next frame even without another resize.
@@ -702,8 +732,14 @@ bool Application::RenderFrame()
 
   // Frame recording
   // BeginFrame waits for this frame slot's previous submission. Interactive frames then acquire a swapchain image, and the frame is cancelled when none is available.
+  // That wait also completes the slot's previous timestamps, so they are read here, before the profiler resets the slot's queries for this frame.
+  // A cancelled frame's scopes never reach the GPU, so the profiler forgets them; otherwise the next read of the slot would wait for timestamps that are never written.
 
   const rtpt::FrameContext frame = m_Execution.BeginFrame();
+
+  CollectProfileResults(frame.slot);
+
+  if(m_Profiler.IsReady()) m_Profiler.BeginFrame(frame.commands, frame.slot);
 
   rtpt::AcquiredSwapchainImage acquired;
 
@@ -714,17 +750,25 @@ bool Application::RenderFrame()
     if(!acquired)
     {
       m_Execution.CancelFrame();
+
+      if(m_Profiler.IsReady()) m_Profiler.DiscardFrame(frame.slot);
+
       return false;
     }
   }
 
-  // If anything throws while the frame is active, the frame and the acquired image are released before rethrowing.
+  // If anything throws while the frame is active, the frame, its profiler scopes, and the acquired image are released before rethrowing.
   try
   {
-    RenderScene(frame);
-    PostProcess(frame.commands);
+    // The frame scope encloses every pass, so the pass scopes nested in it can be checked against the whole frame's GPU time.
+    {
+      const GpuProfiler::Zone frameZone(ActiveProfiler(), frame.commands, frame.slot, "Frame");
 
-    if(!m_Options.headless) RecordPresentation(frame.commands, acquired);
+      RenderScene(frame);
+      PostProcess(frame);
+
+      if(!m_Options.headless) RecordPresentation(frame, acquired);
+    }
 
     // Submission
     // Interactive submissions wait on the image-available semaphore and signal render-finished, which Present waits on. Headless submissions need no synchronization.
@@ -741,6 +785,8 @@ bool Application::RenderFrame()
     }
 
     const rtpt::CompletionPoint completion = m_Execution.SubmitFrame(sync);
+
+    m_LastFrameSlot = frame.slot;
 
     // Presentation
     // An out-of-date or suboptimal swapchain is only marked for recreation here. Recreating it on the spot would skip the UI image count and viewport updates, so the frame setup at the top of the next frame recreates it together with them.
@@ -761,6 +807,7 @@ bool Application::RenderFrame()
   catch(...)
   {
     if(m_Execution.HasActiveFrame()) m_Execution.CancelFrame();
+    if(m_Profiler.IsReady()) m_Profiler.DiscardFrame(frame.slot);
     if(acquired) m_Swapchain.Cancel(acquired);
     throw;
   }
@@ -774,6 +821,9 @@ void Application::RenderScene(const rtpt::FrameContext& frame)
   const glm::mat4 view       = m_Camera.View();
   const glm::mat4 projection = m_Camera.Projection();
 
+  // The material override is written every frame rather than when its control changes, so a scene reload - which rebuilds the scene uniform from scratch - cannot leave the UI and the renderers disagreeing.
+  m_SceneRuntime->GetSceneInfo().metallicRoughnessOverride = rtpt::ResolveMetallicRoughnessOverride(m_MaterialOverride);
+
   m_SceneRuntime->UpdateSceneBuffer(frame.commands, view, projection, m_Camera.State().eye, m_Targets.Extent());
 
   // Renderer
@@ -784,20 +834,22 @@ void Application::RenderScene(const rtpt::FrameContext& frame)
 
   if(m_RenderMode == RenderMode::ePathTracing)
   {
-    m_PathTracer->Render({ .cmd = frame.commands, .sceneResource = &m_SceneRuntime->GetSceneResource(), .sceneInfo = &m_SceneRuntime->GetSceneInfo(), .topLevelAS = &m_SceneRuntime->GetTopLevelAccelerationStructure(), .output = m_Targets.Hdr(), .frameSlot = frame.slot.index, .frameTimeMilliseconds = frameTimeMilliseconds });
+    m_PathTracer->Render({ .cmd = frame.commands, .sceneResource = &m_SceneRuntime->GetSceneResource(), .sceneInfo = &m_SceneRuntime->GetSceneInfo(), .topLevelAS = &m_SceneRuntime->GetTopLevelAccelerationStructure(), .output = m_Targets.Hdr(), .frameSlot = frame.slot.index, .frameTimeMilliseconds = frameTimeMilliseconds, .profiler = ActiveProfiler() });
   }
   else if(m_RenderMode == RenderMode::eReSTIRPTEnhanced)
   {
-    m_ReSTIRPT->Render({ .cmd = frame.commands, .sceneResource = &m_SceneRuntime->GetSceneResource(), .sceneInfo = &m_SceneRuntime->GetSceneInfo(), .topLevelAS = &m_SceneRuntime->GetTopLevelAccelerationStructure(), .output = m_Targets.Hdr(), .frameSlot = frame.slot.index, .frameTimeMilliseconds = frameTimeMilliseconds });
+    m_ReSTIRPT->Render({ .cmd = frame.commands, .sceneResource = &m_SceneRuntime->GetSceneResource(), .sceneInfo = &m_SceneRuntime->GetSceneInfo(), .topLevelAS = &m_SceneRuntime->GetTopLevelAccelerationStructure(), .output = m_Targets.Hdr(), .frameSlot = frame.slot.index, .frameTimeMilliseconds = frameTimeMilliseconds, .profiler = ActiveProfiler() });
   }
   else
   {
-    m_Raster->Render({ .cmd = frame.commands, .sceneResource = &m_SceneRuntime->GetSceneResource(), .sceneInfo = &m_SceneRuntime->GetSceneInfo(), .viewMatrix = view, .projectionMatrix = projection, .metallicRoughnessOverride = m_MetallicRoughnessOverride, .colorTarget = m_Targets.Hdr(), .depthTarget = m_Targets.Depth() });
+    m_Raster->Render({ .cmd = frame.commands, .sceneResource = &m_SceneRuntime->GetSceneResource(), .sceneInfo = &m_SceneRuntime->GetSceneInfo(), .viewMatrix = view, .projectionMatrix = projection, .colorTarget = m_Targets.Hdr(), .depthTarget = m_Targets.Depth(), .frameSlot = frame.slot, .profiler = ActiveProfiler() });
   }
 }
 
-void Application::PostProcess(VkCommandBuffer commandBuffer)
+void Application::PostProcess(const rtpt::FrameContext& frame)
 {
+  const GpuProfiler::Zone tonemapZone(ActiveProfiler(), frame.commands, frame.slot, "Post/Tonemap");
+
   // LDR layout
   // The LDR target's previous state depends on how the last frame ended: headless frames leave it as the tonemapper's storage output,
   // interactive frames leave it shader-readable for the UI. A newly allocated image has no contents to keep, so it starts from the default scope.
@@ -809,35 +861,100 @@ void Application::PostProcess(VkCommandBuffer commandBuffer)
     before = m_Options.headless ? rtpt::ImageAccessScope { { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT }, VK_IMAGE_LAYOUT_GENERAL } : rtpt::ImageAccessScope { { VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT }, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
   }
 
-  rtpt::CmdImageBarrier(commandBuffer, m_Targets.Ldr().image, kColorRange, before, { { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT }, VK_IMAGE_LAYOUT_GENERAL });
+  rtpt::CmdImageBarrier(frame.commands, m_Targets.Ldr().image, kColorRange, before, { { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT }, VK_IMAGE_LAYOUT_GENERAL });
 
   // Tonemap
   // HDR is sampled in the GENERAL layout through the linear sampler, and LDR is written as a storage image.
 
-  m_Tonemapper.Run(commandBuffer, m_Targets.Extent(), m_TonemapperSettings, m_Targets.Hdr().Descriptor(VK_IMAGE_LAYOUT_GENERAL, m_LinearSampler.sampler), m_Targets.Ldr().Descriptor(VK_IMAGE_LAYOUT_GENERAL));
+  m_Tonemapper.Run(frame.commands, m_Targets.Extent(), m_TonemapperSettings, m_Targets.Hdr().Descriptor(VK_IMAGE_LAYOUT_GENERAL, m_LinearSampler.sampler), m_Targets.Ldr().Descriptor(VK_IMAGE_LAYOUT_GENERAL));
 
   m_LdrInitialized = true;
 }
 
-void Application::RecordPresentation(VkCommandBuffer commandBuffer, const rtpt::AcquiredSwapchainImage& acquired)
+void Application::RecordPresentation(const rtpt::FrameContext& frame, const rtpt::AcquiredSwapchainImage& acquired)
 {
+  const GpuProfiler::Zone uiZone(ActiveProfiler(), frame.commands, frame.slot, "Post/UI");
+
   // Display texture
   // The UI samples the LDR target inside the Display window, so it moves from the tonemapper's storage write to shader-read.
 
-  rtpt::CmdImageBarrier(commandBuffer, m_Targets.Ldr().image, kColorRange, { { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT }, VK_IMAGE_LAYOUT_GENERAL }, { { VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT }, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL });
+  rtpt::CmdImageBarrier(frame.commands, m_Targets.Ldr().image, kColorRange, { { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT }, VK_IMAGE_LAYOUT_GENERAL }, { { VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT }, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL });
 
   // UI pass
   // The UI pass clears the whole swapchain image, so it transitions from the default scope without preserving contents.
   // The dark clear color shows wherever no window covers the framebuffer.
 
-  rtpt::CmdImageBarrier(commandBuffer, acquired.image, kColorRange, {}, { { VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT }, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
+  rtpt::CmdImageBarrier(frame.commands, acquired.image, kColorRange, {}, { { VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT }, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
 
-  m_Ui.Record(commandBuffer, acquired.view, acquired.extent, VK_ATTACHMENT_LOAD_OP_CLEAR, VkClearColorValue { { 0.02F, 0.02F, 0.025F, 1.0F } });
+  m_Ui.Record(frame.commands, acquired.view, acquired.extent, VK_ATTACHMENT_LOAD_OP_CLEAR, VkClearColorValue { { 0.02F, 0.02F, 0.025F, 1.0F } });
 
   // Present
   // The finished image moves to the layout vkQueuePresentKHR requires.
 
-  rtpt::CmdImageBarrier(commandBuffer, acquired.image, kColorRange, { { VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT }, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL }, { { VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE }, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR });
+  rtpt::CmdImageBarrier(frame.commands, acquired.image, kColorRange, { { VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT }, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL }, { { VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE }, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR });
+}
+
+void Application::CollectProfileResults(rtpt::FrameSlot slot)
+{
+  if(!m_Profiler.IsReady())
+  {
+    return;
+  }
+
+  // Conversion
+  // The statistics take plain name and duration pairs so they stay free of Vulkan. The names are borrowed from results, which outlives the call.
+
+  const std::vector<rtpt::GpuProfileResult> results = m_Profiler.Read(slot);
+
+  std::vector<FrameTimingStatistics::ScopeSample> samples;
+
+  samples.reserve(results.size());
+
+  for(const rtpt::GpuProfileResult& result : results)
+  {
+    samples.push_back({ .name = result.name, .milliseconds = result.milliseconds });
+  }
+
+  m_FrameTiming.AddGpuFrame(samples);
+}
+
+rtpt::GpuProfiler* Application::ActiveProfiler()
+{
+  return m_Profiler.IsReady() ? &m_Profiler : nullptr;
+}
+
+RenderResolveMode Application::ActiveResolveMode() const
+{
+  return m_RenderMode == RenderMode::ePathTracing ? m_PathTracer->GetSettings().resolveMode : m_RenderMode == RenderMode::eReSTIRPTEnhanced ? m_ReSTIRPT->GetSettings().common.resolveMode : RenderResolveMode::eOff;
+}
+
+void Application::WriteProfileReport()
+{
+  // Metadata
+  // The scene and resolve mode are read back from the running systems rather than the command line, because the catalog and renderer defaults can differ from what was requested.
+
+  const VkPhysicalDeviceProperties& properties = m_Device.Support().properties.properties;
+
+  const FrameTimingReportMetadata metadata {
+      .renderer       = GetRenderModeName(m_RenderMode),
+      .resolveMode    = GetResolveModeName(ActiveResolveMode()),
+      .sceneIndex     = m_SelectedSceneIndex,
+      .sceneLabel     = m_SceneDefinitions[m_SelectedSceneIndex].label,
+      .viewportWidth  = m_Targets.Extent().width,
+      .viewportHeight = m_Targets.Extent().height,
+      .frameCount     = m_Options.frameCount,
+      .deviceName     = properties.deviceName,
+      .driverVersion  = properties.driverVersion,
+  };
+
+  // Output
+  // The table goes to stdout so it can be captured separately from the log, which goes to stderr.
+
+  WriteFrameTimingReport(*m_Options.profileOutput, metadata, m_FrameTiming);
+
+  fmt::print("{}", FormatFrameTimingTable(metadata, m_FrameTiming));
+
+  rtpt::Log(rtpt::LogLevel::Info, "profile written: " + m_Options.profileOutput->string());
 }
 
 void Application::InvalidateRenderHistory()

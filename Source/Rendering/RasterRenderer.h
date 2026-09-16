@@ -7,6 +7,7 @@
 #include <volk.h>
 
 #include "Framework/Vulkan/Descriptors.h"
+#include "Framework/Vulkan/GpuProfiler.h"
 #include "Framework/Vulkan/VulkanDevice.h"
 #include "Rendering/RenderTargetView.h"
 #include "Rendering/SkyRenderer.h"
@@ -53,12 +54,14 @@ public:
     // Camera matrices, used by the sky pass.
     glm::mat4                      viewMatrix { 1.0F };
     glm::mat4                      projectionMatrix { 1.0F };
-    // Metallic and roughness override forwarded to the raster push constants.
-    glm::vec2                      metallicRoughnessOverride { -0.01F, -0.01F };
     // Color output; left in GENERAL layout when the pass finishes. Its extent is the render area.
     rtpt::RenderTargetView         colorTarget {};
     // Depth attachment, cleared every frame.
     rtpt::RenderTargetView         depthTarget {};
+    // Slot of the frame being recorded; the profiler keeps its queries per slot.
+    rtpt::FrameSlot                frameSlot {};
+    // Optional. Receives one timestamp scope around the sky and draw pass; null records no timing.
+    rtpt::GpuProfiler*             profiler = nullptr;
   };
 
   explicit RasterRenderer(const CreateInfo& createInfo);

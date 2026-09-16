@@ -4,6 +4,7 @@
 
 #include <imgui.h>
 
+#include "Framework/Presentation/UiControls.h"
 #include "PathTracing/Common/RendererUi.h"
 #include "PathTracing/ReSTIR/PT/ReSTIRPTUi.h"
 
@@ -12,7 +13,11 @@ namespace rtpt
 
 bool DrawRendererSection(RenderMode& renderMode, PathTracer& pathTracer, ReSTIRPTRenderer& restirPT)
 {
-  if(!ImGui::CollapsingHeader("Renderer", ImGuiTreeNodeFlags_DefaultOpen)) return false;
+  const bool open = ImGui::CollapsingHeader("Renderer", ImGuiTreeNodeFlags_DefaultOpen);
+
+  DrawTooltip("Which renderer draws the scene, and its settings. The three modes exist to be compared against each other, so they share the resolve and bounce controls wherever the concept is the same.");
+
+  if(!open) return false;
 
   // Mode
   // Combo indices follow the RenderMode declaration order. Switching renderer discards history so the new renderer starts clean.
@@ -28,6 +33,8 @@ bool DrawRendererSection(RenderMode& renderMode, PathTracer& pathTracer, ReSTIRP
     renderMode = static_cast<RenderMode>(mode);
     changed    = true;
   }
+
+  DrawTooltip("Which renderer fills the Display window.\n\nRasterizer is a cheap environment-lit preview, there to show the scene without ray tracing; it is not a reference for anything.\n\nPath Tracing is the brute-force reference: correct by construction and far too noisy to use at one sample per pixel.\n\nReSTIR PT Enhanced reuses paths across frames and neighbouring pixels to get close to that reference in real time, and is what the rest of this panel is about.");
 
   // Renderer controls
   // Each renderer owns its settings, so only the active one is drawn.
@@ -52,12 +59,14 @@ bool DrawPathTracerControls(PathTracer& pathTracer)
 
   int bounces = static_cast<int>(settings.maxBounces);
 
-  // The slider stops at the bounce limit the path tracer's pipeline reports.
-  if(ImGui::SliderInt("Max Bounces", &bounces, 1, static_cast<int>(pathTracer.GetPipelineBounceLimit())))
+  // The slider stops at the path tracer's fixed bounce limit.
+  if(ImGui::SliderInt("Max Bounces", &bounces, 1, static_cast<int>(pathTracer.GetBounceLimit())))
   {
     settings.maxBounces = static_cast<uint32_t>(bounces);
     changed             = true;
   }
+
+  DrawTooltip("How many times a path may bounce before it is cut off. One bounce is direct lighting only; each further bounce adds a round of indirect light and costs roughly a ray per pixel. Keep it equal to the ReSTIR bounce limit when comparing the two renderers.");
 
   // Denoiser controls only appear when the resolve mode uses the denoiser.
   if(IsDenoiseResolveMode(settings.resolveMode))
@@ -80,7 +89,7 @@ bool DrawReSTIRPTControls(ReSTIRPTRenderer& restirPT)
 
   bool changed = DrawReSTIRPTCommonControls(settings.common);
 
-  changed |= DrawReSTIRPTInitialSamplingSection(settings.initialSampling, restirPT.GetPipelineBounceLimit());
+  changed |= DrawReSTIRPTInitialSamplingSection(settings.initialSampling, restirPT.GetBounceLimit());
   changed |= DrawReSTIRPTShiftSection(settings.shift);
   changed |= DrawReSTIRPTResamplingSection(settings.temporalResampling, settings.spatialResampling, 128.0F);
   changed |= DrawReSTIRPTDecorrelationSection(settings.decorrelation);

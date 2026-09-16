@@ -20,15 +20,16 @@ static const float kRayOriginFloatEps          = 1.0 / 65536.0;
 static const float kRayOriginIntScale          = 256.0;
 
 // A shader that needs extra per-path state defines this before including the header; ReSTIR PT uses it to carry its reservoir.
-#ifndef PATH_TRACING_PAYLOAD_EXTRA_FIELDS
-#define PATH_TRACING_PAYLOAD_EXTRA_FIELDS
+#ifndef PATH_TRACING_STATE_EXTRA_FIELDS
+#define PATH_TRACING_STATE_EXTRA_FIELDS
 #endif
 
-// PathPayload
-// Per-path state carried through TraceRay between the ray generation, closest-hit, and miss shaders.
+// PathState
+// Per-path state of the path loop in PathLoop.hlsli, held in a ray generation local for the whole path.
+// It never travels through TraceRay: a ray payload is copied into and out of every trace, and carrying this much state on every bounce cost more than tracing the ray itself. Path rays carry a PathHitRecord instead.
 // Besides the running estimate it remembers the previous scattering vertex, so light hits can be MIS weighted against next-event estimation, and the primary-surface data and split radiance the NRD denoiser needs.
 
-struct PathPayload
+struct PathState
 {
   // Sum of every contribution along the path; the pixel's radiance estimate.
   float3 radiance;
@@ -40,7 +41,7 @@ struct PathPayload
   float  mediumThickness;
   // Previous scattering vertex, from which an emissive hit's light PDF is evaluated for MIS.
   float3 lastSurfacePosition;
-  // Previous vertex's shading normal, the receiver normal for the environment light PDF on a miss.
+  // Previous vertex's shading normal, the receiver normal for the environment light PDF on an escape.
   float3 lastSurfaceNormal;
   // Direct-light-compatible BSDF PDF of the previous bounce. Zero unless the broad group was sampled.
   float  lastDirectLightBsdfPdf;
@@ -50,7 +51,7 @@ struct PathPayload
   uint   depth;
   // Nonzero while the path travels inside an absorbing medium.
   uint   mediumActive;
-  // Nonzero if the previous vertex sampled the environment explicitly for the event it scattered through, so a miss must be MIS weighted.
+  // Nonzero if the previous vertex sampled the environment explicitly for the event it scattered through, so an escape must be MIS weighted.
   uint   lastEnvironmentNeeActive;
   // Nonzero if the previous vertex took an emissive light sample, so an emissive hit must be MIS weighted. A vertex that skips emissive NEE leaves it clear, and the hit keeps its full weight because no light sample shares its energy.
   uint   lastEmissiveNeeActive;
@@ -82,10 +83,28 @@ struct PathPayload
   uint   hasSpecularDenoiserHitDistance;
   // Nonzero when the primary bounce sampled a non-broad lobe, routing later radiance to the specular signal.
   uint   firstBounceIsSpecular;
-  // Set when the primary bounce ray is launched and cleared once its hit or miss records the distance.
+  // Set when the primary bounce ray is launched and cleared once its hit or escape records the distance.
   uint   awaitingFirstBounceHitDistance;
   // Shader-specific extensions; see the macro above.
-  PATH_TRACING_PAYLOAD_EXTRA_FIELDS
+  PATH_TRACING_STATE_EXTRA_FIELDS
+};
+
+// PathHitRecord
+// The ray payload of path rays, and all their closest-hit and miss shaders write: which triangle was hit and where along the ray, not what the surface there is.
+// Ray generation rebuilds the full SurfaceData from it with LoadSurfaceDataFromHit. Front-facing is not recorded because the loader derives it from the ray direction, which ray generation already holds.
+
+struct PathHitRecord
+{
+  // InstanceIndex() of the hit, which selects the instance transform, mesh, and material.
+  uint   instanceIndex;
+  // PrimitiveIndex() of the hit triangle within the instance's mesh.
+  uint   primitiveIndex;
+  // DXR barycentrics: the weights of the triangle's second and third vertices.
+  float2 barycentrics;
+  // RayTCurrent() at the hit: the segment length for medium attenuation and the denoiser's hit distance.
+  float  hitDistance;
+  // One when closest hit ran. The miss shader writes zero, and every other field is then undefined.
+  uint   hasHit;
 };
 
 // ShadowPayload
@@ -99,7 +118,7 @@ struct ShadowPayload
 
 // SurfaceData
 // A hit point fully resolved from glTF geometry, textures, and material extensions.
-// LoadSurfaceData fills it once per hit so the BSDF and light sampling code never touch raw scene buffers.
+// LoadSurfaceDataFromHit fills it once per hit so the BSDF and light sampling code never touch raw scene buffers.
 
 struct SurfaceData
 {
@@ -154,19 +173,19 @@ struct SurfaceData
 };
 
 // Records the first surface along the path as the denoiser's guide data. Later hits leave it untouched.
-void StorePrimarySurfaceForDenoiser(inout PathPayload payload, SurfaceData surface)
+void StorePrimarySurfaceForDenoiser(inout PathState path, SurfaceData surface)
 {
-  if(payload.hasPrimarySurface != 0u)
+  if(path.hasPrimarySurface != 0u)
   {
     return;
   }
 
-  payload.primaryWorldPosition = surface.worldPosition;
-  payload.primaryRoughness     = surface.roughness;
-  payload.primaryShadingNormal = surface.shadingNormal;
-  payload.primaryBaseColor     = surface.albedo;
-  payload.primaryMetalness     = surface.metallic;
-  payload.hasPrimarySurface    = 1u;
+  path.primaryWorldPosition = surface.worldPosition;
+  path.primaryRoughness     = surface.roughness;
+  path.primaryShadingNormal = surface.shadingNormal;
+  path.primaryBaseColor     = surface.albedo;
+  path.primaryMetalness     = surface.metallic;
+  path.hasPrimarySurface    = 1u;
 }
 
 // Motion of a world position between the previous and current frame, in NRD's convention.
@@ -203,31 +222,40 @@ bool IsSpecularDenoiserLobe(uint sampledLobeKind)
 }
 
 // Routes a contribution into the diffuse or specular denoiser signal.
-void AccumulateDenoiserRadiance(inout PathPayload payload, float3 radiance)
+void AccumulateDenoiserRadiance(inout PathState path, float3 radiance)
 {
   // Radiance without a primary surface (camera rays that miss) is not part of either signal.
-  if(payload.hasPrimarySurface == 0u)
+  if(path.hasPrimarySurface == 0u)
   {
     return;
   }
 
   // Light gathered at the primary vertex itself (its emission and broad-group NEE) is diffuse. Everything later follows the first bounce's lobe.
-  if(payload.depth == 0u || payload.firstBounceIsSpecular == 0u)
+  if(path.depth == 0u || path.firstBounceIsSpecular == 0u)
   {
-    payload.diffuseDenoiserRadiance += radiance;
+    path.diffuseDenoiserRadiance += radiance;
     return;
   }
 
-  payload.specularDenoiserRadiance += radiance;
+  path.specularDenoiserRadiance += radiance;
 }
+
+// Contribution sites
+// Which estimator in the path loop publishes the next contribution, announced through PATH_TRACING_ON_CONTRIBUTION_SITE (PathLoop.hlsli) just before it.
+// The contribution hooks below cannot see their caller; ReSTIR PT records the site as the endpoint kind of the path it selects.
+
+static const uint kPathContributionSiteEmissionHit    = 0u;
+static const uint kPathContributionSiteEnvironmentNee = 1u;
+static const uint kPathContributionSiteEmissiveNee    = 2u;
+static const uint kPathContributionSiteEscape         = 3u;
 
 // Contribution hook
 // Observation hook for every radiance contribution the path tracer produces.
-// A plain path tracer sums contributions into payload.radiance. ReSTIR PT instead treats each one as a candidate path and streams it through RIS, so it needs to see them individually rather than as a sum. Defining this macro lets a shader observe each contribution without changing how the path itself is sampled.
-// The hook is additive, not a replacement: payload.radiance keeps accumulating normally, so a ReSTIR PT pass carries the plain path-traced answer for the same sample alongside its reservoir. That makes the two directly comparable in one pass, which is how the resampled result is validated against the reference.
+// A plain path tracer sums contributions into path.radiance. ReSTIR PT instead treats each one as a candidate path and streams it through RIS, so it needs to see them individually rather than as a sum. Defining this macro lets a shader observe each contribution without changing how the path itself is sampled.
+// The hook is additive, not a replacement: path.radiance keeps accumulating normally, so a ReSTIR PT pass carries the plain path-traced answer for the same sample alongside its reservoir. That makes the two directly comparable in one pass, which is how the resampled result is validated against the reference.
 
 #ifndef PATH_TRACING_ON_CONTRIBUTION
-#define PATH_TRACING_ON_CONTRIBUTION(payload, contribution)
+#define PATH_TRACING_ON_CONTRIBUTION(path, contribution)
 #endif
 
 // Weighted contribution hook
@@ -235,7 +263,7 @@ void AccumulateDenoiserRadiance(inout PathPayload payload, float3 radiance)
 // Kept distinct from the unweighted hook because an observer usually needs the two factors apart. The contribution is what another domain could reconstruct; the weight is what only this sample knows.
 
 #ifndef PATH_TRACING_ON_CONTRIBUTION_WEIGHTED
-#define PATH_TRACING_ON_CONTRIBUTION_WEIGHTED(payload, contribution, candidateWeight)
+#define PATH_TRACING_ON_CONTRIBUTION_WEIGHTED(path, contribution, candidateWeight)
 #endif
 
 // Emissive NEE hook
@@ -243,81 +271,81 @@ void AccumulateDenoiserRadiance(inout PathPayload payload, float3 radiance)
 // lightIndex indexes the emissive triangle list, so the sampled point can be rebuilt later from the light itself rather than from a stored world position.
 
 #ifndef PATH_TRACING_ON_NEE_EMISSIVE
-#define PATH_TRACING_ON_NEE_EMISSIVE(payload, lightIndex, barycentrics, radiance, lightPdf, distance)
+#define PATH_TRACING_ON_NEE_EMISSIVE(path, lightIndex, barycentrics, radiance, lightPdf, distance)
 #endif
 
 // Single funnel for radiance contributions.
 // Every site that adds light to a path must route through here so the hook above cannot miss one.
-void AccumulatePathContribution(inout PathPayload payload, float3 contribution)
+void AccumulatePathContribution(inout PathState path, float3 contribution)
 {
-  payload.radiance += contribution;
+  path.radiance += contribution;
 
-  AccumulateDenoiserRadiance(payload, contribution);
+  AccumulateDenoiserRadiance(path, contribution);
 
-  PATH_TRACING_ON_CONTRIBUTION(payload, contribution);
+  PATH_TRACING_ON_CONTRIBUTION(path, contribution);
 }
 
 // Same funnel for a site that produced its contribution through a sampling process with its own unbiased contribution weight, such as RIS over several candidates.
 // The radiance sum takes the product, which is the estimate. The hook receives both factors, because a resampler stores them separately.
-void AccumulatePathContributionWithWeight(inout PathPayload payload, float3 contribution, float candidateWeight)
+void AccumulatePathContributionWithWeight(inout PathState path, float3 contribution, float candidateWeight)
 {
   const float3 estimate = contribution * candidateWeight;
 
-  payload.radiance += estimate;
+  path.radiance += estimate;
 
-  AccumulateDenoiserRadiance(payload, estimate);
+  AccumulateDenoiserRadiance(path, estimate);
 
-  PATH_TRACING_ON_CONTRIBUTION_WEIGHTED(payload, contribution, candidateWeight);
+  PATH_TRACING_ON_CONTRIBUTION_WEIGHTED(path, contribution, candidateWeight);
 }
 
 // Called when the primary vertex launches its bounce ray: fixes which signal later radiance feeds and arms the hit-distance capture.
-void BeginFirstBounceDenoiserSignal(inout PathPayload payload, uint sampledLobeKind)
+void BeginFirstBounceDenoiserSignal(inout PathState path, uint sampledLobeKind)
 {
-  if(payload.hasPrimarySurface == 0u)
+  if(path.hasPrimarySurface == 0u)
   {
     return;
   }
 
-  payload.firstBounceIsSpecular          = IsSpecularDenoiserLobe(sampledLobeKind) ? 1u : 0u;
-  payload.awaitingFirstBounceHitDistance = 1u;
+  path.firstBounceIsSpecular          = IsSpecularDenoiserLobe(sampledLobeKind) ? 1u : 0u;
+  path.awaitingFirstBounceHitDistance = 1u;
 }
 
 // Records the length of the primary bounce segment for the signal that bounce feeds. Only the first call after arming takes effect.
 // It overwrites any diffuse fallback distance stored earlier by StoreDiffuseDenoiserHitDistanceIfMissing.
-void StoreFirstBounceHitDistance(inout PathPayload payload, float hitDistance)
+void StoreFirstBounceHitDistance(inout PathState path, float hitDistance)
 {
-  if(payload.awaitingFirstBounceHitDistance == 0u)
+  if(path.awaitingFirstBounceHitDistance == 0u)
   {
     return;
   }
 
   const float clampedHitDistance = max(hitDistance, 0.0);
 
-  if(payload.firstBounceIsSpecular != 0u)
+  if(path.firstBounceIsSpecular != 0u)
   {
-    payload.specularDenoiserHitDistance    = clampedHitDistance;
-    payload.hasSpecularDenoiserHitDistance = 1u;
+    path.specularDenoiserHitDistance    = clampedHitDistance;
+    path.hasSpecularDenoiserHitDistance = 1u;
   }
   else
   {
-    payload.diffuseDenoiserHitDistance    = clampedHitDistance;
-    payload.hasDiffuseDenoiserHitDistance = 1u;
+    path.diffuseDenoiserHitDistance    = clampedHitDistance;
+    path.hasDiffuseDenoiserHitDistance = 1u;
   }
 
-  payload.awaitingFirstBounceHitDistance = 0u;
+  path.awaitingFirstBounceHitDistance = 0u;
 }
 
 // Supplies a diffuse hit distance from a primary-vertex light sample when nothing has provided one yet.
-void StoreDiffuseDenoiserHitDistanceIfMissing(inout PathPayload payload, float hitDistance)
+void StoreDiffuseDenoiserHitDistanceIfMissing(inout PathState path, float hitDistance)
 {
-  if(payload.hasPrimarySurface == 0u || payload.depth != 0u || payload.hasDiffuseDenoiserHitDistance != 0u)
+  if(path.hasPrimarySurface == 0u || path.depth != 0u || path.hasDiffuseDenoiserHitDistance != 0u)
   {
     return;
   }
 
   // Direct-light next-event samples have no secondary ray hit. Give REBLUR the light distance instead of a zero fallback so its blur radius is not overly strict.
-  payload.diffuseDenoiserHitDistance    = max(hitDistance, 0.0);
-  payload.hasDiffuseDenoiserHitDistance = 1u;
+  path.diffuseDenoiserHitDistance    = max(hitDistance, 0.0);
+  path.hasDiffuseDenoiserHitDistance = 1u;
 }
 
 // Whether the ray generation shader blends this frame into the accumulation history. Currently the same as IsAccumulationEnabled.

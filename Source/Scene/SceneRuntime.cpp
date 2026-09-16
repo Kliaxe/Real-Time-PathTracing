@@ -145,6 +145,7 @@ void SceneRuntime::RebuildScene(const SceneUploader::UploadInput& input, VkExten
   sceneInfo.backgroundColor             = { 0.85F, 0.85F, 0.85F };
   sceneInfo.numLights                   = 1;
   sceneInfo.viewportSize                = { static_cast<float>(viewport.width), static_cast<float>(viewport.height) };
+  sceneInfo.metallicRoughnessOverride   = { -1.0F, -1.0F };
   sceneInfo.punctualLights[0].color     = glm::vec3(1.0F);
   sceneInfo.punctualLights[0].intensity = 4.0F;
   sceneInfo.punctualLights[0].position  = glm::vec3(1.0F);

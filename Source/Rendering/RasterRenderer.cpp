@@ -254,13 +254,15 @@ void RasterRenderer::Render(const RenderInput& input)
     return;
   }
 
+  // One scope covers the procedural sky and the raster pass, everything this renderer records.
+  const GpuProfiler::Zone drawZone(input.profiler, input.cmd, input.frameSlot, "Raster/Draw");
+
   const rtpt::GltfSceneResource& sceneResource = *input.sceneResource;
   const shaderio::GltfSceneInfo& sceneInfo     = *input.sceneInfo;
   const VkExtent2D               viewportSize  = input.colorTarget.extent;
 
   shaderio::RasterPushConstant pushValues = {
-      .sceneInfoAddress          = (shaderio::GltfSceneInfo*)sceneResource.bSceneInfo.address,
-      .metallicRoughnessOverride = input.metallicRoughnessOverride,
+      .sceneInfoAddress = (shaderio::GltfSceneInfo*)sceneResource.bSceneInfo.address,
   };
 
   // Background choice

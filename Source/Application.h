@@ -3,8 +3,6 @@
 #include <memory>
 #include <vector>
 
-#include <glm/vec2.hpp>
-
 #include "ApplicationOptions.h"
 #include "Camera/CameraController.h"
 #include "Framework/Platform/Window.h"
@@ -12,6 +10,7 @@
 #include "Framework/Presentation/WindowTitle.h"
 #include "Framework/Vulkan/Descriptors.h"
 #include "Framework/Vulkan/GpuExecution.h"
+#include "Framework/Vulkan/GpuProfiler.h"
 #include "Framework/Vulkan/GpuResources.h"
 #include "Framework/Vulkan/PresentationSurface.h"
 #include "Framework/Vulkan/Swapchain.h"
@@ -21,12 +20,14 @@
 #include "PathTracing/PathTracer.h"
 #include "PathTracing/ReSTIR/PT/ReSTIRPTRenderer.h"
 #include "PostProcessing/Tonemapper.h"
+#include "Rendering/FrameTimingStatistics.h"
 #include "Rendering/RasterRenderer.h"
 #include "Rendering/ViewportTargets.h"
 #include "Sampling/SpatiotemporalBlueNoise.h"
 #include "Scene/SceneAssetCatalog.h"
 #include "Scene/SceneResolver.h"
 #include "Scene/SceneRuntime.h"
+#include "Scene/SceneTypes.h"
 
 namespace rtpt
 {
@@ -56,6 +57,12 @@ private:
 
   // Capacity of the scene texture arrays in every renderer's descriptor set. SceneRuntime ignores textures beyond it with a warning.
   static constexpr uint32_t kMaxTextureDescriptors = 4096;
+
+  // Timestamp scopes one frame may open. The busiest frame - ReSTIR PT with the sorted pre-pass and NRD, plus the frame and post scopes - opens 13, so this leaves room for new passes.
+  static constexpr uint32_t kMaxProfileScopesPerFrame = 32;
+
+  // Frames the interactive Profiler section summarizes. Two seconds at 60 Hz is long enough to steady the percentiles and short enough to follow a settings change.
+  static constexpr uint32_t kInteractiveTimingWindowFrames = 120;
 
   // Brings up every system in dependency order. Any exception runs Shutdown before it propagates.
   void Initialize();
@@ -95,10 +102,22 @@ private:
   void RenderScene(const rtpt::FrameContext& frame);
 
   // Tonemaps HDR into the LDR target.
-  void PostProcess(VkCommandBuffer commandBuffer);
+  void PostProcess(const rtpt::FrameContext& frame);
 
   // Draws the UI, including the LDR image, into the acquired swapchain image and leaves it ready to present.
-  void RecordPresentation(VkCommandBuffer commandBuffer, const rtpt::AcquiredSwapchainImage& acquired);
+  void RecordPresentation(const rtpt::FrameContext& frame, const rtpt::AcquiredSwapchainImage& acquired);
+
+  // Reads the timestamps of the last frame recorded on the slot into the frame timing statistics. That frame's submission must have completed.
+  void CollectProfileResults(rtpt::FrameSlot slot);
+
+  // The profiler renderers receive: null when the device cannot record timestamps.
+  rtpt::GpuProfiler* ActiveProfiler();
+
+  // Resolve mode of the active renderer. The rasterizer has no resolve step and reports Off.
+  RenderResolveMode ActiveResolveMode() const;
+
+  // Writes the --profile-output JSON and prints the timing table at the end of a headless run.
+  void WriteProfileReport();
 
   // Discards temporal and accumulated history in the scene runtime and both path tracers.
   void InvalidateRenderHistory();
@@ -139,6 +158,15 @@ private:
   // Frame command buffers, submission, completion tracking, and deferred resource retirement.
   rtpt::GpuExecution        m_Execution;
 
+  // Timestamp queries for per-pass GPU timing. Stays unready on devices whose render queue cannot record timestamps, and everything else runs unchanged.
+  rtpt::GpuProfiler         m_Profiler;
+
+  // GPU scope and CPU frame time distributions: every sample after warm-up in headless runs, a rolling window interactively.
+  FrameTimingStatistics     m_FrameTiming;
+
+  // Slot of the most recently submitted frame. The end of a headless run reads the unread slots oldest first starting after it, which keeps frame order.
+  rtpt::FrameSlot           m_LastFrameSlot {};
+
   // Allocator for buffers, images, and samplers.
   rtpt::ResourceAllocator   m_Resources;
 
@@ -171,8 +199,8 @@ private:
   // Interactive camera every renderer reads.
   rtpt::CameraController m_Camera;
 
-  // Metallic and roughness override passed to the rasterizer preview only, edited in the Settings window.
-  glm::vec2              m_MetallicRoughnessOverride { -0.01F, -0.01F };
+  // Debug override of every material's metallic and roughness, edited in the Settings window and copied into the scene uniform each frame.
+  rtpt::MaterialDebugOverride m_MaterialOverride;
 
   // Renderer that writes the HDR target each frame.
   RenderMode             m_RenderMode = RenderMode::eReSTIRPTEnhanced;

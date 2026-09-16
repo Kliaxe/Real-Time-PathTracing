@@ -79,6 +79,12 @@ target_sources(RealTimePathTracing PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/Rendering/SkyRenderer.h"
     "${CMAKE_CURRENT_LIST_DIR}/Rendering/FrameCapture.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/Rendering/FrameCapture.h"
+    "${CMAKE_CURRENT_LIST_DIR}/Rendering/FrameTimingReport.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/Rendering/FrameTimingReport.h"
+    "${CMAKE_CURRENT_LIST_DIR}/Rendering/FrameTimingStatistics.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/Rendering/FrameTimingStatistics.h"
+    "${CMAKE_CURRENT_LIST_DIR}/Rendering/FrameTimingUi.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/Rendering/FrameTimingUi.h"
     "${CMAKE_CURRENT_LIST_DIR}/Rendering/RasterRenderer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/Rendering/RasterRenderer.h"
     "${CMAKE_CURRENT_LIST_DIR}/Rendering/RenderTargetView.h"
@@ -339,6 +345,15 @@ if(BUILD_TESTING)
     target_link_libraries(RtptResolveHistoryTests PRIVATE glm Vulkan::Headers)
     add_test(NAME ResolveHistory COMMAND RtptResolveHistoryTests)
     set_tests_properties(ResolveHistory PROPERTIES LABELS "cpu")
+
+    add_executable(RtptFrameTimingStatisticsTests
+        "${CMAKE_SOURCE_DIR}/Tests/Cpu/FrameTimingStatisticsTests.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/Rendering/FrameTimingStatistics.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/Rendering/FrameTimingStatistics.h"
+    )
+    target_include_directories(RtptFrameTimingStatisticsTests PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+    add_test(NAME FrameTimingStatistics COMMAND RtptFrameTimingStatisticsTests)
+    set_tests_properties(FrameTimingStatistics PROPERTIES LABELS "cpu")
 
     add_executable(RtptVulkanBootstrapTests
         "${CMAKE_SOURCE_DIR}/Tests/Framework/VulkanBootstrapTests.cpp"

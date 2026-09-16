@@ -229,11 +229,18 @@ struct GltfInstance
   // Local-to-world transform.
   float4x4 transform;
 
+  // Inverse of the transform's upper 3x3 as the shader reads it, so a normal reaches world space through mul(normalTransform, objectNormal), which applies the inverse transpose.
+  // Carried per instance rather than inverted at each hit: every resolved surface needs it, and the passes that resolve one per pixel paid for the inversion on every hit. SetInstanceTransform derives it, so it cannot drift from transform.
+  float3x3 normalTransform;
+
   // Index into the scene material array.
   uint32_t materialIndex;
 
   // Index into the scene mesh array.
   uint32_t meshIndex;
+
+  // Pads the record to a multiple of 8 bytes; see CHECK_STRUCT_ALIGNMENT above.
+  uint32_t _pad0;
 };
 CHECK_STRUCT_ALIGNMENT(GltfInstance)
 
@@ -347,11 +354,9 @@ struct GltfSceneInfo
   // Viewport size in pixels.
   float2 viewportSize;
 
-  // Explicit padding to keep the shared layout stable.
-  int _pad2;
-
-  // Explicit padding to keep the shared layout stable.
-  int _pad3;
+  // Debug override for metallic (x) and roughness (y), applied to every material as it is resolved. A negative component keeps the material's own value.
+  // It lives in the scene uniform rather than a push constant because the rasterizer and both path tracers must show the same material to be comparable.
+  float2 metallicRoughnessOverride;
 
   // GPU address of instances.
   RTPT_SCENE_ADDRESS(GltfInstance) instances;

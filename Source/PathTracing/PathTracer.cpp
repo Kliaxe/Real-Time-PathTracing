@@ -16,8 +16,11 @@ namespace rtpt
 namespace
 {
 
-// Bounce depth the pipeline is created for, before clamping to what the device supports.
-constexpr uint32_t kRequestedMaxBounces = 8;
+// Longest path the settings allow. Ray generation traces every bounce from a loop, so this caps cost rather than reflecting a device limit.
+constexpr uint32_t kMaxBounces = 8;
+
+// Ray generation traces every camera, bounce, and shadow ray itself, and no closest-hit or miss shader traces, so the pipeline needs a single level of recursion.
+constexpr uint32_t kPipelineRecursionDepth = 1;
 
 // Full float RGBA for the HDR path radiance the accumulation image holds before tonemapping or denoising.
 constexpr VkFormat kAccumulationFormat  = VK_FORMAT_R32G32B32A32_SFLOAT;
@@ -44,7 +47,7 @@ void PathTracer::Initialize()
   }
 
   // Permanent Vulkan objects
-  // Created here in dependency order: the bounce limit sizes the pipeline, the descriptor layout feeds the pipeline layout, and the SBT is built from the pipeline.
+  // Created here in dependency order: the device's ray tracing limits are checked first, the descriptor layout feeds the pipeline layout, and the SBT is built from the pipeline.
   // Viewport-sized images are created when frames arrive.
 
   QueryRayTracingProperties();
@@ -90,9 +93,7 @@ void PathTracer::Destroy()
   // History reset
   // Leaves the object in its freshly constructed state, so a later Initialize starts clean.
 
-  m_RngFrameNumber      = 0;
-  m_DeviceBounceLimit   = 0;
-  m_PipelineBounceLimit = 0;
+  m_RngFrameNumber = 0;
 }
 
 bool PathTracer::IsReady() const
@@ -116,9 +117,9 @@ uint32_t PathTracer::GetAccumulatedFrameCount() const
   return IsAccumulationResolveMode(m_Settings.resolveMode) ? m_History.GetAccumulatedFrameCount() : 0;
 }
 
-uint32_t PathTracer::GetPipelineBounceLimit() const
+uint32_t PathTracer::GetBounceLimit() const
 {
-  return m_PipelineBounceLimit;
+  return kMaxBounces;
 }
 
 void PathTracer::InvalidateHistory()
@@ -170,7 +171,13 @@ void PathTracer::Render(const RenderInput& input)
 
   RecordPathTracePass(input, pushConstant);
 
-  m_History.Denoise(input.cmd, frameState, m_AccumulationImage.descriptor.imageView, input.output.view, m_Settings.denoiserDebugView);
+  // Only a frame that denoises runs NRD, so only that frame opens the denoiser scope.
+  {
+    const GpuProfiler::Zone denoiserZone(frameState.denoiseEnabled ? input.profiler : nullptr, input.cmd, FrameSlot { input.frameSlot }, "Path tracer/Denoiser");
+
+    m_History.Denoise(input.cmd, frameState, m_AccumulationImage.descriptor.imageView, input.output.view, m_Settings.denoiserDebugView);
+  }
+
   m_History.FinishFrame(frameState);
 }
 
@@ -225,15 +232,12 @@ void PathTracer::PrepareStorageImages(const RenderInput& input, const ResolveHis
 
 shaderio::PathTracePushConstant PathTracer::BuildPushConstant(const RenderInput& input, const ResolveHistory::FrameState& frameState)
 {
-  // Bounce limit
-  // Device and pipeline limits both matter: Vulkan support may exceed what this pipeline was created for.
-
-  const uint32_t clampedMaxBounces      = std::min(m_Settings.maxBounces, m_DeviceBounceLimit);
-  const uint32_t pipelineSafeMaxBounces = std::min(clampedMaxBounces, m_PipelineBounceLimit);
+  // Settings may hold any value; the shader loop only ever sees the renderer's fixed maximum.
+  const uint32_t maxBounces = std::min(m_Settings.maxBounces, kMaxBounces);
 
   // Shader flags
 
-  uint32_t       pathTraceFlags         = 0;
+  uint32_t pathTraceFlags = 0;
 
   if(frameState.accumulateEnabled)
   {
@@ -253,7 +257,7 @@ shaderio::PathTracePushConstant PathTracer::BuildPushConstant(const RenderInput&
       .sceneInfoAddress        = (shaderio::GltfSceneInfo*)input.sceneResource->bSceneInfo.address,
       .rngFrameNumber          = m_RngFrameNumber++,
       .accumulatedFrames       = frameState.accumulateEnabled ? m_History.GetAccumulatedFrameCount() : 0,
-      .maxBounces              = pipelineSafeMaxBounces,
+      .maxBounces              = maxBounces,
       .flags                   = pathTraceFlags,
       .reblurHitDistanceParams = { m_Settings.denoiserSettings.hitDistanceA, m_Settings.denoiserSettings.hitDistanceB, m_Settings.denoiserSettings.hitDistanceC },
   };
@@ -261,6 +265,9 @@ shaderio::PathTracePushConstant PathTracer::BuildPushConstant(const RenderInput&
 
 void PathTracer::RecordPathTracePass(const RenderInput& input, const shaderio::PathTracePushConstant& pushConstant)
 {
+  // The scope spans the whole pass, including the barrier that publishes its writes.
+  const GpuProfiler::Zone traceZone(input.profiler, input.cmd, FrameSlot { input.frameSlot }, "Path tracer/Trace");
+
   // Bind state
   // The path tracer is a single ray tracing dispatch. The frame slot is clamped so an out-of-range slot still binds a valid set.
 
@@ -290,13 +297,11 @@ void PathTracer::QueryRayTracingProperties()
 {
   m_RtProperties = m_Device->Support().rayTracingProperties;
 
-  // Bounce limits
-  // Vulkan recursion depth counts the primary ray, so path bounces get one less.
-  // The settings default to the full pipeline limit.
-
-  m_DeviceBounceLimit   = (m_RtProperties.maxRayRecursionDepth > 0) ? (m_RtProperties.maxRayRecursionDepth - 1) : 0;
-  m_PipelineBounceLimit = std::min(kRequestedMaxBounces, m_DeviceBounceLimit);
-  m_Settings.maxBounces = m_PipelineBounceLimit;
+  // Path length no longer depends on recursion, but the pipeline still needs its one level. Vulkan guarantees that much on any device with ray tracing pipelines, so failing here means the reported properties are unusable.
+  if(m_RtProperties.maxRayRecursionDepth < kPipelineRecursionDepth)
+  {
+    rtpt::CheckVk(VK_ERROR_FEATURE_NOT_PRESENT, "PathTracer::QueryRayTracingProperties(maxRayRecursionDepth)");
+  }
 }
 
 void PathTracer::CreateDescriptorSetLayout()
@@ -412,11 +417,9 @@ void PathTracer::CreateRayTracingPipeline()
   shaderGroups.push_back(group);
 
   // Pipeline
-  // Recursion depth is the bounce limit plus the primary ray, and never below 1 so a device without bounce support still gets a valid pipeline.
+  // The recursion depth is fixed; see kPipelineRecursionDepth.
 
-  const uint32_t recursionDepth = std::max(1u, m_PipelineBounceLimit + 1);
-
-  rtpt::CheckVk(rtpt::CreateRayTracingPipeline(m_Device->Handle(), m_PipelineLayout, std::span(PathTracer_hlsl), stages, shaderGroups, recursionDepth, m_Pipeline), "CreateRayTracingPipeline(path tracer)");
+  rtpt::CheckVk(rtpt::CreateRayTracingPipeline(m_Device->Handle(), m_PipelineLayout, std::span(PathTracer_hlsl), stages, shaderGroups, kPipelineRecursionDepth, m_Pipeline), "CreateRayTracingPipeline(path tracer)");
 
   if(m_Diagnostics != nullptr)
   {

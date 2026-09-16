@@ -42,7 +42,8 @@ uint PTSelectLightTile(uint2 launchID)
   return XxHash32(uint3(screenTile, ptParams.runtimeParams.frameIndex)) % uint(RESTIR_PT_LIGHT_TILE_COUNT);
 }
 
-void AccumulatePTEmissiveDirectLightRis(inout PathPayload payload, SurfaceData surface, GltfSceneInfo sceneInfo, float3 viewDir, uint2 launchID, uint vertexDepth)
+// instanceIndex and primitiveIndex name the receiving vertex's own triangle.
+void AccumulatePTEmissiveDirectLightRis(inout PathState path, SurfaceData surface, uint instanceIndex, uint primitiveIndex, GltfSceneInfo sceneInfo, float3 viewDir, uint2 launchID, uint vertexDepth)
 {
   // Same gate as the single-sample path, which is also what the next hit's emissive MIS weight checks.
   if(!CanSampleEmissiveDirectLight(surface, sceneInfo))
@@ -72,7 +73,7 @@ void AccumulatePTEmissiveDirectLightRis(inout PathPayload payload, SurfaceData s
   bool   haveSelection    = false;
 
   // RIS selection stays independent of the STBN coordinates that position candidates on their lights.
-  uint selectionSeed = XxHash32(uint3(payload.seed.pixel, payload.seed.frame, payload.seed.domain ^ 0x524953u));
+  uint selectionSeed = XxHash32(uint3(path.seed.pixel, path.seed.frame, path.seed.domain ^ 0x524953u));
 
   // Candidate loop
   // Every candidate that is skipped still counts toward candidateCount, which is the M in the unbiased contribution weight below.
@@ -90,7 +91,7 @@ void AccumulatePTEmissiveDirectLightRis(inout PathPayload payload, SurfaceData s
     const EmissiveTriangleLight light = LoadDeviceArrayElement<EmissiveTriangleLight>(sceneInfo.emissiveTriangles, entry.lightIndex);
 
     // A surface must not explicitly sample itself. Skipping the candidate rather than the whole estimate is the difference from the single-sample path, which has nothing else to fall back on.
-    if(light.instanceIndex == InstanceIndex() && light.primitiveIndex == PrimitiveIndex())
+    if(light.instanceIndex == instanceIndex && light.primitiveIndex == primitiveIndex)
     {
       continue;
     }
@@ -99,10 +100,10 @@ void AccumulatePTEmissiveDirectLightRis(inout PathPayload payload, SurfaceData s
     // Barycentrics come from the path's own stream, not from the tile: the tile fixes WHICH triangle, and every pixel sharing it still needs its own point on that triangle or the samples correlate across the screen tile.
 
     // Rejected earlier candidates keep their own dimensions, so a branch in one pixel cannot renumber later light-point samples.
-    payload.seed.dimension = candidate * 2u;
+    path.seed.dimension = candidate * 2u;
 
-    const float  sqrtXi0 = sqrt(NextRandom(payload.seed));
-    const float  xi1     = NextRandom(payload.seed);
+    const float  sqrtXi0 = sqrt(NextRandom(path.seed));
+    const float  xi1     = NextRandom(path.seed);
     const float3 bary    = float3(1.0 - sqrtXi0, sqrtXi0 * (1.0 - xi1), sqrtXi0 * xi1);
 
     const float3 position = light.position0 * bary.x + light.position1 * bary.y + light.position2 * bary.z;
@@ -223,12 +224,12 @@ void AccumulatePTEmissiveDirectLightRis(inout PathPayload payload, SurfaceData s
   // The contribution keeps the single-sample form, so the hybrid shift can rebuild it elsewhere (see the header comment); the resampling lives in the candidate weight.
   // risUcw * lightPdf is the factor between the two parameterizations: the single-sample NEE this integrand pretends to be would have carried a weight of exactly 1, and lightPdf is what converts back to it.
 
-  const float3 contribution = payload.throughput * selectedRadiance * selectedBsdf * (selectedMis / selectedLightPdf);
+  const float3 contribution = path.throughput * selectedRadiance * selectedBsdf * (selectedMis / selectedLightPdf);
 
-  PATH_TRACING_ON_NEE_EMISSIVE(payload, selectedLight, selectedBary, selectedRadiance, selectedLightPdf, distance);
+  PATH_TRACING_ON_NEE_EMISSIVE(path, selectedLight, selectedBary, selectedRadiance, selectedLightPdf, distance);
 
-  AccumulatePathContributionWithWeight(payload, contribution, risUcw * selectedLightPdf);
-  StoreDiffuseDenoiserHitDistanceIfMissing(payload, distance);
+  AccumulatePathContributionWithWeight(path, contribution, risUcw * selectedLightPdf);
+  StoreDiffuseDenoiserHitDistanceIfMissing(path, distance);
 }
 
 #endif

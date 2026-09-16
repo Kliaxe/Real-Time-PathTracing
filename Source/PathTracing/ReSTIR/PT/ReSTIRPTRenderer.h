@@ -25,7 +25,7 @@ namespace rtpt
 // Implements "ReSTIR PT Enhanced" (Lin, Kettunen, Wyman; I3D 2026) from the paper rather than porting an existing implementation. Direct and global illumination share one reservoir (Section 6.1), so there is no separate direct-lighting pass.
 // CPU responsibility: own Vulkan state, update descriptors/parameters, and record the pass sequence. Shader responsibility: perform the resampling math.
 // Pass sequence: light tiles, initial sampling, temporal reuse, the spatial pre-pass and spatial reuse, final shading, and the duplication map. Every reuse pass is optional; with all of them off the renderer is a 1spp path tracer routed through the reservoir plumbing, which is the correctness gate - that configuration must converge to the same image as the reference path tracer.
-// No per-pass GPU timing is recorded here. Wall-clock around the process cannot separate a pass from thermal drift - the same configuration measured 6.7 and 14.5 ms/frame hours apart on this machine - so a claim about a pass needs timestamps taken inside the frame that produced it.
+// Per-pass GPU time is recorded through RenderInput's optional profiler: one "ReSTIR PT/<pass>" timestamp scope around each pass that runs this frame. Wall-clock around the process cannot separate a pass from thermal drift - the same configuration measured 6.7 and 14.5 ms/frame hours apart on this machine - so a claim about a pass needs those in-frame timestamps (headless --profile-output, or the Profiler section of the UI).
 
 class ReSTIRPTRenderer
 {
@@ -45,7 +45,7 @@ public:
   const ReSTIRPTSettings& GetSettings() const;
 
   uint32_t GetAccumulatedFrameCount() const;
-  uint32_t GetPipelineBounceLimit() const;
+  uint32_t GetBounceLimit() const;
 
   // Bytes of reservoir storage currently allocated, surfaced in the UI because a 64-byte reservoir per pixel per array dominates this renderer's memory use.
   VkDeviceSize GetReservoirMemoryUsage() const;
@@ -128,8 +128,6 @@ private:
   // Sampling time advances even when camera changes invalidate reuse history.
   uint32_t m_RngFrameNumber = 0;
 
-  // The bounce limit comes from Vulkan ray recursion support and the reconnection-length field, not just the UI.
-  uint32_t m_PipelineBounceLimit = 0;
   // GPU buffers are cleared lazily because the clear must be recorded into a command buffer.
   bool m_NeedsHistoryClear = true;
 
@@ -157,7 +155,7 @@ private:
   rtpt::DescriptorPack m_DescPack;
   // The layout every pass pipeline is built against.
   VkPipelineLayout     m_PipelineLayout = VK_NULL_HANDLE;
-  // Initial sampling traces the path tree, so it is a ray tracing pass that recurses once per bounce.
+  // Initial sampling traces the path tree, so it is a ray tracing pass; every bounce is traced from its ray generation loop.
   RayTracingPassState m_InitialSamplingPass;
   // Temporal reuse. A ray tracing pass rather than compute, because the hybrid shift traces: one ray per replayed bounce plus one for the reconnection, driven from a loop in ray generation.
   RayTracingPassState m_TemporalPass;
@@ -178,7 +176,7 @@ private:
   // Section 6.2.2: publish the work list's length as the indirect trace dimensions.
   VkPipeline          m_PrepassOffsetsPipeline  = VK_NULL_HANDLE;
 
-  // Device ray tracing limits. Recursion depth bounds m_PipelineBounceLimit, and every SBT is built against these properties.
+  // Device ray tracing limits. Every pass's recursion depth is checked against them, and every SBT is built against them.
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_RtProperties { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR };
 };
 

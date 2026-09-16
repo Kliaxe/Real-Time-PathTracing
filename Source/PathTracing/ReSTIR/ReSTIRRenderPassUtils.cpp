@@ -68,7 +68,7 @@ void CreateReSTIRRayTracingPass(rtpt::ResourceAllocator& resources, const rtpt::
   groups.push_back(group);
 
   // Pipeline and SBT
-  // The recursion depth comes from the caller because it differs per pass: initial sampling recurses per bounce, while the reuse passes trace from a loop in ray generation.
+  // The recursion depth comes from the caller, which owns the budget its pass's shaders were written for.
 
   rtpt::CheckVk(rtpt::CreateRayTracingPipeline(resources.Device(), pipelineLayout, spirv, stages, groups, maxPipelineRayRecursionDepth, passState.pipeline), "CreateRayTracingPipeline(ReSTIR PT)");
 

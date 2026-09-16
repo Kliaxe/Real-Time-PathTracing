@@ -7,6 +7,7 @@
 #include <volk.h>
 
 #include "Framework/Vulkan/Diagnostics.h"
+#include "Framework/Vulkan/GpuProfiler.h"
 #include "Framework/Vulkan/GpuResources.h"
 #include "Framework/Vulkan/VulkanDevice.h"
 #include "Rendering/RenderTargetView.h"
@@ -58,6 +59,8 @@ struct ReSTIRPTRenderInput
   uint32_t                            frameSlot = 0;
   // Time since the previous frame in milliseconds, handed to NRD. Zero lets NRD measure real frame time itself.
   float                               frameTimeMilliseconds = 0.0f;
+  // Optional. Receives one timestamp scope per pass that runs this frame; null records no timing.
+  rtpt::GpuProfiler*                  profiler = nullptr;
 };
 
 inline bool IsReSTIRPTTemporalResamplingEnabled(ReSTIRPTResamplingMode resamplingMode)

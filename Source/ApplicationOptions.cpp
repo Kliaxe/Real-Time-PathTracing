@@ -270,6 +270,18 @@ ApplicationOptionsParseResult ParseApplicationOptions(int argc, char** argv)
       continue;
     }
 
+    if(IsValueOption(argument, "--profile-output"))
+    {
+      if(!ReadOptionValue(argumentIndex, argc, argv, argument, "--profile-output", value, result.error))
+      {
+        return result;
+      }
+
+      result.options.profileOutput = std::filesystem::path(value);
+
+      continue;
+    }
+
     result.error = "Unknown argument: " + std::string(argument);
 
     return result;
@@ -277,7 +289,7 @@ ApplicationOptionsParseResult ParseApplicationOptions(int argc, char** argv)
 
   // Cross-option validation
   // These rules depend on the whole command line, so they run after every argument has been seen.
-  // Capturing only happens at the end of a headless run, which is why a capture prefix without --headless is rejected.
+  // Capturing and the profile report only happen at the end of a headless run, which is why a capture prefix or profile output without --headless is rejected.
 
   if(result.options.restirReference && (result.options.renderMode != RenderMode::eReSTIRPTEnhanced || result.options.resolveMode == RenderResolveMode::eDenoise))
   {
@@ -292,6 +304,10 @@ ApplicationOptionsParseResult ParseApplicationOptions(int argc, char** argv)
   else if(result.options.capturePrefix.has_value() && !result.options.headless)
   {
     result.error = "--capture-prefix requires --headless";
+  }
+  else if(result.options.profileOutput.has_value() && !result.options.headless)
+  {
+    result.error = "--profile-output requires --headless";
   }
 
   return result;
@@ -312,6 +328,7 @@ std::string GetApplicationUsage(const char* executableName)
          "  --resolve-mode <mode>      off, accumulate, or denoise\n"
          "  --restir-reference         Compare identical paths without ReSTIR selection or reuse\n"
          "  --capture-prefix <path>    Write .linear.hdr, .final.png, and .json\n"
+         "  --profile-output <path>    Write per-pass GPU timings as JSON; requires --headless\n"
          "  --validation-sync          Enable synchronization validation\n"
          "  --help, -h                 Show this help\n";
 }

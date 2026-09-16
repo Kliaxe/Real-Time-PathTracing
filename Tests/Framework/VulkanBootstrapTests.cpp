@@ -64,7 +64,7 @@ int main()
 
     rtpt::GpuProfiler profiler;
 
-    rtpt::CheckVk(profiler.Initialize(device.Handle(), device.Support().properties.properties.limits.timestampPeriod, 2, 4), "GpuProfiler::Initialize");
+    rtpt::CheckVk(profiler.Initialize(device.PhysicalDevice(), device.Handle(), device.Queues().renderFamily, 2, 4), "GpuProfiler::Initialize");
 
     rtpt::ResourceAllocator resources;
 

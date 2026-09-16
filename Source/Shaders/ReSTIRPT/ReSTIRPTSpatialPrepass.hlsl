@@ -22,11 +22,12 @@
 #include "ShaderIncludes/PathTracing/Lights.hlsli"
 #include "ReSTIR/PTReservoirStorage.hlsli"
 #include "ReSTIR/PTShift.hlsli"
+#include "ShaderIncludes/PathTracing/PathRayEntryPoints.hlsli"
 #include "ShaderIncludes/ReSTIR/PTSpatialCommon.hlsli"
 #include "ReSTIR/PTPrepassSort.hlsli"
 
-// One (pixel, slot) pair: recover the partner's surface and shift this pixel's path into it. Shared by both dispatch shapes below so they cannot drift apart.
-// The partner surface recovery stays here rather than in the classify pass even though it can fail: it costs a ray, and doing it in both would pay that for every surviving pair twice. Measured at 0.35 ms of a 19 ms pass, so it is not worth hoisting.
+// One (pixel, slot) pair: rebuild the partner's surface and shift this pixel's path into it. Shared by both dispatch shapes below so they cannot drift apart.
+// The partner surface is rebuilt from the hit identity its pixel stored, so this costs the scene reads of one surface and no ray at all; it used to trace back at the stored point, which is what the classify pass was once measured against hoisting.
 void ProcessPrepassPair(uint2 launchID, uint slot, uint2 viewport, GltfSceneInfo sceneInfo)
 {
   const uint              pixelIndex           = launchID.y * viewport.x + launchID.x;
@@ -48,14 +49,10 @@ void ProcessPrepassPair(uint2 launchID, uint slot, uint2 viewport, GltfSceneInfo
       SurfaceData partnerPrimarySurface;
       float3      partnerPrimaryViewDir;
 
-      if(RecoverSurfaceAtStoredPoint(sceneInfo.cameraPosition, partnerSurface, partnerPrimarySurface, partnerPrimaryViewDir))
-      {
-        record = MakePTPairedShift(ShiftPathToSurface(canonical, partnerPrimarySurface, partnerPrimaryViewDir));
-      }
-      else
-      {
-        record = MakeEmptyPTPairedShift(uint(ReSTIRPTShiftOutcome::eReSTIRPTShiftOutcomeOccluded));
-      }
+      // The compatibility test above already required a valid partner record, so the rebuild cannot fail and its result is not tested.
+      LoadPTSurfaceAtStoredHit(partnerSurface, sceneInfo.cameraPosition, partnerPrimarySurface, partnerPrimaryViewDir);
+
+      record = MakePTPairedShift(ShiftPathToSurface(canonical, partnerPrimarySurface, partnerPrimaryViewDir));
     }
     else
     {
@@ -126,47 +123,5 @@ void rgenMain()
       ptPairedShiftBuffer[PTPairedShiftIndex(launchID, slot, viewport)] = MakeEmptyPTPairedShift(uint(ReSTIRPTShiftOutcome::eReSTIRPTShiftOutcomeNoSource));
     }
   }
-}
-
-// Shift ray entry points
-// TracePTVertex expects a closest hit that fills PTShiftPayload, a miss that clears it, and the any-hit pair for alpha masking; the shadow entries serve visibility tests during the shift.
-
-[shader("miss")]
-void rmissMain(inout PTShiftPayload payload)
-{
-  payload.hit = 0u;
-}
-
-[shader("miss")]
-void shadowMissMain(inout ShadowPayload payload)
-{
-  payload.visible = 1;
-}
-
-[shader("anyhit")]
-void rahitMain(inout PTShiftPayload payload, in BuiltInTriangleIntersectionAttributes attr)
-{
-  if(IsMaskedSurfaceHit(attr))
-  {
-    IgnoreHit();
-  }
-}
-
-[shader("anyhit")]
-void shadowAnyHitMain(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr)
-{
-  if(IsMaskedSurfaceHit(attr))
-  {
-    IgnoreHit();
-  }
-}
-
-[shader("closesthit")]
-void rchitMain(inout PTShiftPayload payload, in BuiltInTriangleIntersectionAttributes attr)
-{
-  payload.surface        = LoadSurfaceData(attr);
-  payload.hit            = 1u;
-  payload.instanceId     = InstanceIndex();
-  payload.primitiveIndex = PrimitiveIndex();
 }
 

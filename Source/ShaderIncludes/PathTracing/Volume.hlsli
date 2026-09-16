@@ -5,7 +5,7 @@
 #include "ShaderIncludes/PathTracing/Utility.hlsli"
 
 // Volume attenuation
-// Absorption inside transmissive glTF volumes (KHR_materials_volume). The path payload tracks the medium it is currently inside, and each segment through that medium is attenuated by Beer-Lambert transmittance.
+// Absorption inside transmissive glTF volumes (KHR_materials_volume). The path state tracks the medium it is currently inside, and each segment through that medium is attenuated by Beer-Lambert transmittance.
 
 // Converts glTF's "color at distance" volume representation into an exponential extinction coefficient.
 // The result is chosen so that transmittance over attenuationDistance equals attenuationColor.
@@ -29,15 +29,15 @@ float3 EvaluateMediumTransmittance(float3 attenuationCoefficient, float distance
 }
 
 // Applies absorption to the segment that just finished tracing before the next surface event is shaded.
-void ApplyCurrentMediumAttenuation(inout PathPayload payload, float segmentDistance)
+void ApplyCurrentMediumAttenuation(inout PathState path, float segmentDistance)
 {
-  if(payload.mediumActive == 0)
+  if(path.mediumActive == 0)
   {
     return;
   }
 
   // Beer-Lambert attenuation depends on the actual distance traveled in the medium along this ray segment.
-  payload.throughput *= EvaluateMediumTransmittance(payload.mediumAttenuation, segmentDistance);
+  path.throughput *= EvaluateMediumTransmittance(path.mediumAttenuation, segmentDistance);
 }
 
 // White attenuationColor means "no absorption", so require an actual tint before enabling volume attenuation.

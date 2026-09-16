@@ -57,6 +57,9 @@ struct ApplicationOptions
 
   // Path prefix for the .linear.hdr, .final.png, and .json capture files. Parsing only accepts it with headless.
   std::optional<std::filesystem::path>  capturePrefix;
+
+  // JSON file that receives per-scope GPU timings and CPU frame time at the end of a headless run. Parsing only accepts it with headless, because interactive runs report timings in the UI.
+  std::optional<std::filesystem::path>  profileOutput;
 };
 
 // ApplicationOptionsParseResult

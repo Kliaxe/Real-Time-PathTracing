@@ -3,6 +3,17 @@
 
 #include "Common/IoGltf.h"
 
+// Applies the scene-wide debug override to a resolved metallic/roughness pair.
+// A negative component means the material keeps its own value, which is how the UI expresses "off" without a second flag.
+// Every renderer calls this at the same point - straight after the glTF factors and the metallic-roughness texture - so the rasterizer preview and both path tracers shade the same material.
+float2 ApplyMetallicRoughnessOverride(float2 metallicRoughness, float2 metallicRoughnessOverride)
+{
+  if(metallicRoughnessOverride.x >= 0.0f) metallicRoughness.x = metallicRoughnessOverride.x;
+  if(metallicRoughnessOverride.y >= 0.0f) metallicRoughness.y = metallicRoughnessOverride.y;
+
+  return metallicRoughness;
+}
+
 // Reads one element of a scene array uploaded as a device buffer.
 template<typename T>
 T LoadDeviceArrayElement(uint64_t baseAddress, uint index)

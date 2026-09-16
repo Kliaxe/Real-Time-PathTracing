@@ -22,47 +22,7 @@
 #include "ShaderIncludes/PathTracing/Lights.hlsli"
 #include "ReSTIR/PTReservoirStorage.hlsli"
 #include "ReSTIR/PTShift.hlsli"
-
-// Recovers the full material record for a stored surface.
-// The stored ReSTIRPTSurface is deliberately reduced and cannot drive a BSDF, and LoadSurfaceData needs hit-shader intrinsics, so the only way to get a full surface for an arbitrary stored point is to trace at it.
-// Aiming from the camera that saw it keeps the incident direction, and therefore the face-forwarding LoadSurfaceData applies, consistent with how the point was originally shaded.
-bool RecoverSurfaceAtStoredPoint(float3 cameraPosition, ReSTIRPTSurface stored, out SurfaceData surface, out float3 viewDir)
-{
-  surface = (SurfaceData)0;
-  viewDir = float3(0.0, 1.0, 0.0);
-
-  if(stored.valid == 0)
-  {
-    return false;
-  }
-
-  const float3 toSurface = stored.worldPosition - cameraPosition;
-  const float  distance  = length(toSurface);
-
-  if(distance <= 1.0e-6)
-  {
-    return false;
-  }
-
-  const float3        direction = toSurface / distance;
-  const PTVertexQuery query     = TracePTVertex(cameraPosition, direction);
-
-  if(!query.hit)
-  {
-    return false;
-  }
-
-  // Guard against landing on nearer geometry: the stored point must still be the first thing the ray meets, or this is a different surface entirely.
-  if(length(query.surface.worldPosition - stored.worldPosition) > 0.01 * distance)
-  {
-    return false;
-  }
-
-  surface = query.surface;
-  viewDir = -direction;
-
-  return true;
-}
+#include "ShaderIncludes/PathTracing/PathRayEntryPoints.hlsli"
 
 [shader("raygeneration")]
 void rgenMain()
@@ -85,15 +45,15 @@ void rgenMain()
   const ReSTIRPTSurface currentSurfaceRecord = currentSurfaceBuffer[pixelIndex];
 
   // Destination surface
-  // Both shift directions need a full material record at their destination primary hit, which only a closest-hit shader can produce.
-  // Re-tracing the primary ray is how this pass obtains one for the current pixel; the stored surface record is deliberately reduced and cannot drive a BSDF.
+  // Both shift directions need a full material record at their destination primary hit, which the reduced surface record cannot drive a BSDF with.
+  // It is rebuilt from the hit identity initial sampling stored for this pixel, so this pass no longer re-traces the primary ray to obtain one.
 
-  const float3        primaryDirection = ReconstructWorldDirectionFromPixel((float2)launchID + 0.5, sceneInfo);
-  const PTVertexQuery primary          = TracePTVertex(sceneInfo.cameraPosition, primaryDirection);
-  const float3        primaryViewDir   = -primaryDirection;
+  SurfaceData primarySurface;
+  float3      primaryViewDir;
 
-  // Frame zero has no history to reuse, and a background pixel has no surface to reuse onto.
-  const bool historyAvailable = ptParams.runtimeParams.frameIndex > 0 && currentSurfaceRecord.valid != 0 && primary.hit;
+  // Frame zero has no history to reuse, and a background pixel has no surface to reuse onto; the rebuild fails on exactly the latter.
+  const bool primaryValid     = LoadPTSurfaceAtStoredHit(currentSurfaceRecord, sceneInfo.cameraPosition, primarySurface, primaryViewDir);
+  const bool historyAvailable = ptParams.runtimeParams.frameIndex > 0 && primaryValid;
 
   // Section 6.4. The motion this pixel recorded last frame describes whatever was visible here THEN: the occluder. Read before the write at the end of this shader, which is safe because an invocation only ever touches its own element.
   const float2 occluderMotion = ptMotionVectorBuffer[pixelIndex];
@@ -203,13 +163,14 @@ void rgenMain()
             // Forward maps history into this pixel's domain; its integrand is what gets stored if history wins.
             // Inverse maps this pixel's canonical path into the history pixel's domain. Required, not optional: the canonical candidate's MIS weight needs the history technique's target value for the canonical path, and no amount of forward shifting reveals that.
 
-            const PTShiftResult forward = ShiftPathToSurface(temporal, primary.surface, primaryViewDir);
+            const PTShiftResult forward = ShiftPathToSurface(temporal, primarySurface, primaryViewDir);
 
             SurfaceData   previousPrimarySurface;
             float3        previousPrimaryViewDir;
             PTShiftResult inverse = FailedPTShift(uint(ReSTIRPTShiftOutcome::eReSTIRPTShiftOutcomeNoSource));
 
-            if(RecoverSurfaceAtStoredPoint(sceneInfo.prevCameraPosition, previousSurface, previousPrimarySurface, previousPrimaryViewDir))
+            // Rebuilt against the previous camera, the one that saw this history surface, so the frame it is shaded in is the frame it was sampled in.
+            if(LoadPTSurfaceAtStoredHit(previousSurface, sceneInfo.prevCameraPosition, previousPrimarySurface, previousPrimaryViewDir))
             {
               inverse = ShiftPathToSurface(canonical, previousPrimarySurface, previousPrimaryViewDir);
             }
@@ -300,47 +261,5 @@ void rgenMain()
   ptShadingWeightBuffer[pixelIndex] = shadingWeight;
 
   StorePTReservoir(canonical, ptParams.reservoirBufferParams, reservoirPosition, ptParams.bufferIndices.temporalResamplingOutputBufferIndex);
-}
-
-// Shift ray entry points
-// TracePTVertex expects a closest hit that fills PTShiftPayload, a miss that clears it, and the any-hit pair for alpha masking; the shadow entries serve visibility tests during the shift.
-
-[shader("miss")]
-void rmissMain(inout PTShiftPayload payload)
-{
-  payload.hit = 0u;
-}
-
-[shader("miss")]
-void shadowMissMain(inout ShadowPayload payload)
-{
-  payload.visible = 1;
-}
-
-[shader("anyhit")]
-void rahitMain(inout PTShiftPayload payload, in BuiltInTriangleIntersectionAttributes attr)
-{
-  if(IsMaskedSurfaceHit(attr))
-  {
-    IgnoreHit();
-  }
-}
-
-[shader("anyhit")]
-void shadowAnyHitMain(inout ShadowPayload payload, in BuiltInTriangleIntersectionAttributes attr)
-{
-  if(IsMaskedSurfaceHit(attr))
-  {
-    IgnoreHit();
-  }
-}
-
-[shader("closesthit")]
-void rchitMain(inout PTShiftPayload payload, in BuiltInTriangleIntersectionAttributes attr)
-{
-  payload.surface        = LoadSurfaceData(attr);
-  payload.hit            = 1u;
-  payload.instanceId     = InstanceIndex();
-  payload.primitiveIndex = PrimitiveIndex();
 }
 

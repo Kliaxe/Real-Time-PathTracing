@@ -54,6 +54,14 @@ tinygltf::Model LoadGltfResources(const std::filesystem::path& filename)
   return model;
 }
 
+void SetInstanceTransform(shaderio::GltfInstance& instance, const glm::mat4& transform)
+{
+  instance.transform = transform;
+
+  // Inverted in double precision: the shader used to invert the same 3x3 in float at every hit, so this is the cheapest place to give it a closer answer.
+  instance.normalTransform = glm::mat3(glm::inverse(glm::dmat3(transform)));
+}
+
 void ImportGltfData(GltfSceneResource& sceneResource, const tinygltf::Model& model, rtpt::ResourceAllocator& resources, rtpt::UploadContext& uploads, bool importInstance, uint32_t materialOffset, uint32_t fallbackMaterialIndex)
 {
   // Accessor helpers
@@ -239,7 +247,8 @@ void ImportGltfData(GltfSceneResource& sceneResource, const tinygltf::Model& mod
           shaderio::GltfInstance instance {};
 
           instance.meshIndex = sceneMeshIndex;
-          instance.transform = nodeTransform;
+
+          SetInstanceTransform(instance, nodeTransform);
 
           if(sceneMeshIndex < sceneResource.meshMaterialIndices.size())
           {

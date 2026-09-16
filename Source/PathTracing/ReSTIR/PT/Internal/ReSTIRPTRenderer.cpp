@@ -43,8 +43,14 @@ constexpr uint32_t kDuplicationMapGroupSize = 8;
 // The Section 6.2.2 full-screen classify pass, ReSTIRPTPrepassClassify.hlsl.
 constexpr uint32_t kPrepassSortGroupSize = 8;
 
-// Bounce ceiling before the device's recursion depth and RESTIR_PT_MAX_BOUNCES clamp it further.
-constexpr uint32_t kRequestedMaxBounces = 8;
+// Longest path the settings allow. Initial sampling traces every bounce from a loop in ray generation, so this caps cost rather than reflecting a device limit.
+// It must also fit the reconnection-length field, whose range RESTIR_PT_MAX_BOUNCES describes.
+constexpr uint32_t kMaxBounces = 8;
+
+static_assert(kMaxBounces <= RESTIR_PT_MAX_BOUNCES);
+
+// Every pass traces its camera, bounce, replay, and shadow rays from ray generation, and their hit shaders only record what was hit, so one level of recursion suffices however long paths get.
+constexpr uint32_t kPipelineRecursionDepth = 1;
 
 // Push constant stages
 // One push constant range is shared by the ray tracing and compute passes so both can be recorded against the same pipeline layout.
@@ -134,7 +140,7 @@ void ReSTIRPTRenderer::Initialize()
 
   // Device objects
   // Vulkan objects are created once; viewport-sized buffers wait until a frame arrives.
-  // The ray tracing properties come first because the bounce limit they produce sizes the initial sampling pipeline's recursion depth, and the layouts come before every pipeline built against them.
+  // The ray tracing properties come first so an unusable recursion limit fails before anything is created, and the layouts come before every pipeline built against them.
 
   QueryRayTracingProperties();
   CreateDescriptorSetLayout();
@@ -223,9 +229,9 @@ uint32_t ReSTIRPTRenderer::GetAccumulatedFrameCount() const
   return IsAccumulationResolveMode(m_Settings.common.resolveMode) ? m_History.GetAccumulatedFrameCount() : 0;
 }
 
-uint32_t ReSTIRPTRenderer::GetPipelineBounceLimit() const
+uint32_t ReSTIRPTRenderer::GetBounceLimit() const
 {
-  return m_PipelineBounceLimit;
+  return kMaxBounces;
 }
 
 VkDeviceSize ReSTIRPTRenderer::GetReservoirMemoryUsage() const
@@ -293,7 +299,12 @@ void ReSTIRPTRenderer::Render(const RenderInput& input)
 
   RecordPasses(input, BuildPushConstant(input, frameState));
 
-  m_History.Denoise(input.cmd, frameState, m_Resources.GetAccumulationImage().descriptor.imageView, input.output.view, m_Settings.common.denoiserDebugView);
+  // Only a frame that denoises runs NRD, so only that frame opens the denoiser scope.
+  {
+    const GpuProfiler::Zone denoiserZone(frameState.denoiseEnabled ? input.profiler : nullptr, input.cmd, FrameSlot { input.frameSlot }, "ReSTIR PT/Denoiser");
+
+    m_History.Denoise(input.cmd, frameState, m_Resources.GetAccumulationImage().descriptor.imageView, input.output.view, m_Settings.common.denoiserDebugView);
+  }
 
   FinishFrame(frameState);
 }
@@ -354,8 +365,8 @@ ResolveHistory::FrameState ReSTIRPTRenderer::BeginFrame(const RenderInput& input
 
 shaderio::ReSTIRPTParameters ReSTIRPTRenderer::BuildShaderParameters()
 {
-  // The UI value cannot exceed the recursion depth this device's pipeline supports.
-  m_Settings.initialSampling.maxBounces = std::min(m_Settings.initialSampling.maxBounces, m_PipelineBounceLimit);
+  // Settings may hold any value; the shader loop only ever sees the renderer's fixed maximum.
+  m_Settings.initialSampling.maxBounces = std::min(m_Settings.initialSampling.maxBounces, kMaxBounces);
 
   // Reservoir rotation
   // SetFrameIndex advances the reservoir rotation and must run exactly once per recorded frame, before the other setters. See ReSTIRPTParameterContext.
@@ -678,6 +689,8 @@ void ReSTIRPTRenderer::RecordPasses(const RenderInput& input, const shaderio::Re
 
 void ReSTIRPTRenderer::RunInitialSamplingPass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
+  const GpuProfiler::Zone zone(input.profiler, input.cmd, FrameSlot { input.frameSlot }, "ReSTIR PT/Initial sampling");
+
   const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
 
   TraceReSTIRRayTracingPass(input.cmd, m_InitialSamplingPass, m_PipelineLayout, *m_DescPack.SetPtr(frameSetIndex), kReSTIRPTPushConstantStages, pushConstant, input.output.extent);
@@ -685,6 +698,8 @@ void ReSTIRPTRenderer::RunInitialSamplingPass(const RenderInput& input, const sh
 
 void ReSTIRPTRenderer::RunTemporalPass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
+  const GpuProfiler::Zone zone(input.profiler, input.cmd, FrameSlot { input.frameSlot }, "ReSTIR PT/Temporal reuse");
+
   const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
 
   TraceReSTIRRayTracingPass(input.cmd, m_TemporalPass, m_PipelineLayout, *m_DescPack.SetPtr(frameSetIndex), kReSTIRPTPushConstantStages, pushConstant, input.output.extent);
@@ -692,6 +707,8 @@ void ReSTIRPTRenderer::RunTemporalPass(const RenderInput& input, const shaderio:
 
 void ReSTIRPTRenderer::RunSpatialPass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
+  const GpuProfiler::Zone zone(input.profiler, input.cmd, FrameSlot { input.frameSlot }, "ReSTIR PT/Spatial reuse");
+
   const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
 
   TraceReSTIRRayTracingPass(input.cmd, m_SpatialPass, m_PipelineLayout, *m_DescPack.SetPtr(frameSetIndex), kReSTIRPTPushConstantStages, pushConstant, input.output.extent);
@@ -699,6 +716,9 @@ void ReSTIRPTRenderer::RunSpatialPass(const RenderInput& input, const shaderio::
 
 void ReSTIRPTRenderer::RunSortedSpatialPrepass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
+  // Same scope name as the unsorted pre-pass, so the two variants compare directly; classify and offsets get their own scopes nested inside it.
+  const GpuProfiler::Zone zone(input.profiler, input.cmd, FrameSlot { input.frameSlot }, "ReSTIR PT/Spatial pre-pass");
+
   const uint32_t      frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
   VkDescriptorSet     descriptorSet = *m_DescPack.SetPtr(frameSetIndex);
   const rtpt::Buffer& counters      = m_Resources.GetPrepassCounterBuffer();
@@ -716,17 +736,25 @@ void ReSTIRPTRenderer::RunSortedSpatialPrepass(const RenderInput& input, const s
   // Classify
   // Append the pairs that need a shift to the work list, and write the paired-shift record for every REJECTED pair - the traced pass never visits those, and a record left untouched would be read next pass as a live shift from an earlier frame.
 
-  DispatchReSTIRComputePass(input.cmd, m_PrepassClassifyPipeline, m_PipelineLayout, descriptorSet, kReSTIRPTPushConstantStages, pushConstant, viewportSize, kPrepassSortGroupSize);
+  {
+    const GpuProfiler::Zone classifyZone(input.profiler, input.cmd, FrameSlot { input.frameSlot }, "ReSTIR PT/Pre-pass classify");
+
+    DispatchReSTIRComputePass(input.cmd, m_PrepassClassifyPipeline, m_PipelineLayout, descriptorSet, kReSTIRPTPushConstantStages, pushConstant, viewportSize, kPrepassSortGroupSize);
+  }
 
   CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
   // Publish the launch size
   // Copies the count the classify pass accumulated into the indirect trace dimensions. The shader runs one thread, so the dispatch is a single group.
 
-  vkCmdBindPipeline(input.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PrepassOffsetsPipeline);
-  vkCmdBindDescriptorSets(input.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-  vkCmdPushConstants(input.cmd, m_PipelineLayout, kReSTIRPTPushConstantStages, 0, sizeof(pushConstant), &pushConstant);
-  vkCmdDispatch(input.cmd, 1, 1, 1);
+  {
+    const GpuProfiler::Zone offsetsZone(input.profiler, input.cmd, FrameSlot { input.frameSlot }, "ReSTIR PT/Pre-pass offsets");
+
+    vkCmdBindPipeline(input.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PrepassOffsetsPipeline);
+    vkCmdBindDescriptorSets(input.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_PipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(input.cmd, m_PipelineLayout, kReSTIRPTPushConstantStages, 0, sizeof(pushConstant), &pushConstant);
+    vkCmdDispatch(input.cmd, 1, 1, 1);
+  }
 
   CmdReSTIRPTMemoryBarrier(input.cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
 
@@ -748,6 +776,8 @@ void ReSTIRPTRenderer::RunSortedSpatialPrepass(const RenderInput& input, const s
 
 void ReSTIRPTRenderer::RunSpatialPrepass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
+  const GpuProfiler::Zone zone(input.profiler, input.cmd, FrameSlot { input.frameSlot }, "ReSTIR PT/Spatial pre-pass");
+
   const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
 
   TraceReSTIRRayTracingPass(input.cmd, m_SpatialPrepass, m_PipelineLayout, *m_DescPack.SetPtr(frameSetIndex), kReSTIRPTPushConstantStages, pushConstant, input.output.extent);
@@ -755,6 +785,8 @@ void ReSTIRPTRenderer::RunSpatialPrepass(const RenderInput& input, const shaderi
 
 void ReSTIRPTRenderer::RunFinalShadingPass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
+  const GpuProfiler::Zone zone(input.profiler, input.cmd, FrameSlot { input.frameSlot }, "ReSTIR PT/Final shading");
+
   const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
 
   DispatchReSTIRComputePass(input.cmd, m_FinalShadingPipeline, m_PipelineLayout, *m_DescPack.SetPtr(frameSetIndex), kReSTIRPTPushConstantStages, pushConstant, input.output.extent, kComputeGroupSize);
@@ -762,6 +794,8 @@ void ReSTIRPTRenderer::RunFinalShadingPass(const RenderInput& input, const shade
 
 void ReSTIRPTRenderer::RunLightTilePass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
+  const GpuProfiler::Zone zone(input.profiler, input.cmd, FrameSlot { input.frameSlot }, "ReSTIR PT/Light tiles");
+
   const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
 
   // The dispatch is shaped by the tile table, not the viewport: one thread per presampled light, x along a tile and y across tiles.
@@ -772,6 +806,8 @@ void ReSTIRPTRenderer::RunLightTilePass(const RenderInput& input, const shaderio
 
 void ReSTIRPTRenderer::RunDuplicationMapPass(const RenderInput& input, const shaderio::ReSTIRPTPushConstant& pushConstant)
 {
+  const GpuProfiler::Zone zone(input.profiler, input.cmd, FrameSlot { input.frameSlot }, "ReSTIR PT/Duplication map");
+
   const uint32_t frameSetIndex = GetReSTIRPTFrameSetIndex(input.frameSlot, m_DescPack.Sets().size());
 
   // The shader tiles its shared-memory window to an 8x8 group, so the dispatch must use that group size and not the shared compute default.
@@ -793,16 +829,11 @@ void ReSTIRPTRenderer::QueryRayTracingProperties()
 {
   m_RtProperties = m_Device->Support().rayTracingProperties;
 
-  // Bounce limit
-  // Vulkan recursion depth counts the primary ray, so path bounces get one less.
-  // The reconnection-length field caps it again: a path longer than that field can represent could not record where it reconnected.
-
-  const uint32_t maxBounceLimit = (m_RtProperties.maxRayRecursionDepth > 0) ? (m_RtProperties.maxRayRecursionDepth - 1u) : 0u;
-
-  m_PipelineBounceLimit = std::min(std::min(kRequestedMaxBounces, maxBounceLimit), uint32_t(RESTIR_PT_MAX_BOUNCES));
-
-  // Settings chosen before the device was queried may exceed what it supports.
-  m_Settings.initialSampling.maxBounces = std::min(m_Settings.initialSampling.maxBounces, m_PipelineBounceLimit);
+  // Every pass pipeline is created with the same fixed recursion depth, so the device only has to support that one.
+  if(m_RtProperties.maxRayRecursionDepth < kPipelineRecursionDepth)
+  {
+    rtpt::CheckVk(VK_ERROR_FEATURE_NOT_PRESENT, "ReSTIRPTRenderer::QueryRayTracingProperties(maxRayRecursionDepth)");
+  }
 }
 
 void ReSTIRPTRenderer::CreateDescriptorSetLayout()
@@ -900,24 +931,21 @@ void ReSTIRPTRenderer::CreateParameterBuffers()
 
 void ReSTIRPTRenderer::CreateInitialSamplingPipeline()
 {
-  // Initial sampling recurses once per bounce, so the pipeline's recursion budget must cover the primary ray plus every bounce the UI can request.
-  CreateReSTIRRayTracingPass(*m_GpuResources, m_Diagnostics, m_RtProperties, m_PipelineLayout, GetInitialSamplingShaderCode(), std::max(1u, m_PipelineBounceLimit + 1u), "ReSTIR PT Initial Sampling Pipeline", m_InitialSamplingPass);
+  // Initial sampling traces every bounce from its ray generation loop, so its recursion depth stays fixed however long paths get.
+  CreateReSTIRRayTracingPass(*m_GpuResources, m_Diagnostics, m_RtProperties, m_PipelineLayout, GetInitialSamplingShaderCode(), kPipelineRecursionDepth, "ReSTIR PT Initial Sampling Pipeline", m_InitialSamplingPass);
 }
 
 void ReSTIRPTRenderer::CreateTemporalPipeline()
 {
   // Replay traces one ray per regenerated bounce from the ray generation loop, so the recursion budget stays fixed regardless of path length.
-  CreateReSTIRRayTracingPass(*m_GpuResources, m_Diagnostics, m_RtProperties, m_PipelineLayout, GetTemporalShaderCode(), 2u, "ReSTIR PT Temporal Resampling Pipeline", m_TemporalPass);
+  CreateReSTIRRayTracingPass(*m_GpuResources, m_Diagnostics, m_RtProperties, m_PipelineLayout, GetTemporalShaderCode(), kPipelineRecursionDepth, "ReSTIR PT Temporal Resampling Pipeline", m_TemporalPass);
 }
 
 void ReSTIRPTRenderer::CreateSpatialPipeline()
 {
-  // Recursion budget
-  // The spatial pass and its paired pre-pass use the same fixed recursion budget as temporal reuse.
-  // All three trace only from their ray generation loops, and their closest-hit shaders only record the hit, so they need a single level; the budget of 2 is one more than that.
-
-  CreateReSTIRRayTracingPass(*m_GpuResources, m_Diagnostics, m_RtProperties, m_PipelineLayout, GetSpatialShaderCode(), 2u, "ReSTIR PT Spatial Resampling Pipeline", m_SpatialPass);
-  CreateReSTIRRayTracingPass(*m_GpuResources, m_Diagnostics, m_RtProperties, m_PipelineLayout, GetSpatialPrepassShaderCode(), 2u, "ReSTIR PT Spatial Prepass Pipeline", m_SpatialPrepass);
+  // The spatial pass and its paired pre-pass trace only from their ray generation loops, exactly as temporal reuse does, so they share its recursion budget.
+  CreateReSTIRRayTracingPass(*m_GpuResources, m_Diagnostics, m_RtProperties, m_PipelineLayout, GetSpatialShaderCode(), kPipelineRecursionDepth, "ReSTIR PT Spatial Resampling Pipeline", m_SpatialPass);
+  CreateReSTIRRayTracingPass(*m_GpuResources, m_Diagnostics, m_RtProperties, m_PipelineLayout, GetSpatialPrepassShaderCode(), kPipelineRecursionDepth, "ReSTIR PT Spatial Prepass Pipeline", m_SpatialPrepass);
 }
 
 void ReSTIRPTRenderer::CreateFinalShadingPipeline()

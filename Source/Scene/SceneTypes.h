@@ -85,6 +85,31 @@ struct SceneMaterialOverride
   MaterialAttributes attributes {};
 };
 
+// MaterialDebugOverride
+// Scene-wide debug override that replaces every material's metallic and roughness as it is resolved, so one material response can be inspected across the rasterizer preview and both path tracers.
+// Each channel is switched on independently, which is why the enable flags live beside the values instead of being encoded into them.
+
+struct MaterialDebugOverride
+{
+  // Replaces every material's metalness while overrideMetallic is set.
+  float metallic = 0.0f;
+
+  // Replaces every material's perceptual roughness while overrideRoughness is set.
+  float roughness = 0.5f;
+
+  // Whether the metallic value above is applied.
+  bool overrideMetallic = false;
+
+  // Whether the roughness value above is applied.
+  bool overrideRoughness = false;
+};
+
+// Packs the override into the (metallic, roughness) pair the shaders read, where a negative component tells them to keep the material's own value.
+inline glm::vec2 ResolveMetallicRoughnessOverride(const MaterialDebugOverride& settings)
+{
+  return glm::vec2(settings.overrideMetallic ? settings.metallic : -1.0f, settings.overrideRoughness ? settings.roughness : -1.0f);
+}
+
 // SceneModelEntry
 // One model placed in a scene. A scene can be composed from multiple model entries.
 
